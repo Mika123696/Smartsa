@@ -20,36 +20,19 @@ export default function Sidebar({ currentView, setCurrentView, mobileOpen, setMo
   // Item navigasi berdasarkan role pengguna
   const getNavItems = () => {
     switch (role) {
-      case ROLES.TEACHER:
       case ROLES.LECTURER:
         return [
-          { id: 'dashboard', label: 'Dashboard Pengajar', icon: LayoutDashboard },
+          { id: 'dashboard', label: 'Dashboard Dosen', icon: LayoutDashboard },
           { id: 'classes', label: 'Manajemen Kelas', icon: BookOpen, badge: '2' },
           { id: 'materials', label: 'Pertemuan & Materi', icon: FileText },
           { id: 'grades', label: 'Penilaian & Tugas', icon: Award, badge: '7 Baru' },
           { id: 'ai-assistant', label: 'Teaching Assistant AI', icon: Sparkles, highlight: true },
           { id: 'profile', label: 'Profil & Pengaturan', icon: Settings },
         ];
-      case ROLES.ADMIN:
-        return [
-          { id: 'dashboard', label: 'Dashboard Administrasi', icon: LayoutDashboard },
-          { id: 'classes', label: 'Manajemen Kelas Global', icon: BookOpen },
-          { id: 'users-manage', label: 'Verifikasi Pengguna', icon: Users, badge: '3 Verif' },
-          { id: 'audit-logs', label: 'Audit Security Logs', icon: ShieldCheck },
-          { id: 'profile', label: 'Pengaturan Sistem', icon: Settings },
-        ];
-      case ROLES.GENERAL:
-        return [
-          { id: 'dashboard', label: 'Dashboard Mandiri', icon: LayoutDashboard },
-          { id: 'classes', label: 'Kelas Saya', icon: BookOpen },
-          { id: 'bookmarks', label: 'Materi Disimpan', icon: Bookmark },
-          { id: 'ai-assistant', label: 'Learning Assistant AI', icon: Sparkles, highlight: true },
-          { id: 'profile', label: 'Profil Saya', icon: Settings },
-        ];
       case ROLES.STUDENT:
       default:
         return [
-          { id: 'dashboard', label: 'Dashboard Belajar', icon: LayoutDashboard },
+          { id: 'dashboard', label: 'Dashboard Mahasiswa', icon: LayoutDashboard },
           { id: 'classes', label: 'Kelas Saya', icon: BookOpen, badge: '3' },
           { id: 'grades', label: 'Riwayat Nilai', icon: Award },
           { id: 'ai-assistant', label: 'Learning Assistant AI', icon: Sparkles, highlight: true },

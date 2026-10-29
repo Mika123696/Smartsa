@@ -12,11 +12,8 @@ export const translations = {
     nav_profile: 'Profil',
 
     // Roles
-    role_student: 'Mahasiswa / Siswa',
-    role_teacher: 'Guru',
+    role_student: 'Mahasiswa',
     role_lecturer: 'Dosen',
-    role_general: 'Pengguna Umum',
-    role_admin: 'Administrator',
 
     // Header
     header_tagline: 'BELAJAR / BERKEMBANG / MEMBANGUN HARI ESOK',
@@ -38,6 +35,16 @@ export const translations = {
     attendance_banner_subject: 'Pemrograman Web & Perangkat Bergerak',
     attendance_banner_location: 'Ruang Lab Komputer 03 • Dosen: Dr. Aris Kusuma',
     attendance_btn: 'Presensi',
+    attendance_progress_title: 'PROGRES RIWAYAT PERTEMUAN // ATTENDANCE TELEMETRY',
+    attendance_progress_sub: 'Progres riwayat presensi bertambah +6% otomatis setiap 1 pertemuan berhasil di-scan',
+    scan_barcode_btn: 'Scan Barcode (+6%)',
+    show_barcode_btn: 'Barcode Kelas',
+    barcode_modal_title: 'PRESENSI BARCODE PERTEMUAN',
+    barcode_modal_sub: 'Pindai barcode untuk memverifikasi kehadiran & menambah progres riwayat +6%',
+    barcode_trigger_btn: 'PINDAI BARCODE SEKARANG',
+    barcode_success_title: 'PRESENSI BERHASIL DIVERIFIKASI!',
+    barcode_success_desc: 'Kehadiran pertemuan telah dicatat. Progres riwayat Anda bertambah +6%.',
+    tab_history_barcode: 'RIWAYAT & BARCODE (+6%)',
     study_menu_title: 'Menu Belajar',
     study_menu_sub: 'Pilih modul kompetensi untuk melanjutkan sesi pembelajaran',
     card_pretest_title: 'Pretest Diagnostik',
@@ -194,6 +201,14 @@ export const translations = {
     lang_en_sub: 'International Language (EN) 🇬🇧',
     lang_active: 'AKTIF',
     lang_switched_toast: 'Bahasa antarmuka berhasil diubah ke Bahasa Indonesia 🇮🇩',
+    theme_settings_title: 'PENGATURAN TEMA TAMPILAN',
+    theme_mode_label: 'Mode Tampilan Aplikasi',
+    theme_mode_subtitle: 'Pilih mode tampilan gelap atau terang sesuai kenyamanan visual Anda',
+    theme_dark: 'Mode Gelap',
+    theme_dark_desc: 'Tema Taktikal Malam (Default)',
+    theme_light: 'Mode Terang',
+    theme_light_desc: 'Tema Terang Bersih & Kontras',
+    theme_changed_toast: 'Mode tampilan berhasil diubah ke',
     security_title: 'PENGATURAN KEAMANAN & OTENTIKASI',
     mfa_title: 'Autentikasi Dua Faktor (MFA)',
     mfa_desc: 'Kirim kode keamanan OTP ke email saat login',
@@ -232,11 +247,8 @@ export const translations = {
     nav_profile: 'Profile',
 
     // Roles
-    role_student: 'Student / College',
-    role_teacher: 'Teacher',
-    role_lecturer: 'Lecturer / Prof',
-    role_general: 'General User',
-    role_admin: 'Administrator',
+    role_student: 'Student',
+    role_lecturer: 'Lecturer',
 
     // Header
     header_tagline: 'LEARN / GROW / BUILD TOMORROW',
@@ -258,6 +270,16 @@ export const translations = {
     attendance_banner_subject: 'Web & Mobile Application Development',
     attendance_banner_location: 'Computer Lab Room 03 • Lecturer: Dr. Aris Kusuma',
     attendance_btn: 'Attendance',
+    attendance_progress_title: 'ATTENDANCE TELEMETRY & PROGRESS',
+    attendance_progress_sub: 'Attendance history increases by +6% for each verified meeting scan',
+    scan_barcode_btn: 'Scan Barcode (+6%)',
+    show_barcode_btn: 'Class Barcode',
+    barcode_modal_title: 'MEETING BARCODE ATTENDANCE',
+    barcode_modal_sub: 'Scan barcode to verify attendance & increase history progress by +6%',
+    barcode_trigger_btn: 'SCAN BARCODE NOW',
+    barcode_success_title: 'ATTENDANCE SUCCESSFULLY VERIFIED!',
+    barcode_success_desc: 'Meeting attendance has been recorded. Your history progress increased by +6%.',
+    tab_history_barcode: 'HISTORY & BARCODE (+6%)',
     study_menu_title: 'Study Menu',
     study_menu_sub: 'Select competency modules to continue your learning journey',
     card_pretest_title: 'Diagnostic Pretest',
@@ -414,6 +436,14 @@ export const translations = {
     lang_en_sub: 'International Language (EN) 🇬🇧',
     lang_active: 'ACTIVE',
     lang_switched_toast: 'Interface language successfully changed to English 🇬🇧',
+    theme_settings_title: 'DISPLAY THEME SETTINGS',
+    theme_mode_label: 'Application Display Mode',
+    theme_mode_subtitle: 'Choose dark or light display mode for your visual comfort',
+    theme_dark: 'Dark Mode',
+    theme_dark_desc: 'Tactical Night Theme (Default)',
+    theme_light: 'Light Mode',
+    theme_light_desc: 'Clean Light & High Contrast',
+    theme_changed_toast: 'Display theme successfully changed to',
     security_title: 'SECURITY & AUTHENTICATION SETTINGS',
     mfa_title: 'Two-Factor Authentication (MFA)',
     mfa_desc: 'Send OTP security code to email upon login',
@@ -467,13 +497,10 @@ export function LanguageProvider({ children }) {
   const getRoleLabel = (role) => {
     const roleKeys = {
       [ROLES.STUDENT]: 'role_student',
-      [ROLES.TEACHER]: 'role_teacher',
       [ROLES.LECTURER]: 'role_lecturer',
-      [ROLES.GENERAL]: 'role_general',
-      [ROLES.ADMIN]: 'role_admin',
     };
     const key = roleKeys[role];
-    return key ? t(key) : role;
+    return key ? t(key) : (role === ROLES.LECTURER ? t('role_lecturer') : t('role_student'));
   };
 
   return (

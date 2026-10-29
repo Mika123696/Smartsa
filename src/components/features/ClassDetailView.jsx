@@ -11,7 +11,6 @@ import {
   AlertTriangle,
   Sparkles,
   HelpCircle,
-  Users,
   Clock,
   Upload,
   File,
@@ -22,6 +21,7 @@ import {
 
 export default function ClassDetailView({ classData, onBack, onNavigateAI }) {
   const { t, language } = useLanguage();
+
   const [activeTab, setActiveTab] = useState('meetings'); // 'meetings' | 'material' | 'video' | 'pdf' | 'exam' | 'tasks'
   const [selectedMeeting, setSelectedMeeting] = useState(classData.meetings?.[0] || null);
 
@@ -339,75 +339,84 @@ export default function ClassDetailView({ classData, onBack, onNavigateAI }) {
       {activeTab === 'meetings' && (
         <div className="bg-[#121822] p-5 rounded-xl border border-[#232f42] space-y-4">
           <div className="flex items-center justify-between border-b border-[#1b263b] pb-3">
-            <h3 className="text-xs font-mono font-bold text-[#f59e0b] uppercase tracking-wider">
-              // DAFTAR PERTEMUAN BERTINGKAT
+            <h3 className="text-xs font-mono font-bold text-[#f59e0b] uppercase tracking-wider flex items-center gap-1.5">
+              <BookOpen className="w-4 h-4 text-[#f59e0b]" />
+              <span>{language === 'en' ? '// CLASS SESSIONS & SYLLABUS' : '// DAFTAR PERTEMUAN KELAS'}</span>
             </h3>
-            <span className="text-[10px] font-mono text-slate-400">PRASYARAT PRETEST WAJIB</span>
+            <span className="text-[10px] font-mono text-[#00e5ff] bg-[#00e5ff]/10 border border-[#00e5ff]/30 px-2 py-0.5 rounded-xs">
+              {classData.meetings?.length || 16} {language === 'en' ? 'SESSIONS' : 'PERTEMUAN'}
+            </span>
           </div>
 
           <div className="space-y-2.5">
-            {classData.meetings?.map((meet) => (
-              <div
-                key={meet.id}
-                className={`p-3.5 rounded-sm border transition flex flex-col sm:flex-row sm:items-center justify-between gap-3 ${
-                  meet.status === 'completed'
-                    ? 'border-emerald-500/40 bg-emerald-950/20'
-                    : meet.status === 'in_progress'
-                    ? 'border-[#f59e0b]/50 bg-[#172133]'
-                    : 'border-[#1b2538] bg-[#0b101a] opacity-60'
-                }`}
-              >
-                <div className="flex items-start gap-3">
-                  <div
-                    className={`w-7 h-7 rounded-xs flex items-center justify-center font-mono font-bold text-xs shrink-0 ${
-                      meet.status === 'completed'
-                        ? 'bg-emerald-500 text-black'
-                        : meet.status === 'in_progress'
-                        ? 'bg-[#f59e0b] text-black'
-                        : 'bg-[#1e293d] text-slate-400'
-                    }`}
-                  >
-                    0{meet.order}
-                  </div>
-                  <div>
-                    <h4 className="text-xs font-mono font-bold text-slate-100">{meet.title}</h4>
-                    <p className="text-[10px] font-mono text-slate-400 mt-0.5">Jadwal: {meet.date}</p>
-                    <div className="flex flex-wrap gap-1.5 mt-2 font-mono">
-                      <span className="text-[9px] bg-[#0d1421] border border-[#212f45] px-1.5 py-0.5 rounded-xs text-slate-300">
-                        {meet.pretestDone ? '✓ PRETEST SELESAI' : '✕ PRETEST BELUM'}
-                      </span>
-                      <span className="text-[9px] bg-[#0d1421] border border-[#212f45] px-1.5 py-0.5 rounded-xs text-slate-300">
-                        {meet.posttestDone ? '✓ POST-TEST SELESAI' : '✕ POST-TEST BELUM'}
-                      </span>
-                      {meet.score && (
-                        <span className="text-[9px] bg-emerald-950/60 border border-emerald-500/40 text-emerald-300 font-bold px-1.5 py-0.5 rounded-xs">
-                          SKOR: {meet.score}
+            {classData.meetings?.map((meet) => {
+              const isCurrent = meet.status === 'in_progress';
+              const isLocked = meet.status === 'locked';
+              return (
+                <div
+                  key={meet.id}
+                  className={`p-3.5 rounded-sm border transition flex flex-col sm:flex-row sm:items-center justify-between gap-3 ${
+                    isCurrent
+                      ? 'border-[#f59e0b]/50 bg-[#172133]'
+                      : 'border-[#1b2538] bg-[#0b101a]'
+                  }`}
+                >
+                  <div className="flex items-start gap-3">
+                    <div
+                      className={`w-7 h-7 rounded-xs flex items-center justify-center font-mono font-bold text-xs shrink-0 ${
+                        isCurrent
+                          ? 'bg-[#f59e0b] text-black'
+                          : 'bg-[#1e293d] text-slate-400'
+                      }`}
+                    >
+                      {meet.order < 10 ? `0${meet.order}` : meet.order}
+                    </div>
+                    <div>
+                      <h4 className="text-xs font-mono font-bold text-slate-100">{meet.title}</h4>
+                      <p className="text-[10px] font-mono text-slate-400 mt-0.5">
+                        {language === 'en' ? 'Schedule' : 'Jadwal'}: {meet.date}
+                      </p>
+                      
+                      <div className="flex flex-wrap items-center gap-1.5 mt-2 font-mono">
+                        <span className="text-[9px] bg-[#0d1421] border border-[#212f45] px-1.5 py-0.5 rounded-xs text-slate-300">
+                          {meet.pretestDone ? '✓ PRETEST SELESAI' : '✕ PRETEST BELUM'}
                         </span>
-                      )}
+                        <span className="text-[9px] bg-[#0d1421] border border-[#212f45] px-1.5 py-0.5 rounded-xs text-slate-300">
+                          {meet.posttestDone ? '✓ POST-TEST SELESAI' : '✕ POST-TEST BELUM'}
+                        </span>
+                        {meet.score && (
+                          <span className="text-[9px] bg-emerald-950/60 border border-emerald-500/40 text-emerald-300 font-bold px-1.5 py-0.5 rounded-xs">
+                            SKOR: {meet.score}
+                          </span>
+                        )}
+                      </div>
                     </div>
                   </div>
-                </div>
 
-                <div className="flex items-center gap-2 self-end sm:self-center font-mono">
-                  {meet.status === 'locked' ? (
-                    <span className="text-[10px] text-slate-400 flex items-center gap-1">
-                      <Lock className="w-3 h-3" /> TERKUNCI
-                    </span>
-                  ) : (
-                    <button
-                      onClick={() => {
-                        setSelectedMeeting(meet);
-                        setActiveTab('material');
-                      }}
-                      className="bg-[#f59e0b] hover:bg-[#d97706] text-black text-[11px] font-bold px-3 py-1.5 rounded-xs transition uppercase"
-                    >
-                      Buka Modul
-                    </button>
-                  )}
+                  <div className="flex items-center gap-2 self-end sm:self-center font-mono">
+                    {isLocked ? (
+                      <span className="text-[10px] text-slate-400 flex items-center gap-1">
+                        <Lock className="w-3 h-3" /> {language === 'en' ? 'LOCKED' : 'TERKUNCI'}
+                      </span>
+                    ) : (
+                      <button
+                        onClick={() => {
+                          setSelectedMeeting(meet);
+                          setActiveTab('material');
+                        }}
+                        className="bg-[#1c2432] hover:bg-[#253245] text-slate-200 border border-slate-700 text-[10px] font-bold px-3 py-1.5 rounded-xs transition uppercase"
+                      >
+                        {language === 'en' ? 'Open Module' : 'Buka Modul'}
+                      </button>
+                    )}
+                  </div>
                 </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
+
+          {/* Spacer ekstra bawah agar silabus pertemuan paling bawah bisa di-scroll bebas melewati navbar */}
+          <div className="h-28 w-full" aria-hidden="true" />
         </div>
       )}
 
@@ -865,6 +874,9 @@ export default function ClassDetailView({ classData, onBack, onNavigateAI }) {
           </div>
         </div>
       )}
+
+      {/* Spacer ekstra bawah agar seluruh detail modul bisa di-scroll bebas melewati navbar */}
+      <div className="h-28 w-full" aria-hidden="true" />
     </div>
   );
 }

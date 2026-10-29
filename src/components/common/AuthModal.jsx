@@ -356,9 +356,7 @@ export default function AuthModal({ isOpen, onClose }) {
                     className="w-full px-3 py-2 text-xs bg-[#0b0f17] border border-slate-700 rounded-md text-slate-100 focus:outline-none focus:border-[#f59e0b]"
                   >
                     <option value={ROLES.STUDENT}>{getRoleLabel(ROLES.STUDENT)}</option>
-                    <option value={ROLES.TEACHER}>{getRoleLabel(ROLES.TEACHER)}</option>
                     <option value={ROLES.LECTURER}>{getRoleLabel(ROLES.LECTURER)}</option>
-                    <option value={ROLES.GENERAL}>{getRoleLabel(ROLES.GENERAL)}</option>
                   </select>
                 </div>
 
@@ -382,8 +380,6 @@ export default function AuthModal({ isOpen, onClose }) {
                   <label className="block text-[11px] font-mono font-bold text-slate-300 mb-1">
                     {selectedRole === ROLES.LECTURER
                       ? 'NIDN / NOMOR INDUK DOSEN'
-                      : selectedRole === ROLES.TEACHER
-                      ? 'NIP / NOMOR INDUK PEGAWAI'
                       : 'NIM / NOMOR INDUK MAHASISWA'}
                   </label>
                   <div className="relative">
@@ -394,8 +390,6 @@ export default function AuthModal({ isOpen, onClose }) {
                       placeholder={
                         selectedRole === ROLES.LECTURER
                           ? 'Contoh: 0012058402'
-                          : selectedRole === ROLES.TEACHER
-                          ? 'Contoh: 198504122010012003'
                           : 'Contoh: 25050974001'
                       }
                       value={nim}
@@ -489,7 +483,7 @@ export default function AuthModal({ isOpen, onClose }) {
               </span>
               <span className="text-slate-500">{language === 'en' ? '1-Click Direct' : '1-Klik Langsung'}</span>
             </div>
-            <div className="grid grid-cols-3 gap-2 text-[10px] font-mono font-bold">
+            <div className="grid grid-cols-2 gap-2 text-[10px] font-mono font-bold">
               <button
                 type="button"
                 onClick={() => handleQuickDemo('student')}
@@ -503,13 +497,6 @@ export default function AuthModal({ isOpen, onClose }) {
                 className="bg-[#1a222e] hover:bg-[#253245] border border-slate-700 py-1.5 px-2 rounded-sm text-slate-300 hover:text-[#f59e0b] transition text-center"
               >
                 {getRoleLabel(ROLES.LECTURER)}
-              </button>
-              <button
-                type="button"
-                onClick={() => handleQuickDemo('admin')}
-                className="bg-[#1a222e] hover:bg-[#253245] border border-slate-700 py-1.5 px-2 rounded-sm text-slate-300 hover:text-[#f59e0b] transition text-center"
-              >
-                {getRoleLabel(ROLES.ADMIN)}
               </button>
             </div>
           </div>

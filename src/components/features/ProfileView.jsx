@@ -1,6 +1,7 @@
 import { useState, useRef } from 'react';
 import { useAuth } from '../../context/useAuth';
 import { useLanguage } from '../../context/LanguageContext';
+import { useTheme } from '../../context/ThemeContext';
 import { ROLES, ROLE_LABELS, ROLE_BADGE_COLORS } from '../../constants/roles';
 import {
   Shield,
@@ -23,6 +24,8 @@ import {
   Globe,
   Languages,
   Edit3,
+  Sun,
+  Moon,
 } from 'lucide-react';
 
 // Preset avatar untuk pilihan cepat
@@ -43,19 +46,9 @@ const PRESET_AVATARS = [
     url: 'https://images.unsplash.com/photo-1570295999919-56ceb5ecca61?auto=format&fit=crop&w=300&q=80',
   },
   {
-    id: 'teacher_f',
-    name: 'Pendidik Kreatif',
+    id: 'lecturer_f',
+    name: 'Dosen Sains',
     url: 'https://images.unsplash.com/photo-1580489944761-15a19d654956?auto=format&fit=crop&w=300&q=80',
-  },
-  {
-    id: 'operator',
-    name: 'Cyber Operator',
-    url: 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&w=300&q=80',
-  },
-  {
-    id: 'developer',
-    name: 'Software Engineer',
-    url: 'https://images.unsplash.com/photo-1507003211169-0a1dd7228f2d?auto=format&fit=crop&w=300&q=80',
   },
 ];
 
@@ -100,6 +93,7 @@ const compressImage = (file, maxWidth = 400, maxHeight = 400, quality = 0.85) =>
 export default function ProfileView({ onOpenAuth }) {
   const { userProfile, currentUser, role, logout, isDemoMode, updateUserPhoto, updateUserProfileData } = useAuth();
   const { language, setLanguage, t } = useLanguage();
+  const { theme, setTheme } = useTheme();
 
   const [mfaEnabled, setMfaEnabled] = useState(false);
   const [feedback, setFeedback] = useState(null);
@@ -145,7 +139,6 @@ export default function ProfileView({ onOpenAuth }) {
   // Label ID Akademik sesuai Role
   const getIdLabel = () => {
     if (role === ROLES.LECTURER) return t('id_lecturer');
-    if (role === ROLES.TEACHER) return t('id_teacher');
     return t('id_student');
   };
 
@@ -158,6 +151,16 @@ export default function ProfileView({ onOpenAuth }) {
       text: lang === 'id' 
         ? 'Bahasa antarmuka berhasil diubah ke Bahasa Indonesia 🇮🇩' 
         : 'Interface language successfully changed to English 🇬🇧',
+    });
+  };
+
+  // Handler Ganti Mode Gelap / Terang
+  const handleThemeChange = (newTheme) => {
+    if (newTheme === theme) return;
+    setTheme(newTheme);
+    setFeedback({
+      type: 'success',
+      text: `${t('theme_changed_toast')} ${newTheme === 'dark' ? t('theme_dark') : t('theme_light')}`,
     });
   };
 
@@ -530,6 +533,66 @@ export default function ProfileView({ onOpenAuth }) {
             </button>
           </div>
         </div>
+      </div>
+
+      {/* ========================================================== */}
+      {/* FITUR TEMA TAMPILAN (MODE GELAP & TERANG - 1 KLIK)        */}
+      {/* ========================================================== */}
+      <div 
+        onClick={() => handleThemeChange(theme === 'dark' ? 'light' : 'dark')}
+        className="bg-[#121822] p-4 rounded-xl border border-[#232f42] text-slate-100 flex items-center justify-between gap-3 cursor-pointer hover:border-[#f59e0b]/50 transition shadow-sm select-none"
+      >
+        <div className="flex items-center gap-3">
+          <div className="w-9 h-9 rounded-lg bg-[#18212e] border border-[#283548] flex items-center justify-center shrink-0">
+            {theme === 'dark' ? (
+              <Moon className="w-4 h-4 text-[#f59e0b]" />
+            ) : (
+              <Sun className="w-4 h-4 text-amber-500" />
+            )}
+          </div>
+          <div>
+            <div className="flex items-center gap-2">
+              <span className="text-xs font-bold text-slate-100 font-mono">
+                {t('theme_settings_title', 'MODE TAMPILAN')}
+              </span>
+              <span className="text-[10px] font-mono font-bold text-[#00e5ff] bg-[#00e5ff]/10 px-2 py-0.2 rounded border border-[#00e5ff]/30 uppercase">
+                {theme === 'dark' ? t('theme_dark') : t('theme_light')}
+              </span>
+            </div>
+            <span className="text-[11px] text-slate-400 font-sans block mt-0.5">
+              {language === 'en'
+                ? (theme === 'dark' ? 'Dark Mode active (Click to switch to Light)' : 'Light Mode active (Click to switch to Dark)')
+                : (theme === 'dark' ? 'Mode Gelap aktif (Klik untuk beralih ke Terang)' : 'Mode Terang aktif (Klik untuk beralih ke Gelap)')}
+            </span>
+          </div>
+        </div>
+
+        {/* Sakelar Toggle 1-Klik */}
+        <button
+          type="button"
+          onClick={(e) => {
+            e.stopPropagation();
+            handleThemeChange(theme === 'dark' ? 'light' : 'dark');
+          }}
+          className={`relative inline-flex h-8 w-15 items-center rounded-full transition-colors duration-300 p-1 shrink-0 cursor-pointer ${
+            theme === 'light' ? 'bg-[#f59e0b]' : 'bg-[#1b2535] border border-slate-700'
+          }`}
+          title={theme === 'dark' ? 'Beralih ke Mode Terang' : 'Beralih ke Mode Gelap'}
+        >
+          <span
+            className={`inline-flex h-6 w-6 transform items-center justify-center rounded-full transition-all duration-300 shadow-md ${
+              theme === 'light'
+                ? 'translate-x-7 bg-white text-amber-500'
+                : 'translate-x-0 bg-[#0b101a] text-[#f59e0b]'
+            }`}
+          >
+            {theme === 'light' ? (
+              <Sun className="w-3.5 h-3.5 stroke-[2.5]" />
+            ) : (
+              <Moon className="w-3.5 h-3.5 stroke-[2.5]" />
+            )}
+          </span>
+        </button>
       </div>
 
       {/* Keamanan & MFA */}

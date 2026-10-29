@@ -6,8 +6,11 @@ import {
   CheckCircle2,
   X,
   Camera,
+  Barcode,
+  TrendingUp,
 } from 'lucide-react';
 import { DEMO_SUBJECTS } from '../../services/mockData';
+import { getClassAttendance, recordMeetingAttendance } from '../../services/attendanceService';
 
 export default function ScheduleTab() {
   const { t } = useLanguage();
@@ -15,6 +18,7 @@ export default function ScheduleTab() {
   const [selectedHistorySubject, setSelectedHistorySubject] = useState(null);
   const [qrScanned, setQrScanned] = useState(false);
   const [isScanning, setIsScanning] = useState(false);
+  const [lastScanResult, setLastScanResult] = useState(null);
 
   // Pengelompokan Jadwal Berdasarkan Hari
   const days = ['Senin', 'Selasa', 'Rabu', 'Kamis', 'Jumat'];
@@ -34,14 +38,23 @@ export default function ScheduleTab() {
     setSelectedQRSubject(subj);
     setQrScanned(false);
     setIsScanning(false);
+    setLastScanResult(null);
   };
 
   const handleTriggerScan = () => {
+    if (!selectedQRSubject) return;
     setIsScanning(true);
     setTimeout(() => {
+      const res = recordMeetingAttendance(
+        selectedQRSubject.id,
+        1,
+        `Pertemuan 01: ${selectedQRSubject.title}`,
+        `${selectedQRSubject.code}-M01-SCAN-1047`
+      );
+      setLastScanResult(res);
       setIsScanning(false);
       setQrScanned(true);
-    }, 1500);
+    }, 1200);
   };
 
   return (
@@ -113,6 +126,9 @@ export default function ScheduleTab() {
         })}
       </div>
 
+      {/* Spacer ekstra di bagian bawah agar kartu hari terakhir (Jumat/Friday) bisa di-scroll jauh ke atas dan tidak tertutup navbar */}
+      <div className="h-28 w-full" aria-hidden="true" />
+
       {/* Modal Presensi via QR */}
       {selectedQRSubject && (
         <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4 z-50">
@@ -162,23 +178,26 @@ export default function ScheduleTab() {
                   </button>
                 </div>
               ) : (
-                <div className="py-4 space-y-3">
-                  <div className="w-16 h-16 bg-emerald-950/60 text-emerald-400 border border-emerald-500/40 rounded-full flex items-center justify-center mx-auto text-3xl font-bold">
+                <div className="py-4 space-y-3 font-mono">
+                  <div className="w-16 h-16 bg-emerald-950/60 text-emerald-400 border border-emerald-500/40 rounded-full flex items-center justify-center mx-auto text-3xl font-bold shadow-lg">
                     <CheckCircle2 className="w-10 h-10" />
                   </div>
                   <h4 className="text-base font-bold text-slate-100">
                     {t('qr_scanned_success')}
                   </h4>
-                  <p className="text-xs text-slate-400 leading-relaxed font-mono">
-                    Status: <strong className="text-emerald-400">{t('history_status_present')}</strong>
-                    <br />
-                    {t('history_status_verified')}
-                  </p>
+                  <div className="p-2.5 bg-[#0a111a] border border-emerald-500/30 rounded-lg text-xs space-y-1">
+                    <p className="text-emerald-400 font-bold">
+                      {lastScanResult?.message || 'Presensi Berhasil Dicatat!'}
+                    </p>
+                    <p className="text-[11px] text-[#00e5ff] font-bold">
+                      +{lastScanResult?.addedPercent || 6}% PROGRES RIWAYAT DITAMBAHKAN
+                    </p>
+                  </div>
                   <button
                     onClick={() => setSelectedQRSubject(null)}
-                    className="w-full bg-[#1c2432] hover:bg-[#253042] text-white text-xs font-semibold py-2.5 rounded-xl border border-slate-700 transition mt-2"
+                    className="w-full bg-[#f59e0b] hover:bg-[#d97706] text-black text-xs font-bold py-2.5 rounded-xl transition mt-2 uppercase shadow-md"
                   >
-                    OK
+                    OK / Selesai
                   </button>
                 </div>
               )}
@@ -188,65 +207,75 @@ export default function ScheduleTab() {
       )}
 
       {/* Modal Riwayat Presensi */}
-      {selectedHistorySubject && (
-        <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4 z-50">
-          <div className="bg-white w-full max-w-md rounded-3xl shadow-2xl border border-slate-200 overflow-hidden">
-            <div className="bg-[#005953] text-white p-5 flex items-center justify-between">
-              <div>
-                <h3 className="text-base font-bold">Riwayat Presensi</h3>
-                <p className="text-xs text-teal-200 mt-0.5">{selectedHistorySubject.title}</p>
-              </div>
-              <button
-                onClick={() => setSelectedHistorySubject(null)}
-                className="text-white/80 hover:text-white p-1"
-              >
-                <X className="w-5 h-5" />
-              </button>
-            </div>
-
-            <div className="p-6 space-y-3 max-h-96 overflow-y-auto">
-              <div className="flex items-center justify-between bg-teal-50/60 p-3 rounded-xl border border-teal-100 text-xs">
+      {selectedHistorySubject && (() => {
+        const historyData = getClassAttendance(selectedHistorySubject.id);
+        return (
+          <div className="fixed inset-0 bg-black/80 backdrop-blur-xs flex items-center justify-center p-4 z-50">
+            <div className="bg-[#121822] w-full max-w-md rounded-2xl shadow-2xl border border-[#232f42] overflow-hidden text-slate-100 font-mono">
+              <div className="bg-[#161d2a] p-4 flex items-center justify-between border-b border-[#232f42]">
                 <div>
-                  <span className="font-bold text-slate-800 block">Pertemuan 1</span>
-                  <span className="text-[11px] text-slate-500">Senin, 08:15 WIB</span>
+                  <h3 className="text-sm font-bold text-[#f59e0b] flex items-center gap-1.5">
+                    <Clock className="w-4 h-4 text-[#f59e0b]" />
+                    <span>RIWAYAT PRESENSI (+6%/PERTEMUAN)</span>
+                  </h3>
+                  <p className="text-[11px] text-slate-300 mt-0.5">{selectedHistorySubject.title}</p>
                 </div>
-                <span className="bg-emerald-100 text-emerald-800 text-[10px] font-bold px-2 py-0.5 rounded-md">
-                  Hadir
-                </span>
+                <button
+                  onClick={() => setSelectedHistorySubject(null)}
+                  className="text-slate-400 hover:text-white p-1"
+                >
+                  <X className="w-5 h-5" />
+                </button>
               </div>
 
-              <div className="flex items-center justify-between bg-slate-50 p-3 rounded-xl border border-slate-100 text-xs">
-                <div>
-                  <span className="font-bold text-slate-800 block">Pertemuan 2</span>
-                  <span className="text-[11px] text-slate-500">Senin, 08:05 WIB</span>
+              <div className="p-4 space-y-3">
+                {/* Progress Pill */}
+                <div className="p-3 bg-[#0a1019] border border-[#1d2738] rounded-xl flex items-center justify-between">
+                  <div>
+                    <span className="text-[10px] text-slate-400 uppercase block">Akumulasi Progres</span>
+                    <span className="text-base font-black text-[#00e5ff]">{historyData.progress}%</span>
+                  </div>
+                  <span className="text-xs bg-emerald-950/60 border border-emerald-500/40 text-emerald-300 font-bold px-2 py-0.5 rounded">
+                    {historyData.attendedOrders.length} / 16 Pertemuan Hadir
+                  </span>
                 </div>
-                <span className="bg-emerald-100 text-emerald-800 text-[10px] font-bold px-2 py-0.5 rounded-md">
-                  Hadir
-                </span>
+
+                <div className="space-y-2 max-h-72 overflow-y-auto pr-1">
+                  {historyData.history.length === 0 ? (
+                    <div className="text-center py-6 text-slate-500 text-xs">
+                      Belum ada presensi yang di-scan untuk mata kuliah ini.
+                    </div>
+                  ) : (
+                    historyData.history.map((h) => (
+                      <div
+                        key={h.id}
+                        className="p-2.5 bg-[#0e1522] border border-emerald-500/30 rounded-lg flex items-center justify-between text-xs"
+                      >
+                        <div>
+                          <span className="font-bold text-slate-100 block">{h.meetingTitle}</span>
+                          <span className="text-[10px] text-slate-400">{h.timestamp}</span>
+                        </div>
+                        <span className="bg-emerald-950 text-emerald-400 text-[10px] font-bold px-2 py-0.5 rounded border border-emerald-500/40">
+                          +6% Hadir
+                        </span>
+                      </div>
+                    ))
+                  )}
+                </div>
               </div>
 
-              <div className="flex items-center justify-between bg-slate-50 p-3 rounded-xl border border-slate-100 text-xs">
-                <div>
-                  <span className="font-bold text-slate-800 block">Pertemuan 3</span>
-                  <span className="text-[11px] text-slate-500">Senin, 08:20 WIB</span>
-                </div>
-                <span className="bg-emerald-100 text-emerald-800 text-[10px] font-bold px-2 py-0.5 rounded-md">
-                  Hadir
-                </span>
+              <div className="p-3 bg-[#161d2a] border-t border-[#232f42] text-center">
+                <button
+                  onClick={() => setSelectedHistorySubject(null)}
+                  className="text-xs font-bold text-[#f59e0b] hover:underline uppercase"
+                >
+                  Tutup Riwayat
+                </button>
               </div>
-            </div>
-
-            <div className="p-4 bg-slate-50 border-t border-slate-100 text-center">
-              <button
-                onClick={() => setSelectedHistorySubject(null)}
-                className="text-xs font-semibold text-teal-700 hover:underline"
-              >
-                Kembali
-              </button>
             </div>
           </div>
-        </div>
-      )}
+        );
+      })()}
     </div>
   );
 }

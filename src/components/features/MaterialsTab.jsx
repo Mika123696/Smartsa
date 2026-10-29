@@ -323,6 +323,9 @@ export default function MaterialsTab({ onSelectSubject }) {
               </div>
             );
           })}
+
+          {/* Spacer ekstra bawah agar modul paling bawah bisa di-scroll bebas melewati navbar */}
+          <div className="h-28 w-full" aria-hidden="true" />
         </div>
       )}
 
@@ -489,6 +492,9 @@ export default function MaterialsTab({ onSelectSubject }) {
               );
             })}
           </div>
+
+          {/* Spacer ekstra bawah agar tugas paling bawah bisa di-scroll bebas melewati navbar */}
+          <div className="h-28 w-full" aria-hidden="true" />
         </div>
       )}
 

@@ -14,7 +14,7 @@ import {
 export default function AIAssistantView() {
   const { role } = useAuth();
   const { t, language } = useLanguage();
-  const isTeacher = role === ROLES.TEACHER || role === ROLES.LECTURER || role === ROLES.ADMIN;
+  const isTeacher = role === ROLES.LECTURER;
   const assistantTitle = isTeacher ? 'Teaching Assistant AI' : 'Learning Assistant AI';
 
   const [inputPrompt, setInputPrompt] = useState('');

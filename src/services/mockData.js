@@ -21,34 +21,6 @@ export const DEMO_USERS = {
     photoURL: 'https://images.unsplash.com/photo-1570295999919-56ceb5ecca61?auto=format&fit=crop&w=120&q=80',
     emailVerified: true,
   },
-  teacher: {
-    uid: 'demo_guru_01',
-    email: 'guru@smartsa.sch.id',
-    displayName: 'Siti Nurhaliza, M.Kom.',
-    role: ROLES.TEACHER,
-    institution: 'SMK Negeri 1 Surabaya',
-    nip: '198504122010012003',
-    photoURL: 'https://images.unsplash.com/photo-1580489944761-15a19d654956?auto=format&fit=crop&w=120&q=80',
-    emailVerified: true,
-  },
-  general: {
-    uid: 'demo_umum_01',
-    email: 'learner@gmail.com',
-    displayName: 'Budi Prakoso (Umum)',
-    role: ROLES.GENERAL,
-    institution: 'Pembelajar Mandiri',
-    photoURL: 'https://images.unsplash.com/photo-1492562080023-ab3db95bfbce?auto=format&fit=crop&w=120&q=80',
-    emailVerified: true,
-  },
-  admin: {
-    uid: 'demo_admin_01',
-    email: 'admin@smartsa.edu',
-    displayName: 'Super Administrator',
-    role: ROLES.ADMIN,
-    institution: 'Pusat TI & Siber LMS',
-    photoURL: 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&w=120&q=80',
-    emailVerified: true,
-  },
 };
 
 // Mata Pelajaran / Modul sesuai Screenshot
@@ -157,86 +129,64 @@ export const DEMO_SUBJECTS = [
   },
 ];
 
-export const DEMO_CLASSES = DEMO_SUBJECTS.map((s, idx) => ({
-  id: s.id,
-  name: s.title,
-  code: s.code,
-  description: s.description,
-  instructor: s.lecturer,
-  category: 'Teknologi Informasi',
-  coverImage:
-    idx % 2 === 0
-      ? 'https://images.unsplash.com/photo-1517694712202-14dd9538aa97?auto=format&fit=crop&w=600&q=80'
-      : 'https://images.unsplash.com/photo-1544383835-bda2bc66a55d?auto=format&fit=crop&w=600&q=80',
-  enrolledCount: 38 + idx * 3,
-  maxStudents: 50,
-  progress: 0,
-  meetingsCount: s.materialsCount,
-  completedMeetings: s.completedCount,
-  meetings: [
-    {
-      id: `${s.id}_m1`,
-      order: 1,
-      title: `Modul 1: Pengantar ${s.title}`,
-      status: 'in_progress',
-      date: `${s.day}, ${s.time}`,
-      pretestDone: false,
-      posttestDone: false,
-      hasVideo: true,
-      hasPdf: true,
-      score: null,
-    },
-    {
-      id: `${s.id}_m2`,
-      order: 2,
-      title: `Modul 2: Konsep Dasar & Implementasi`,
-      status: 'locked',
-      date: `Minggu Depan`,
-      pretestDone: false,
-      posttestDone: false,
-      hasVideo: true,
-      hasPdf: true,
-      score: null,
-    },
-  ],
-}));
-
-export const DEMO_DISCUSSIONS = [
-  {
-    id: 'disc_01',
-    author: 'Ahmad Faiz',
-    avatar: 'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?auto=format&fit=crop&w=120&q=80',
-    subject: 'Pemrograman Berorientasi Objek',
-    time: '2 jam yang lalu',
-    content: 'Apakah konsep Polymorphism pada Dart bisa menggunakan implements lebih dari satu abstract class?',
-    likes: 4,
-    replies: [
-      {
-        author: 'Dr. Andi Saputra (Dosen)',
-        role: 'lecturer',
-        time: '1 jam yang lalu',
-        content: 'Bisa! Di Dart, setiap class secara implisit adalah interface, jadi kamu bisa implementasi banyak class sekaligus dengan kata kunci implements.',
-      },
-    ],
-  },
-  {
-    id: 'disc_02',
-    author: 'Dewi Lestari',
-    avatar: 'https://images.unsplash.com/photo-1494790108377-be9c29b29330?auto=format&fit=crop&w=120&q=80',
-    subject: 'Basis Data',
-    time: 'Kemarin, 19:30',
-    content: 'Kapan sebaiknya kita menggunakan denormalisasi pada Cloud Firestore NoSQL?',
-    likes: 7,
-    replies: [
-      {
-        author: 'Ir. Rina Wijaya (Dosen)',
-        role: 'lecturer',
-        time: 'Kemarin, 20:15',
-        content: 'Denormalisasi sangat dianjurkan saat kamu butuh membaca data seringkali dalam satu query tanpa perlu joins yang memakan biaya read tinggi.',
-      },
-    ],
-  },
+const SEMESTER_MEETING_TOPICS = [
+  'Kontrak Kuliah & Pengenalan Arsitektur Perangkat Lunak',
+  'Konsep Fundamental & Fondasi Paradigma Objek',
+  'Struktur Kelas, Entitas & Representasi Memori',
+  'Enkapsulasi, Getter-Setter & Validasi State',
+  'Inheritance & Hierarki Pewarisan Tingkat Lanjut',
+  'Polimorfisme Dinamis & Method Overriding',
+  'Kelas Abstrak, Antarmuka (Interface) & Kontrak API',
+  'Evaluasi Tengah Semester (ETS) & Review Arsitektur',
+  'Penanganan Error, Logging & Exception Boundary',
+  'Asynchronous Programming, Future & Reactive Stream',
+  'Integrasi Cloud Firestore NoSQL & Operasi CRUD',
+  'Manajemen State Global & Real-time Listeners',
+  'Otentikasi Pengguna & Enkripsi Sesi Klien',
+  'Optimasi Kinerja, Caching & Lazy Loading',
+  'Pengujian Unit, Widget Testing & Mocking',
+  'Evaluasi Akhir Semester (EAS) & Gelar Karya Mandiri',
 ];
+
+export const DEMO_CLASSES = DEMO_SUBJECTS.map((s, idx) => {
+  const meetings = SEMESTER_MEETING_TOPICS.map((topic, i) => {
+    const order = i + 1;
+    return {
+      id: `${s.id}_m${order}`,
+      order,
+      title: `Pertemuan ${order < 10 ? '0' + order : order}: ${topic}`,
+      status: order === 1 ? 'in_progress' : (order <= 2 ? 'open' : 'locked'),
+      date: `Minggu ke-${order} (${s.day}, ${s.time})`,
+      barcode: `${s.code}-M${order < 10 ? '0' + order : order}-SCAN-${1000 + order * 47}`,
+      pretestDone: order === 1,
+      posttestDone: false,
+      hasVideo: true,
+      hasPdf: true,
+      score: null,
+    };
+  });
+
+  return {
+    id: s.id,
+    name: s.title,
+    code: s.code,
+    description: s.description,
+    instructor: s.lecturer,
+    category: 'Teknologi Informasi',
+    coverImage:
+      idx % 2 === 0
+        ? 'https://images.unsplash.com/photo-1517694712202-14dd9538aa97?auto=format&fit=crop&w=600&q=80'
+        : 'https://images.unsplash.com/photo-1544383835-bda2bc66a55d?auto=format&fit=crop&w=600&q=80',
+    enrolledCount: 38 + idx * 3,
+    maxStudents: 50,
+    progress: 0,
+    meetingsCount: 16,
+    completedMeetings: 0,
+    meetings,
+  };
+});
+
+export const DEMO_DISCUSSIONS = [];
 
 export const DEMO_AUDIT_LOGS = [
   {

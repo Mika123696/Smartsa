@@ -1,6 +1,7 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { useAuth } from '../../context/useAuth';
 import { useLanguage } from '../../context/LanguageContext';
+import { getClassAttendance } from '../../services/attendanceService';
 import {
   ArrowRight,
   Crosshair,
@@ -13,11 +14,40 @@ import {
   RotateCcw,
   X,
   BookOpen,
+  Barcode,
+  TrendingUp,
 } from 'lucide-react';
 
 export default function StudentDashboard({ onNavigateTab, onSelectActivity }) {
   const { userProfile } = useAuth();
   const { t } = useLanguage();
+
+  // State Progres Riwayat Kehadiran Semester (+6% per scan)
+  const [semesterAttendance, setSemesterAttendance] = useState(() => {
+    const pbo = getClassAttendance('subj_pbo');
+    const pwmb = getClassAttendance('subj_pwmb');
+    const totalAttended = pbo.attendedOrders.length + pwmb.attendedOrders.length;
+    const totalProg = Math.min(100, Math.max(pbo.progress, totalAttended * 6));
+    return {
+      progress: totalProg,
+      attended: totalAttended,
+    };
+  });
+
+  useEffect(() => {
+    const update = () => {
+      const pbo = getClassAttendance('subj_pbo');
+      const pwmb = getClassAttendance('subj_pwmb');
+      const totalAttended = pbo.attendedOrders.length + pwmb.attendedOrders.length;
+      const totalProg = Math.min(100, Math.max(pbo.progress, totalAttended * 6));
+      setSemesterAttendance({
+        progress: totalProg,
+        attended: totalAttended,
+      });
+    };
+    window.addEventListener('smartsa_attendance_updated', update);
+    return () => window.removeEventListener('smartsa_attendance_updated', update);
+  }, []);
 
   // State Modal Timer Sesi Fokus (Pomodoro Taktikal)
   const [isFocusOpen, setIsFocusOpen] = useState(false);
@@ -268,21 +298,21 @@ export default function StudentDashboard({ onNavigateTab, onSelectActivity }) {
               {t('semester_progress_title')}
             </span>
           </div>
-          <span className="text-[10px] font-mono font-bold text-[#00897b] bg-[#00897b]/15 px-2 py-0.5 rounded-xs border border-[#00897b]/30">
-            {t('semester_progress_badge')}
+          <span className="text-[10px] font-mono font-bold text-[#00e5ff] bg-[#00e5ff]/15 px-2 py-0.5 rounded-xs border border-[#00e5ff]/30">
+            {semesterAttendance.progress}% SELESAI (+6%/SCAN)
           </span>
         </div>
 
         <div className="space-y-1.5">
           <div className="w-full bg-[#1e2838] h-2 rounded-full overflow-hidden relative">
             <div
-              className="bg-[#00897b] h-full rounded-full transition-all duration-500 shadow-sm"
-              style={{ width: '42%' }}
+              className="bg-gradient-to-r from-[#00897b] to-[#00e5ff] h-full rounded-full transition-all duration-500 shadow-sm"
+              style={{ width: `${Math.max(6, semesterAttendance.progress)}%` }}
             />
           </div>
           <div className="flex items-center justify-between text-[10px] font-mono text-slate-400">
-            <span>{t('semester_progress_modules')}</span>
-            <span>{t('semester_progress_courses')}</span>
+            <span>{semesterAttendance.attended} Pertemuan Hadir (+6%)</span>
+            <span>4 Mata Kuliah Aktif</span>
           </div>
         </div>
       </div>

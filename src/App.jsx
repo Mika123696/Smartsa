@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { ThemeProvider } from './context/ThemeContext';
 import { AuthProvider } from './context/AuthContext';
 import { LanguageProvider, useLanguage } from './context/LanguageContext';
 import { useAuth } from './context/useAuth';
@@ -14,7 +15,6 @@ import AuthModal from './components/common/AuthModal';
 // Views
 import StudentDashboard from './components/dashboard/StudentDashboard';
 import TeacherDashboard from './components/dashboard/TeacherDashboard';
-import AdminDashboard from './components/dashboard/AdminDashboard';
 import ScheduleTab from './components/features/ScheduleTab';
 import MaterialsTab from './components/features/MaterialsTab';
 import DiscussionTab from './components/features/DiscussionTab';
@@ -99,8 +99,8 @@ function MainApp() {
         return <ProfileView onOpenAuth={() => setAuthModalOpen(true)} />;
       case 'dashboard':
       default:
-        // Jika role Guru/Dosen
-        if (role === ROLES.TEACHER || role === ROLES.LECTURER) {
+        // Jika role Dosen
+        if (role === ROLES.LECTURER) {
           return (
             <TeacherDashboard
               onSelectClass={handleSelectSubject}
@@ -109,11 +109,7 @@ function MainApp() {
             />
           );
         }
-        // Jika role Admin
-        if (role === ROLES.ADMIN) {
-          return <AdminDashboard />;
-        }
-        // Default Mahasiswa & Umum (Presisi 100% Sesuai Screenshot Endfield Academy)
+        // Default Mahasiswa (Presisi 100% Sesuai Screenshot Endfield Academy)
         return (
           <StudentDashboard
             onNavigateTab={(tab) => setActiveTab(tab)}
@@ -130,8 +126,8 @@ function MainApp() {
         {/* Top Header dengan Logo Smartsa & Notification Bell */}
         <MobileHeader onOpenAuth={() => setAuthModalOpen(true)} />
 
-        {/* Area Konten Utama */}
-        <main className="flex-1 p-4 sm:p-5 pb-24 overflow-y-auto">
+        {/* Area Konten Utama - Padding bawah luas agar konten paling bawah bisa di-scroll bebas */}
+        <main className="flex-1 p-4 sm:p-5 pb-36 overflow-y-auto">
           {renderContent()}
         </main>
 
@@ -156,10 +152,12 @@ function MainApp() {
 
 export default function App() {
   return (
-    <LanguageProvider>
-      <AuthProvider>
-        <MainApp />
-      </AuthProvider>
-    </LanguageProvider>
+    <ThemeProvider>
+      <LanguageProvider>
+        <AuthProvider>
+          <MainApp />
+        </AuthProvider>
+      </LanguageProvider>
+    </ThemeProvider>
   );
 }

@@ -60,7 +60,7 @@ export default function Topbar({ currentView, onToggleSidebar, onQuickAction }) 
         </div>
 
         {/* Quick Action Button */}
-        {role === ROLES.STUDENT || role === ROLES.GENERAL ? (
+        {role === ROLES.STUDENT ? (
           <button
             onClick={onQuickAction}
             className="flex items-center gap-1.5 bg-blue-600 hover:bg-blue-500 text-white text-xs font-semibold px-3 py-1.5 rounded-lg shadow-xs transition"

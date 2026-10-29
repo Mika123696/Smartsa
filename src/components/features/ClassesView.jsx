@@ -107,7 +107,7 @@ export default function ClassesView({ onSelectClass }) {
         </div>
 
         <div className="flex gap-2 w-full sm:w-auto justify-end">
-          {role === ROLES.STUDENT || role === ROLES.GENERAL ? (
+          {role === ROLES.STUDENT ? (
             <button
               onClick={() => {
                 setFeedback(null);
