@@ -28,7 +28,7 @@ export default function BottomNav({ activeTab, setActiveTab }) {
             <button
               key={tab.id}
               onClick={() => setActiveTab(tab.id)}
-              className="flex flex-col items-center justify-center py-1 px-3 transition-colors relative group"
+              className="flex flex-col items-center justify-center py-1 px-3 transition-colors relative group cursor-pointer"
             >
               <Icon
                 className={`w-5 h-5 mb-1 transition-all ${

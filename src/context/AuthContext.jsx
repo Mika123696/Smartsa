@@ -23,14 +23,37 @@ const STORAGE_KEYS = {
 };
 
 // Akun terdaftar default dengan NIM & Identitas Resmi
-const PRESET_ACCOUNTS = {
+export const PRESET_ACCOUNTS = {
   'ralfkyardan@gmail.com': {
+    uid: 'user_ralfky_01',
     email: 'ralfkyardan@gmail.com',
     nim: '25050974168',
     displayName: 'Ralfky Ardan',
     institution: 'Universitas Negeri Surabaya',
     role: ROLES.STUDENT,
     emailVerified: true,
+    photoURL: 'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?auto=format&fit=crop&w=120&q=80',
+  },
+  'mhs@smartsa.edu': {
+    uid: 'demo_mhs_01',
+    email: 'mhs@smartsa.edu',
+    nim: '25050974001',
+    displayName: 'Mahasiswa Smartsa',
+    institution: 'Universitas Negeri Surabaya',
+    role: ROLES.STUDENT,
+    emailVerified: true,
+    photoURL: 'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?auto=format&fit=crop&w=120&q=80',
+  },
+  'dosen@smartsa.edu': {
+    uid: 'demo_dsn_01',
+    email: 'dosen@smartsa.edu',
+    nidn: '0012058402',
+    nim: '0012058402',
+    displayName: 'Dr. Andi Saputra, M.Kom',
+    institution: 'Fakultas Teknik Informatika - UNESA',
+    role: ROLES.LECTURER,
+    emailVerified: true,
+    photoURL: 'https://images.unsplash.com/photo-1570295999919-56ceb5ecca61?auto=format&fit=crop&w=120&q=80',
   },
 };
 
@@ -41,10 +64,14 @@ export const getStoredAccounts = () => {
     const parsed = raw ? JSON.parse(raw) : {};
     const accounts = typeof parsed === 'object' && parsed !== null ? parsed : {};
 
-    // Selalu pastikan akun ralfkyardan@gmail.com memiliki NIM 25050974168
-    if (!accounts['ralfkyardan@gmail.com']) {
-      accounts['ralfkyardan@gmail.com'] = { ...PRESET_ACCOUNTS['ralfkyardan@gmail.com'] };
-    } else {
+    // Selalu pastikan akun bawaan Mahasiswa & Dosen terdaftar dengan data valid
+    Object.keys(PRESET_ACCOUNTS).forEach((k) => {
+      if (!accounts[k]) {
+        accounts[k] = { ...PRESET_ACCOUNTS[k] };
+      }
+    });
+
+    if (accounts['ralfkyardan@gmail.com']) {
       accounts['ralfkyardan@gmail.com'].nim = '25050974168';
     }
     return accounts;
@@ -663,17 +690,49 @@ export function AuthProvider({ children }) {
     return sendPasswordResetEmail(auth, (email || '').trim());
   };
 
-  // 7. Ganti Mode Role Demo (Simulasi Cepat untuk Audit)
-  const switchDemoRole = (targetRole) => {
-    const demoProfile = DEMO_USERS[targetRole] || DEMO_USERS.student;
-    const demoObj = {
-      ...demoProfile,
-      isDemoMode: true,
+  // 7. Login Menggunakan Akun Resmi Terdaftar (Mahasiswa / Dosen)
+  const loginWithPresetAccount = (accountKeyOrRole) => {
+    setAuthError(null);
+    const key = (accountKeyOrRole || '').trim().toLowerCase();
+
+    let target = null;
+    if (PRESET_ACCOUNTS[key]) {
+      target = PRESET_ACCOUNTS[key];
+    } else if (key === 'lecturer' || key === 'dosen') {
+      target = PRESET_ACCOUNTS['dosen@smartsa.edu'];
+    } else if (key === 'student' || key === 'mahasiswa') {
+      target = PRESET_ACCOUNTS['ralfkyardan@gmail.com'];
+    } else {
+      const stored = getStoredAccounts();
+      target = stored[key] || PRESET_ACCOUNTS['ralfkyardan@gmail.com'];
+    }
+
+    const authenticatedUser = {
+      uid: target.uid || `user_${Date.now()}`,
+      email: target.email,
+      displayName: target.displayName,
+      photoURL: target.photoURL,
+      emailVerified: true,
     };
-    setUserProfile(demoObj);
-    setRole(targetRole);
-    setIsDemoMode(true);
-    saveActiveProfile(demoObj);
+
+    const authenticatedProfile = {
+      ...target,
+      isDemoMode: false,
+    };
+
+    setCurrentUser(authenticatedUser);
+    setUserProfile(authenticatedProfile);
+    setRole(target.role);
+    setIsDemoMode(false);
+    saveActiveProfile(authenticatedProfile);
+    saveStoredAccount(authenticatedProfile);
+
+    return authenticatedProfile;
+  };
+
+  // Backward-compatible role switch helper that authentically logs into the preset account
+  const switchDemoRole = (targetRole) => {
+    return loginWithPresetAccount(targetRole);
   };
 
   // 8. Update Foto Profil Pengguna
@@ -747,6 +806,8 @@ export function AuthProvider({ children }) {
         logout,
         resetPassword,
         switchDemoRole,
+        loginWithPresetAccount,
+        PRESET_ACCOUNTS,
         updateUserPhoto,
         updateUserProfileData,
       }}

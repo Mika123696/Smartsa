@@ -25,7 +25,6 @@ export default function AuthModal({ isOpen, onClose }) {
     loginWithGoogle,
     loginWithGithub,
     resetPassword,
-    switchDemoRole,
   } = useAuth();
   const { t, getRoleLabel, language } = useLanguage();
 
@@ -164,12 +163,6 @@ export default function AuthModal({ isOpen, onClose }) {
     } finally {
       setSocialLoading(null);
     }
-  };
-
-  // Handler Masuk Cepat Akun Demo (Simulasi)
-  const handleQuickDemo = (roleKey) => {
-    switchDemoRole(roleKey);
-    onClose();
   };
 
   return (
@@ -473,33 +466,6 @@ export default function AuthModal({ isOpen, onClose }) {
                 : t('forgot_submit_btn')}
             </button>
           </form>
-
-          {/* Quick Demo Accounts Pill (Akses Cepat Pengujian) */}
-          <div className="pt-3 border-t border-slate-700/80">
-            <div className="flex items-center justify-between text-[10px] font-mono text-slate-400 mb-2">
-              <span className="flex items-center gap-1">
-                <Sparkles className="w-3 h-3 text-[#f59e0b]" />
-                {language === 'en' ? 'QUICK AUDIT ACCESS:' : 'AKSES CEPAT MODE AUDIT:'}
-              </span>
-              <span className="text-slate-500">{language === 'en' ? '1-Click Direct' : '1-Klik Langsung'}</span>
-            </div>
-            <div className="grid grid-cols-2 gap-2 text-[10px] font-mono font-bold">
-              <button
-                type="button"
-                onClick={() => handleQuickDemo('student')}
-                className="bg-[#1a222e] hover:bg-[#253245] border border-slate-700 py-1.5 px-2 rounded-sm text-slate-300 hover:text-[#f59e0b] transition text-center"
-              >
-                {getRoleLabel(ROLES.STUDENT)}
-              </button>
-              <button
-                type="button"
-                onClick={() => handleQuickDemo('lecturer')}
-                className="bg-[#1a222e] hover:bg-[#253245] border border-slate-700 py-1.5 px-2 rounded-sm text-slate-300 hover:text-[#f59e0b] transition text-center"
-              >
-                {getRoleLabel(ROLES.LECTURER)}
-              </button>
-            </div>
-          </div>
         </div>
 
         {/* Modal Footer / Switch Modes */}
