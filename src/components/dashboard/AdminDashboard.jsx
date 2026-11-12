@@ -1,9 +1,13 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { useAuth } from '../../context/useAuth';
 import { useLanguage } from '../../context/useLanguage';
 import { ROLES } from '../../constants/roles';
 import {
+  deleteClassByAdmin,
   fetchAdminOverviewData,
+  seedStandardClassesByAdmin,
+  updateClassByAdmin,
+  updateUserByAdmin,
   updateUserVerificationByAdmin,
 } from '../../services/lmsFirestoreService';
 import { DEMO_AUDIT_LOGS } from '../../services/mockData';
@@ -16,6 +20,12 @@ import {
   Database,
   Server,
   Cloud,
+  Search,
+  Save,
+  Trash2,
+  PlusCircle,
+  RefreshCw,
+  BookOpen,
 } from 'lucide-react';
 
 const DEMO_VERIFICATION_QUEUE = [
@@ -39,18 +49,31 @@ const DEMO_VERIFICATION_QUEUE = [
   },
 ];
 
-export default function AdminDashboard() {
+export default function AdminDashboard({ onClassesChanged }) {
   const { userProfile, currentUser, role } = useAuth();
   const { t, language } = useLanguage();
 
   const [usersList, setUsersList] = useState([]);
+  const [classesList, setClassesList] = useState([]);
   const [classesCount, setClassesCount] = useState(6);
   const [dataSource, setDataSource] = useState('demo');
   const [loadedAdminUid, setLoadedAdminUid] = useState(null);
   const [verificationQueue, setVerificationQueue] = useState(DEMO_VERIFICATION_QUEUE);
   const [auditLogs, setAuditLogs] = useState(DEMO_AUDIT_LOGS);
   const [confirmAction, setConfirmAction] = useState(null);
+  const [confirmDeleteClass, setConfirmDeleteClass] = useState(null);
   const [toast, setToast] = useState(null);
+
+  // User Management state
+  const [userSearch, setUserSearch] = useState('');
+  const [userDrafts, setUserDrafts] = useState({});
+  const [savingUserId, setSavingUserId] = useState(null);
+
+  // Class Catalog Management state
+  const [classDrafts, setClassDrafts] = useState({});
+  const [savingClassId, setSavingClassId] = useState(null);
+  const [seedingClasses, setSeedingClasses] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
 
   const loading = Boolean(
     currentUser && role === ROLES.ADMIN && loadedAdminUid !== currentUser.uid
@@ -61,6 +84,86 @@ export default function AdminDashboard() {
     setTimeout(() => setToast(null), 3500);
   };
 
+  const appendAuditLog = (action, target, status = 'SUCCESS') => {
+    const newLog = {
+      id: `log_${action}_${Date.now()}`,
+      timestamp: new Date().toLocaleTimeString('id-ID'),
+      actor: userProfile?.displayName || 'Administrator',
+      action,
+      target,
+      status,
+      ip: 'cloud-client',
+    };
+    setAuditLogs((prev) => [newLog, ...prev]);
+  };
+
+  const hydrateDrafts = (users, classes) => {
+    const uDrafts = {};
+    users.forEach((u) => {
+      const r = u.role || ROLES.STUDENT;
+      const idVal =
+        r === ROLES.LECTURER
+          ? u.nidn || u.nim || ''
+          : r === ROLES.ADMIN
+            ? u.nip || u.nim || ''
+            : u.nim || '';
+      uDrafts[u.uid] = { role: r, idNumber: idVal };
+    });
+    setUserDrafts(uDrafts);
+
+    const cDrafts = {};
+    classes.forEach((c) => {
+      cDrafts[c.id] = {
+        instructor: c.instructor || c.lecturer || '',
+        lecturerId: c.lecturerId || '',
+      };
+    });
+    setClassDrafts(cDrafts);
+  };
+
+  const applyOverviewResponse = useCallback((res) => {
+    if (res?.source !== 'firestore') return;
+    const loadedUsers = res.users || [];
+    const loadedClasses = res.classes || [];
+    setDataSource('firestore');
+    setUsersList(loadedUsers);
+    setClassesList(loadedClasses);
+    setClassesCount(loadedClasses.length);
+    hydrateDrafts(loadedUsers, loadedClasses);
+
+    const pendingUsers = loadedUsers
+      .filter(
+        (u) =>
+          u.verificationStatus === 'pending' ||
+          u.requestedRole === ROLES.LECTURER
+      )
+      .map((u) => ({
+        id: u.uid,
+        name: u.displayName || u.email || 'Pengguna',
+        email: u.email || '-',
+        institution: u.institution || 'Institusi Terdaftar',
+        type: u.requestedRole === ROLES.LECTURER ? 'Dosen' : u.role || 'Pendidik',
+        appliedAt: u.createdAt?.toDate
+          ? u.createdAt.toDate().toLocaleString('id-ID')
+          : 'Cloud Firestore',
+        isFirestoreUser: true,
+      }));
+
+    setVerificationQueue(pendingUsers);
+  }, []);
+
+  const loadAdminOverview = useCallback(async () => {
+    if (!currentUser || role !== ROLES.ADMIN) return;
+    setRefreshing(true);
+    try {
+      const res = await fetchAdminOverviewData();
+      applyOverviewResponse(res);
+    } finally {
+      setLoadedAdminUid(currentUser.uid);
+      setRefreshing(false);
+    }
+  }, [currentUser, role, applyOverviewResponse]);
+
   useEffect(() => {
     let mounted = true;
     if (!currentUser || role !== ROLES.ADMIN) {
@@ -69,43 +172,16 @@ export default function AdminDashboard() {
 
     fetchAdminOverviewData()
       .then((res) => {
-        if (!mounted) return;
-        if (res.source === 'firestore') {
-          setDataSource('firestore');
-          setUsersList(res.users || []);
-          setClassesCount(res.classes?.length || 0);
-
-          const pendingUsers = (res.users || [])
-            .filter(
-              (u) =>
-                u.verificationStatus === 'pending' ||
-                u.requestedRole === ROLES.LECTURER
-            )
-            .map((u) => ({
-              id: u.uid,
-              name: u.displayName || u.email || 'Pengguna',
-              email: u.email || '-',
-              institution: u.institution || 'Institusi Terdaftar',
-              type: u.requestedRole === ROLES.LECTURER ? 'Dosen' : u.role || 'Pendidik',
-              appliedAt: u.createdAt?.toDate
-                ? u.createdAt.toDate().toLocaleString('id-ID')
-                : 'Cloud Firestore',
-              isFirestoreUser: true,
-            }));
-
-          setVerificationQueue(pendingUsers);
-        }
+        if (mounted) applyOverviewResponse(res);
       })
       .finally(() => {
-        if (mounted) {
-          setLoadedAdminUid(currentUser.uid);
-        }
+        if (mounted) setLoadedAdminUid(currentUser.uid);
       });
 
     return () => {
       mounted = false;
     };
-  }, [currentUser, role]);
+  }, [currentUser, role, applyOverviewResponse]);
 
   const executeDecision = async ({ item, decision }) => {
     try {
@@ -117,27 +193,153 @@ export default function AdminDashboard() {
       }
 
       setVerificationQueue((prev) => prev.filter((q) => q.id !== item.id));
-      const newLog = {
-        id: `log_${decision}_${item.id}_${Date.now()}`,
-        timestamp: new Date().toLocaleTimeString('id-ID'),
-        actor: userProfile?.displayName || 'Administrator',
-        action: decision === 'approve' ? 'APPROVE_INSTRUCTOR' : 'REJECT_INSTRUCTOR',
-        target: `${item.name} (${item.email})`,
-        status: 'SUCCESS',
-        ip: 'cloud-client',
-      };
-      setAuditLogs((prev) => [newLog, ...prev]);
+      appendAuditLog(
+        decision === 'approve' ? 'APPROVE_INSTRUCTOR' : 'REJECT_INSTRUCTOR',
+        `${item.name} (${item.email})`
+      );
 
       showToast(
         decision === 'approve' ? t('admin_verif_approved') : t('admin_verif_rejected'),
         'success'
       );
+      if (item.isFirestoreUser) {
+        void loadAdminOverview();
+      }
     } catch (err) {
       showToast(err.message || 'Gagal memperbarui status verifikasi.', 'error');
     } finally {
       setConfirmAction(null);
     }
   };
+
+  const handleSaveUserRow = async (user) => {
+    const draft = userDrafts[user.uid];
+    if (!draft) return;
+    setSavingUserId(user.uid);
+    try {
+      const idStr = String(draft.idNumber || '').trim();
+      const updates = {
+        role: draft.role,
+        nim: draft.role === ROLES.STUDENT ? idStr : user.nim || '',
+        nidn: draft.role === ROLES.LECTURER ? idStr : user.nidn || '',
+        nip: draft.role === ROLES.ADMIN ? idStr : user.nip || '',
+      };
+      await updateUserByAdmin(user.uid, updates);
+      setUsersList((prev) =>
+        prev.map((u) => (u.uid === user.uid ? { ...u, ...updates } : u))
+      );
+      appendAuditLog('UPDATE_USER_ROLE', `${user.email || user.uid} -> ${draft.role}`);
+      showToast(
+        language === 'en'
+          ? `User ${user.displayName || user.email} updated in Firestore.`
+          : `Data pengguna ${user.displayName || user.email} berhasil diperbarui.`,
+        'success'
+      );
+    } catch (err) {
+      showToast(err.message || 'Gagal memperbarui pengguna.', 'error');
+    } finally {
+      setSavingUserId(null);
+    }
+  };
+
+  const handleSeedClasses = async () => {
+    if (seedingClasses) return;
+    setSeedingClasses(true);
+    try {
+      const res = await seedStandardClassesByAdmin();
+      setClassesList(res.classes);
+      setClassesCount(res.classes.length);
+      hydrateDrafts(usersList, res.classes);
+      onClassesChanged?.();
+      appendAuditLog(
+        'SEED_CLASSES',
+        `created=${res.createdCount}, skipped=${res.skippedCount}`
+      );
+      showToast(
+        language === 'en'
+          ? `Seeding done: ${res.createdCount} added, ${res.skippedCount} existing.`
+          : `Seeding selesai: ${res.createdCount} kelas baru ditambahkan, ${res.skippedCount} sudah ada.`,
+        'success'
+      );
+    } catch (err) {
+      showToast(err.message || 'Gagal melakukan seeding kelas.', 'error');
+    } finally {
+      setSeedingClasses(false);
+    }
+  };
+
+  const handleSaveClassRow = async (cls) => {
+    const draft = classDrafts[cls.id];
+    if (!draft) return;
+    setSavingClassId(cls.id);
+    try {
+      await updateClassByAdmin(cls.id, {
+        instructor: draft.instructor,
+        lecturerId: draft.lecturerId,
+      });
+      setClassesList((prev) =>
+        prev.map((c) =>
+          c.id === cls.id
+            ? {
+                ...c,
+                instructor: draft.instructor,
+                lecturer: draft.instructor,
+                lecturerId: draft.lecturerId,
+              }
+            : c
+        )
+      );
+      onClassesChanged?.();
+      appendAuditLog('REASSIGN_CLASS', `${cls.code || cls.id} -> ${draft.instructor}`);
+      showToast(
+        language === 'en'
+          ? `Class ${cls.code} instructor updated.`
+          : `Pengampu kelas ${cls.code} berhasil diperbarui.`,
+        'success'
+      );
+    } catch (err) {
+      showToast(err.message || 'Gagal memperbarui kelas.', 'error');
+    } finally {
+      setSavingClassId(null);
+    }
+  };
+
+  const executeDeleteClass = async () => {
+    if (!confirmDeleteClass) return;
+    try {
+      await deleteClassByAdmin(confirmDeleteClass.id);
+      setClassesList((prev) => prev.filter((c) => c.id !== confirmDeleteClass.id));
+      setClassesCount((prev) => Math.max(0, prev - 1));
+      onClassesChanged?.();
+      appendAuditLog('DELETE_CLASS', `${confirmDeleteClass.code} (${confirmDeleteClass.id})`);
+      showToast(
+        language === 'en'
+          ? `Class ${confirmDeleteClass.code} deleted from Firestore.`
+          : `Kelas ${confirmDeleteClass.code} berhasil dihapus dari Firestore.`,
+        'success'
+      );
+    } catch (err) {
+      showToast(err.message || 'Gagal menghapus kelas.', 'error');
+    } finally {
+      setConfirmDeleteClass(null);
+    }
+  };
+
+  const educatorUsers = usersList.filter(
+    (u) => u.role === ROLES.LECTURER || u.role === ROLES.ADMIN
+  );
+
+  const filteredUsers = usersList.filter((u) => {
+    const q = userSearch.trim().toLowerCase();
+    if (!q) return true;
+    return (
+      String(u.displayName || '').toLowerCase().includes(q) ||
+      String(u.email || '').toLowerCase().includes(q) ||
+      String(u.nim || '').toLowerCase().includes(q) ||
+      String(u.nidn || '').toLowerCase().includes(q) ||
+      String(u.nip || '').toLowerCase().includes(q)
+    );
+  });
 
   const totalUsersDisplay = dataSource === 'firestore' ? usersList.length : 1420;
 
@@ -170,6 +372,23 @@ export default function AdminDashboard() {
         cancelLabel={t('dialog_cancel')}
         onConfirm={() => confirmAction && executeDecision(confirmAction)}
         onClose={() => setConfirmAction(null)}
+      />
+
+      <AccessibleDialog
+        isOpen={Boolean(confirmDeleteClass)}
+        variant="danger"
+        title={language === 'en' ? 'Delete Class' : 'Hapus Kelas dari Firestore'}
+        message={
+          confirmDeleteClass
+            ? language === 'en'
+              ? `Delete class "${confirmDeleteClass.name}" (${confirmDeleteClass.code}) permanently?`
+              : `Yakin ingin menghapus kelas "${confirmDeleteClass.name}" (${confirmDeleteClass.code}) dari Cloud Firestore?`
+            : ''
+        }
+        confirmLabel={language === 'en' ? 'Delete' : 'Hapus'}
+        cancelLabel={t('dialog_cancel')}
+        onConfirm={executeDeleteClass}
+        onClose={() => setConfirmDeleteClass(null)}
       />
 
       {/* Welcome Banner */}
@@ -374,6 +593,293 @@ export default function AdminDashboard() {
                     </td>
                   </tr>
                 ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+
+      {/* Live Firestore User Management */}
+      <div className="bg-white dark:bg-[#121822] p-6 rounded-2xl border border-slate-200 dark:border-[#232f42] shadow-xs space-y-4">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+          <div>
+            <h3 className="text-base font-bold text-slate-900 dark:text-slate-100 flex items-center gap-2">
+              <Users className="w-4 h-4 text-blue-500" />
+              {language === 'en'
+                ? 'Live Firestore User & Role Management'
+                : 'Manajemen Pengguna & Peran (Cloud Firestore)'}
+            </h3>
+            <p className="text-xs text-slate-500 dark:text-slate-400">
+              {language === 'en'
+                ? 'Update user roles (student, lecturer, admin) and academic identifiers (NIM/NIDN/NIP) directly in Firestore.'
+                : 'Ubah peran pengguna (student, lecturer, admin) serta nomor identitas akademik (NIM/NIDN/NIP) secara langsung.'}
+            </p>
+          </div>
+          <div className="flex items-center gap-2">
+            <div className="relative">
+              <Search className="w-3.5 h-3.5 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
+              <input
+                type="text"
+                value={userSearch}
+                onChange={(e) => setUserSearch(e.target.value)}
+                placeholder={language === 'en' ? 'Search name / email / ID...' : 'Cari nama / email / NIM...'}
+                className="pl-8 pr-3 py-1.5 text-xs rounded-xl border border-slate-200 dark:border-[#232f42] bg-slate-50 dark:bg-[#0f141e] text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-amber-500/40"
+              />
+            </div>
+            <button
+              type="button"
+              onClick={() => void loadAdminOverview()}
+              disabled={refreshing}
+              className="px-3 py-1.5 text-xs font-semibold rounded-xl border border-slate-200 dark:border-[#232f42] bg-slate-50 dark:bg-[#0f141e] text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-[#1a2232] flex items-center gap-1.5 transition"
+            >
+              <RefreshCw className={`w-3.5 h-3.5 ${refreshing ? 'animate-spin' : ''}`} />
+              {language === 'en' ? 'Refresh' : 'Muat Ulang'}
+            </button>
+          </div>
+        </div>
+
+        {dataSource !== 'firestore' ? (
+          <div className="text-center py-8 bg-slate-50 dark:bg-[#0f141e] rounded-xl border border-dashed border-slate-200 dark:border-[#232f42] text-xs text-slate-500 dark:text-slate-400">
+            {language === 'en'
+              ? 'Connect as an authenticated Admin with Firebase active to manage live Firestore users.'
+              : 'Masuk sebagai Admin terautentikasi dengan Firebase aktif untuk mengelola data pengguna Cloud Firestore.'}
+          </div>
+        ) : filteredUsers.length === 0 ? (
+          <div className="text-center py-8 bg-slate-50 dark:bg-[#0f141e] rounded-xl border border-dashed border-slate-200 dark:border-[#232f42] text-xs text-slate-500 dark:text-slate-400">
+            {language === 'en'
+              ? 'No users match your search query.'
+              : 'Tidak ada pengguna yang sesuai dengan kata kunci pencarian.'}
+          </div>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-left text-xs">
+              <thead className="bg-slate-50 dark:bg-[#0f141e] text-slate-600 dark:text-slate-400 uppercase text-[10px] tracking-wider border-b border-slate-200 dark:border-[#232f42]">
+                <tr>
+                  <th className="py-3 px-3">{language === 'en' ? 'User' : 'Pengguna'}</th>
+                  <th className="py-3 px-3">{language === 'en' ? 'Role' : 'Peran'}</th>
+                  <th className="py-3 px-3">NIM / NIDN / NIP</th>
+                  <th className="py-3 px-3 text-right">{language === 'en' ? 'Action' : 'Aksi'}</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-100 dark:divide-[#232f42]">
+                {filteredUsers.map((u) => {
+                  const draft = userDrafts[u.uid] || {
+                    role: u.role || ROLES.STUDENT,
+                    idNumber: u.nim || u.nidn || u.nip || '',
+                  };
+                  const idLabel =
+                    draft.role === ROLES.LECTURER
+                      ? 'NIDN'
+                      : draft.role === ROLES.ADMIN
+                        ? 'NIP'
+                        : 'NIM';
+                  return (
+                    <tr key={u.uid} className="hover:bg-slate-50 dark:hover:bg-[#161d2a] transition">
+                      <td className="py-3 px-3">
+                        <div className="font-semibold text-slate-900 dark:text-slate-100">
+                          {u.displayName || 'Tanpa Nama'}
+                        </div>
+                        <div className="text-[11px] text-slate-500 dark:text-slate-400 font-mono">
+                          {u.email || u.uid}
+                        </div>
+                      </td>
+                      <td className="py-3 px-3">
+                        <select
+                          value={draft.role}
+                          onChange={(e) => {
+                            const nextRole = e.target.value;
+                            setUserDrafts((prev) => ({
+                              ...prev,
+                              [u.uid]: { ...draft, role: nextRole },
+                            }));
+                          }}
+                          className="px-2.5 py-1.5 rounded-lg border border-slate-200 dark:border-[#232f42] bg-white dark:bg-[#0f141e] text-slate-800 dark:text-slate-200 text-xs font-mono"
+                        >
+                          <option value={ROLES.STUDENT}>student</option>
+                          <option value={ROLES.LECTURER}>lecturer</option>
+                          <option value={ROLES.ADMIN}>admin</option>
+                        </select>
+                      </td>
+                      <td className="py-3 px-3">
+                        <input
+                          type="text"
+                          value={draft.idNumber}
+                          onChange={(e) =>
+                            setUserDrafts((prev) => ({
+                              ...prev,
+                              [u.uid]: { ...draft, idNumber: e.target.value },
+                            }))
+                          }
+                          placeholder={idLabel}
+                          className="w-40 px-2.5 py-1.5 rounded-lg border border-slate-200 dark:border-[#232f42] bg-white dark:bg-[#0f141e] text-slate-800 dark:text-slate-200 text-xs font-mono"
+                        />
+                      </td>
+                      <td className="py-3 px-3 text-right">
+                        <button
+                          type="button"
+                          onClick={() => void handleSaveUserRow(u)}
+                          disabled={savingUserId === u.uid}
+                          className="inline-flex items-center gap-1.5 bg-[#f59e0b] hover:bg-[#d97706] text-black text-xs font-bold px-3 py-1.5 rounded-lg transition disabled:opacity-50"
+                        >
+                          <Save className="w-3.5 h-3.5" />
+                          {savingUserId === u.uid
+                            ? language === 'en'
+                              ? 'Saving...'
+                              : 'Menyimpan...'
+                            : language === 'en'
+                              ? 'Save'
+                              : 'Simpan'}
+                        </button>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+
+      {/* Live Firestore Class Catalog Management */}
+      <div className="bg-white dark:bg-[#121822] p-6 rounded-2xl border border-slate-200 dark:border-[#232f42] shadow-xs space-y-4">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+          <div>
+            <h3 className="text-base font-bold text-slate-900 dark:text-slate-100 flex items-center gap-2">
+              <BookOpen className="w-4 h-4 text-indigo-500" />
+              {language === 'en'
+                ? 'Live Class Catalog & Lecturer Assignment'
+                : 'Manajemen Katalog Kelas & Penugasan Dosen'}
+            </h3>
+            <p className="text-xs text-slate-500 dark:text-slate-400">
+              {language === 'en'
+                ? 'Seed standard LMS courses, reassign lead instructors, or remove classes from Firestore.'
+                : 'Lakukan seeding katalog kelas standar, atur ulang dosen pengampu, atau hapus kelas dari Firestore.'}
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={() => void handleSeedClasses()}
+            disabled={seedingClasses || dataSource !== 'firestore'}
+            className="inline-flex items-center gap-1.5 bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold px-3.5 py-2 rounded-xl shadow-xs transition disabled:opacity-50 shrink-0"
+          >
+            <PlusCircle className="w-4 h-4" />
+            {seedingClasses
+              ? language === 'en'
+                ? 'Seeding...'
+                : 'Memproses Seeding...'
+              : language === 'en'
+                ? 'Seed Standard Classes'
+                : 'Seed Kelas Standar'}
+          </button>
+        </div>
+
+        {dataSource !== 'firestore' ? (
+          <div className="text-center py-8 bg-slate-50 dark:bg-[#0f141e] rounded-xl border border-dashed border-slate-200 dark:border-[#232f42] text-xs text-slate-500 dark:text-slate-400">
+            {language === 'en'
+              ? 'Connect as an authenticated Admin with Firebase active to manage Firestore classes.'
+              : 'Masuk sebagai Admin terautentikasi dengan Firebase aktif untuk mengelola katalog kelas Firestore.'}
+          </div>
+        ) : classesList.length === 0 ? (
+          <div className="text-center py-8 bg-slate-50 dark:bg-[#0f141e] rounded-xl border border-dashed border-slate-200 dark:border-[#232f42] text-xs text-slate-500 dark:text-slate-400">
+            {language === 'en'
+              ? 'No classes found in Firestore. Click "Seed Standard Classes" to initialize the catalog.'
+              : 'Belum ada kelas di Firestore. Klik "Seed Kelas Standar" untuk mengisi katalog awal.'}
+          </div>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-left text-xs">
+              <thead className="bg-slate-50 dark:bg-[#0f141e] text-slate-600 dark:text-slate-400 uppercase text-[10px] tracking-wider border-b border-slate-200 dark:border-[#232f42]">
+                <tr>
+                  <th className="py-3 px-3">{language === 'en' ? 'Class & Code' : 'Kelas & Kode'}</th>
+                  <th className="py-3 px-3">{language === 'en' ? 'Educator Account' : 'Akun Pengampu'}</th>
+                  <th className="py-3 px-3">{language === 'en' ? 'Instructor Display' : 'Nama Pengampu'}</th>
+                  <th className="py-3 px-3 text-right">{language === 'en' ? 'Actions' : 'Aksi'}</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-100 dark:divide-[#232f42]">
+                {classesList.map((cls) => {
+                  const draft = classDrafts[cls.id] || {
+                    instructor: cls.instructor || cls.lecturer || '',
+                    lecturerId: cls.lecturerId || '',
+                  };
+                  return (
+                    <tr key={cls.id} className="hover:bg-slate-50 dark:hover:bg-[#161d2a] transition">
+                      <td className="py-3 px-3">
+                        <div className="font-semibold text-slate-900 dark:text-slate-100">
+                          {cls.name || cls.title}
+                        </div>
+                        <div className="text-[11px] text-amber-600 dark:text-[#f59e0b] font-mono">
+                          {cls.code} • {cls.category}
+                        </div>
+                      </td>
+                      <td className="py-3 px-3">
+                        <select
+                          value={draft.lecturerId}
+                          onChange={(e) => {
+                            const selectedUid = e.target.value;
+                            const matched = educatorUsers.find((u) => u.uid === selectedUid);
+                            setClassDrafts((prev) => ({
+                              ...prev,
+                              [cls.id]: {
+                                lecturerId: selectedUid,
+                                instructor: matched?.displayName || draft.instructor,
+                              },
+                            }));
+                          }}
+                          className="w-48 px-2.5 py-1.5 rounded-lg border border-slate-200 dark:border-[#232f42] bg-white dark:bg-[#0f141e] text-slate-800 dark:text-slate-200 text-xs"
+                        >
+                          <option value="">
+                            {language === 'en' ? '-- Keep / Custom --' : '-- Pilih Dosen / Kustom --'}
+                          </option>
+                          {educatorUsers.map((ed) => (
+                            <option key={ed.uid} value={ed.uid}>
+                              {ed.displayName || ed.email} ({ed.role})
+                            </option>
+                          ))}
+                        </select>
+                      </td>
+                      <td className="py-3 px-3">
+                        <input
+                          type="text"
+                          value={draft.instructor}
+                          onChange={(e) =>
+                            setClassDrafts((prev) => ({
+                              ...prev,
+                              [cls.id]: { ...draft, instructor: e.target.value },
+                            }))
+                          }
+                          placeholder={language === 'en' ? 'Instructor name' : 'Nama dosen pengampu'}
+                          className="w-48 px-2.5 py-1.5 rounded-lg border border-slate-200 dark:border-[#232f42] bg-white dark:bg-[#0f141e] text-slate-800 dark:text-slate-200 text-xs"
+                        />
+                      </td>
+                      <td className="py-3 px-3 text-right space-x-2 whitespace-nowrap">
+                        <button
+                          type="button"
+                          onClick={() => void handleSaveClassRow(cls)}
+                          disabled={savingClassId === cls.id}
+                          className="inline-flex items-center gap-1 bg-[#f59e0b] hover:bg-[#d97706] text-black text-xs font-bold px-3 py-1.5 rounded-lg transition disabled:opacity-50"
+                        >
+                          <Save className="w-3.5 h-3.5" />
+                          {savingClassId === cls.id
+                            ? language === 'en'
+                              ? 'Saving...'
+                              : 'Menyimpan...'
+                            : language === 'en'
+                              ? 'Save'
+                              : 'Simpan'}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setConfirmDeleteClass(cls)}
+                          className="inline-flex items-center gap-1 bg-rose-50 dark:bg-rose-950/50 hover:bg-rose-100 dark:hover:bg-rose-900/60 text-rose-700 dark:text-rose-300 border border-rose-200 dark:border-rose-500/40 text-xs font-semibold px-2.5 py-1.5 rounded-lg transition"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                          {language === 'en' ? 'Delete' : 'Hapus'}
+                        </button>
+                      </td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
           </div>

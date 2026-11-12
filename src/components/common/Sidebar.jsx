@@ -25,9 +25,7 @@ export default function Sidebar({ currentView, setCurrentView }) {
       return [
         { id: 'dashboard', label: t('sidebar_admin_dash'), icon: ShieldCheck },
         { id: 'classes-all', label: t('sidebar_manage_classes'), icon: BookOpen },
-        { id: 'materi', label: t('sidebar_materials'), icon: FileText },
         { id: 'diskusi', label: t('sidebar_discussions'), icon: MessageSquare },
-        { id: 'ai', label: t('sidebar_ai_lecturer'), icon: Sparkles, highlight: true },
         { id: 'profil', label: t('sidebar_profile'), icon: Settings },
       ];
     }

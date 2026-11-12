@@ -1,14 +1,27 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import { useAuth } from '../../context/useAuth';
 import { useLanguage } from '../../context/useLanguage';
+import { ROLES } from '../../constants/roles';
 import { auth } from '../../firebase';
 import { setLocalExamSession } from '../../services/aiService';
 import {
   fetchAssignmentsWithUserSubmissions,
   fetchClassExamAttempt,
+  fetchClassExamAttempts,
+  fetchClassSubmissionsForGrading,
+  fetchInstructorAnswerKey,
+  gradeSubmissionInFirestore,
+  joinClassWithToken,
   submitAssignmentToFirestore,
   cancelSubmissionInFirestore,
+  updateClassMeetingsInFirestore,
 } from '../../services/lmsFirestoreService';
+import {
+  closeAttendanceSession,
+  fetchMeetingAttendees,
+  getClassAttendanceSession,
+  openAttendanceSession,
+} from '../../services/attendanceService';
 import { uploadMediaFile, isValidExternalUrl } from '../../services/cloudinaryService';
 import DeltaContentRenderer from '../common/DeltaContentRenderer';
 import { AccessibleDialog } from '../common/AccessibleDialog';
@@ -17,6 +30,7 @@ import {
   BookOpen,
   CheckCircle2,
   Lock,
+  Unlock,
   PlayCircle,
   FileText,
   Download,
@@ -31,6 +45,14 @@ import {
   Trash2,
   Link as LinkIcon,
   ExternalLink,
+  QrCode,
+  Users,
+  Award,
+  KeyRound,
+  Edit3,
+  Save,
+  RefreshCw,
+  BarChart3,
 } from 'lucide-react';
 
 const EXAM_QUESTIONS = [
@@ -80,7 +102,36 @@ const EXAM_QUESTIONS = [
   },
 ];
 
-const DEV_ANSWER_KEY = { q1: 1, q2: 2, q3: 1, q4: 1 };
+function computeLocalDevScore(answersMap) {
+  if (import.meta.env.DEV) {
+    const devOnlyKey = { q1: 1, q2: 2, q3: 1, q4: 1 };
+    const qIds = Object.keys(devOnlyKey);
+    let correct = 0;
+    for (const qId of qIds) {
+      if (answersMap?.[qId] === devOnlyKey[qId]) correct += 1;
+    }
+    return Math.round((correct / qIds.length) * 100);
+  }
+  return 0;
+}
+
+function buildFallbackMeetingsList(classData) {
+  if (Array.isArray(classData?.meetings) && classData.meetings.length > 0) {
+    return classData.meetings;
+  }
+  return Array.from({ length: 16 }, (_, i) => {
+    const order = i + 1;
+    return {
+      id: `${classData?.id || 'cls'}_m${order}`,
+      order,
+      title: `Pertemuan ${order < 10 ? `0${order}` : order}: Topik Pembelajaran ${order}`,
+      date: `${classData?.day || 'Senin'}, ${classData?.time || '08.00–10.30'}`,
+      status: order <= 3 ? 'in_progress' : 'locked',
+      pretestDone: false,
+      posttestDone: false,
+    };
+  });
+}
 
 function resolveSafeVideoSource(rawUrl) {
   if (!rawUrl || typeof rawUrl !== 'string') return null;
@@ -124,15 +175,61 @@ function getSafePdfUrl(rawUrl) {
 
 export default function ClassDetailView({
   classData,
+  isMember,
+  onMembershipChanged,
+  onClassUpdated,
   onBack,
   onNavigateAI,
   onExamStateChange,
 }) {
-  const { currentUser, userProfile } = useAuth();
+  const { currentUser, userProfile, role } = useAuth();
   const { t, language } = useLanguage();
 
+  const isEducatorOrAdmin = role === ROLES.LECTURER || role === ROLES.ADMIN;
+  const isPreviewMode = Boolean(currentUser && role === ROLES.STUDENT && isMember === false);
+
   const [activeTab, setActiveTab] = useState('meetings');
-  const [selectedMeeting, setSelectedMeeting] = useState(classData?.meetings?.[0] || null);
+  const [meetingsList, setMeetingsList] = useState(() => buildFallbackMeetingsList(classData));
+  const [selectedMeeting, setSelectedMeeting] = useState(
+    () => buildFallbackMeetingsList(classData)[0] || null
+  );
+
+  // Syllabus Preview Join State
+  const [joiningClass, setJoiningClass] = useState(false);
+  const [joinFeedback, setJoinFeedback] = useState(null);
+
+  // Instructor Meetings Editor State
+  const [editingMeetingId, setEditingMeetingId] = useState(null);
+  const [editMeetingTitle, setEditMeetingTitle] = useState('');
+  const [editMeetingDate, setEditMeetingDate] = useState('');
+  const [savingMeetings, setSavingMeetings] = useState(false);
+  const [meetingsFeedback, setMeetingsFeedback] = useState(null);
+
+  // Instructor Attendance State
+  const [attSession, setAttSession] = useState(null);
+  const [attMeetingNo, setAttMeetingNo] = useState(1);
+  const [attDurationMins, setAttDurationMins] = useState(15);
+  const [attCustomCode, setAttCustomCode] = useState('');
+  const [attLoading, setAttLoading] = useState(false);
+  const [attFeedback, setAttFeedback] = useState(null);
+  const [attendees, setAttendees] = useState([]);
+  const [attendeesFilterMeeting, setAttendeesFilterMeeting] = useState('');
+
+  // Instructor Submissions Grading State
+  const [classSubmissions, setClassSubmissions] = useState([]);
+  const [gradingLoading, setGradingLoading] = useState(false);
+  const [gradeInputs, setGradeInputs] = useState({});
+  const [feedbackInputs, setFeedbackInputs] = useState({});
+  const [gradingId, setGradingId] = useState(null);
+  const [gradingNotice, setGradingNotice] = useState(null);
+
+  // Instructor Exam Keys & Analytics State
+  const [evalKeyType, setEvalKeyType] = useState('pretest');
+  const [instructorKeyMap, setInstructorKeyMap] = useState(null);
+  const [instructorKeySource, setInstructorKeySource] = useState('');
+  const [classExamAttempts, setClassExamAttempts] = useState([]);
+  const [evalAnalyticsLoading, setEvalAnalyticsLoading] = useState(false);
+  const [evalAnalyticsError, setEvalAnalyticsError] = useState('');
 
   // Exam State
   const [examActive, setExamActive] = useState(false);
@@ -166,8 +263,10 @@ export default function ClassDetailView({
 
   useEffect(() => {
     classIdRef.current = classData?.id || 'subj_pbo';
-    setSelectedMeeting(classData?.meetings?.[0] || null);
-  }, [classData?.id, classData?.meetings]);
+    const nextMeetings = buildFallbackMeetingsList(classData);
+    setMeetingsList(nextMeetings);
+    setSelectedMeeting(nextMeetings[0] || null);
+  }, [classData]);
 
   useEffect(() => {
     const isActiveSession = examActive && !examFinished;
@@ -222,16 +321,84 @@ export default function ClassDetailView({
     };
   }, [classData?.id, classData?.name, currentUser]);
 
-  const examQuestions = EXAM_QUESTIONS;
+  const loadInstructorAttendance = useCallback(
+    async (meetingFilter = attendeesFilterMeeting) => {
+      if (!classData?.id) return;
+      setAttLoading(true);
+      try {
+        const [sess, list] = await Promise.all([
+          getClassAttendanceSession(classData.id),
+          fetchMeetingAttendees(classData.id, meetingFilter ? Number(meetingFilter) : null),
+        ]);
+        setAttSession(sess);
+        setAttendees(list);
+      } finally {
+        setAttLoading(false);
+      }
+    },
+    [classData?.id, attendeesFilterMeeting]
+  );
 
-  const computeLocalDevScore = (answersMap) => {
-    const qIds = Object.keys(DEV_ANSWER_KEY);
-    let correct = 0;
-    for (const qId of qIds) {
-      if (answersMap?.[qId] === DEV_ANSWER_KEY[qId]) correct += 1;
+  const loadInstructorGrading = useCallback(async () => {
+    if (!classData?.id) return;
+    setGradingLoading(true);
+    try {
+      const subs = await fetchClassSubmissionsForGrading(classData.id);
+      setClassSubmissions(subs);
+      const initialGrades = {};
+      const initialFeedbacks = {};
+      subs.forEach((s) => {
+        initialGrades[s.id] = typeof s.grade === 'number' ? String(s.grade) : '';
+        initialFeedbacks[s.id] = s.feedback || '';
+      });
+      setGradeInputs(initialGrades);
+      setFeedbackInputs(initialFeedbacks);
+    } finally {
+      setGradingLoading(false);
     }
-    return Math.round((correct / qIds.length) * 100);
-  };
+  }, [classData?.id]);
+
+  const loadInstructorEvalAnalytics = useCallback(
+    async (targetExamType = evalKeyType) => {
+      if (!classData?.id) return;
+      setEvalAnalyticsLoading(true);
+      setEvalAnalyticsError('');
+      try {
+        const [keyRes, attempts] = await Promise.all([
+          fetchInstructorAnswerKey({ classId: classData.id, examType: targetExamType }),
+          fetchClassExamAttempts(classData.id),
+        ]);
+        setInstructorKeyMap(keyRes.answerKey || {});
+        setInstructorKeySource(keyRes.source || 'server');
+        setClassExamAttempts(attempts || []);
+      } catch (err) {
+        setEvalAnalyticsError(err.message || 'Gagal memuat kunci evaluasi dan statistik kelas.');
+      } finally {
+        setEvalAnalyticsLoading(false);
+      }
+    },
+    [classData?.id, evalKeyType]
+  );
+
+  useEffect(() => {
+    if (!isEducatorOrAdmin) return;
+    if (activeTab === 'attendance') {
+      void loadInstructorAttendance();
+    } else if (activeTab === 'grading') {
+      void loadInstructorGrading();
+    } else if (activeTab === 'exam_insights') {
+      void loadInstructorEvalAnalytics(evalKeyType);
+    }
+  }, [
+    isEducatorOrAdmin,
+    activeTab,
+    evalKeyType,
+    loadInstructorAttendance,
+    loadInstructorGrading,
+    loadInstructorEvalAnalytics,
+  ]);
+
+  const examQuestions = EXAM_QUESTIONS;
 
   const submitExamToServer = async (answersToGrade, typeToGrade) => {
     examEndTimeRef.current = null;
@@ -577,6 +744,225 @@ export default function ClassDetailView({
     }
   };
 
+  const handleJoinFromPreview = async () => {
+    if (!classData?.code || joiningClass) return;
+    setJoiningClass(true);
+    setJoinFeedback(null);
+    try {
+      const res = await joinClassWithToken(classData.code);
+      const joinedClass = res.classData || classData;
+      onMembershipChanged?.(joinedClass.id || classData.id, joinedClass);
+      setJoinFeedback({
+        type: 'success',
+        text:
+          language === 'en'
+            ? 'Successfully joined this class! Full modules are now unlocked.'
+            : 'Berhasil bergabung ke kelas! Seluruh modul pembelajaran kini terbuka.',
+      });
+    } catch (err) {
+      setJoinFeedback({
+        type: 'error',
+        text: err.message || 'Gagal bergabung ke kelas.',
+      });
+    } finally {
+      setJoiningClass(false);
+    }
+  };
+
+  const handleToggleMeetingLock = async (targetMeeting) => {
+    if (!isEducatorOrAdmin || savingMeetings) return;
+    const nextStatus = targetMeeting.status === 'locked' ? 'in_progress' : 'locked';
+    const nextMeetings = meetingsList.map((m) =>
+      m.id === targetMeeting.id ? { ...m, status: nextStatus } : m
+    );
+    setMeetingsList(nextMeetings);
+    setSavingMeetings(true);
+    setMeetingsFeedback(null);
+    try {
+      await updateClassMeetingsInFirestore(classData.id, nextMeetings);
+      onClassUpdated?.({ ...classData, meetings: nextMeetings });
+      setMeetingsFeedback({
+        type: 'success',
+        text:
+          nextStatus === 'locked'
+            ? `Pertemuan ${targetMeeting.order} dikunci untuk mahasiswa.`
+            : `Pertemuan ${targetMeeting.order} dibuka untuk mahasiswa.`,
+      });
+    } catch (err) {
+      setMeetingsFeedback({
+        type: 'error',
+        text: err.message || 'Gagal memperbarui status pertemuan.',
+      });
+    } finally {
+      setSavingMeetings(false);
+    }
+  };
+
+  const handleStartEditMeeting = (meet) => {
+    setEditingMeetingId(meet.id);
+    setEditMeetingTitle(meet.title || '');
+    setEditMeetingDate(meet.date || '');
+  };
+
+  const handleSaveMeetingEdit = async (targetMeeting) => {
+    if (!isEducatorOrAdmin || savingMeetings) return;
+    const cleanTitle = editMeetingTitle.trim() || targetMeeting.title;
+    const cleanDate = editMeetingDate.trim() || targetMeeting.date;
+    const nextMeetings = meetingsList.map((m) =>
+      m.id === targetMeeting.id ? { ...m, title: cleanTitle, date: cleanDate } : m
+    );
+    setMeetingsList(nextMeetings);
+    setEditingMeetingId(null);
+    setSavingMeetings(true);
+    setMeetingsFeedback(null);
+    try {
+      await updateClassMeetingsInFirestore(classData.id, nextMeetings);
+      onClassUpdated?.({ ...classData, meetings: nextMeetings });
+      if (selectedMeeting?.id === targetMeeting.id) {
+        setSelectedMeeting({ ...targetMeeting, title: cleanTitle, date: cleanDate });
+      }
+      setMeetingsFeedback({
+        type: 'success',
+        text: `Pertemuan ${targetMeeting.order} berhasil disimpan ke Firestore.`,
+      });
+    } catch (err) {
+      setMeetingsFeedback({
+        type: 'error',
+        text: err.message || 'Gagal menyimpan perubahan pertemuan.',
+      });
+    } finally {
+      setSavingMeetings(false);
+    }
+  };
+
+  const handleOpenAttendance = async (e) => {
+    e.preventDefault();
+    if (!classData?.id || attLoading) return;
+    setAttLoading(true);
+    setAttFeedback(null);
+    try {
+      const opened = await openAttendanceSession({
+        classId: classData.id,
+        classCode: classData.code || 'CLS',
+        meetingNo: attMeetingNo,
+        durationMinutes: attDurationMins,
+        customCode: attCustomCode,
+      });
+      setAttSession(opened);
+      setAttCustomCode('');
+      setAttFeedback({
+        type: 'success',
+        text: `Sesi presensi Pertemuan ${opened.meetingNo} dibuka (Kode: ${opened.sessionCode}).`,
+      });
+      const list = await fetchMeetingAttendees(
+        classData.id,
+        attendeesFilterMeeting ? Number(attendeesFilterMeeting) : null
+      );
+      setAttendees(list);
+    } catch (err) {
+      setAttFeedback({
+        type: 'error',
+        text: err.message || 'Gagal membuka sesi presensi.',
+      });
+    } finally {
+      setAttLoading(false);
+    }
+  };
+
+  const handleCloseAttendance = async () => {
+    if (!classData?.id || attLoading) return;
+    setAttLoading(true);
+    setAttFeedback(null);
+    try {
+      await closeAttendanceSession(classData.id);
+      setAttSession(null);
+      setAttFeedback({
+        type: 'success',
+        text: 'Sesi presensi kelas telah ditutup.',
+      });
+    } catch (err) {
+      setAttFeedback({
+        type: 'error',
+        text: err.message || 'Gagal menutup sesi presensi.',
+      });
+    } finally {
+      setAttLoading(false);
+    }
+  };
+
+  const handleSaveSubmissionGrade = async (sub) => {
+    const rawGrade = gradeInputs[sub.id];
+    const numericGrade = Number(rawGrade);
+    if (rawGrade === '' || Number.isNaN(numericGrade) || numericGrade < 0 || numericGrade > 100) {
+      setGradingNotice({
+        type: 'error',
+        text: 'Masukkan nilai angka yang valid antara 0 hingga 100.',
+      });
+      return;
+    }
+
+    setGradingId(sub.id);
+    setGradingNotice(null);
+    try {
+      const fbText = feedbackInputs[sub.id] || '';
+      await gradeSubmissionInFirestore({
+        submissionId: sub.submissionId || sub.id,
+        grade: numericGrade,
+        feedback: fbText,
+      });
+      setClassSubmissions((prev) =>
+        prev.map((item) =>
+          item.id === sub.id
+            ? { ...item, grade: numericGrade, feedback: fbText, status: 'graded' }
+            : item
+        )
+      );
+      setGradingNotice({
+        type: 'success',
+        text: `Nilai ${numericGrade} untuk ${sub.studentName} berhasil disimpan.`,
+      });
+    } catch (err) {
+      setGradingNotice({
+        type: 'error',
+        text: err.message || 'Gagal menyimpan nilai tugas.',
+      });
+    } finally {
+      setGradingId(null);
+    }
+  };
+
+  const tabsToRender = isEducatorOrAdmin
+    ? [
+        { id: 'meetings', icon: BookOpen, label: language === 'en' ? 'SYLLABUS & EDIT' : 'SILABUS & KELOLA' },
+        { id: 'material', icon: FileText, label: language === 'en' ? 'READING' : 'DELTA JSON' },
+        { id: 'video', icon: PlayCircle, label: 'VIDEO CDN' },
+        { id: 'pdf', icon: Download, label: 'MANUAL BOOK' },
+        { id: 'attendance', icon: QrCode, label: language === 'en' ? 'QR ATTENDANCE' : 'PRESENSI QR' },
+        { id: 'grading', icon: Award, label: language === 'en' ? 'GRADING' : 'NILAI TUGAS' },
+        {
+          id: 'exam_insights',
+          icon: KeyRound,
+          label: language === 'en' ? 'EVAL KEYS & STATS' : 'KUNCI & STATISTIK',
+        },
+      ]
+    : [
+        { id: 'meetings', icon: BookOpen, label: language === 'en' ? 'SYLLABUS' : 'SILABUS' },
+        { id: 'material', icon: FileText, label: language === 'en' ? 'READING' : 'DELTA JSON' },
+        { id: 'video', icon: PlayCircle, label: 'VIDEO CDN' },
+        { id: 'pdf', icon: Download, label: 'MANUAL BOOK' },
+        {
+          id: 'exam',
+          icon: HelpCircle,
+          label: language === 'en' ? 'PRETEST & EXAM' : 'PRETEST & EVALUASI',
+          danger: true,
+        },
+        {
+          id: 'tasks',
+          icon: Upload,
+          label: language === 'en' ? 'TASKS SUBMISSION' : 'PENGUMPULAN TUGAS FILE',
+        },
+      ];
+
   return (
     <div className="space-y-5">
       <AccessibleDialog
@@ -594,14 +980,29 @@ export default function ClassDetailView({
       <div className="bg-white dark:bg-[#121822] p-5 sm:p-6 rounded-xl border border-slate-200 dark:border-[#232f42] relative overflow-hidden shadow-md text-slate-900 dark:text-slate-100">
         <div className="absolute top-0 left-0 right-0 h-1 bg-[#f59e0b]" />
 
-        <button
-          type="button"
-          onClick={onBack}
-          className="inline-flex items-center gap-1.5 text-xs font-mono font-bold text-amber-600 dark:text-[#f59e0b] hover:opacity-80 mb-3 transition"
-        >
-          <ArrowLeft className="w-4 h-4" />
-          {language === 'en' ? '// RETURN TO MODULE DIRECTORY' : '// KEMBALI KE DIREKTORI MODUL'}
-        </button>
+        <div className="flex flex-wrap items-center justify-between gap-2 mb-3">
+          <button
+            type="button"
+            onClick={onBack}
+            className="inline-flex items-center gap-1.5 text-xs font-mono font-bold text-amber-600 dark:text-[#f59e0b] hover:opacity-80 transition"
+          >
+            <ArrowLeft className="w-4 h-4" />
+            {language === 'en' ? '// RETURN TO MODULE DIRECTORY' : '// KEMBALI KE DIREKTORI MODUL'}
+          </button>
+
+          {isEducatorOrAdmin && (
+            <span className="text-[10px] font-mono font-bold px-2.5 py-0.5 rounded bg-indigo-50 dark:bg-indigo-950/60 text-indigo-700 dark:text-indigo-300 border border-indigo-200 dark:border-indigo-500/40">
+              {role === ROLES.ADMIN
+                ? 'MODE ADMINISTRATOR // FULL ACCESS'
+                : 'MODE INSTRUKTUR // KELOLA KELAS'}
+            </span>
+          )}
+          {isPreviewMode && (
+            <span className="text-[10px] font-mono font-bold px-2.5 py-0.5 rounded bg-amber-50 dark:bg-amber-950/60 text-amber-700 dark:text-amber-300 border border-amber-200 dark:border-amber-500/40">
+              {language === 'en' ? 'SYLLABUS PREVIEW' : 'PRATINJAU SILABUS'}
+            </span>
+          )}
+        </div>
 
         <div className="flex flex-col md:flex-row md:items-center justify-between gap-3">
           <div>
@@ -631,69 +1032,174 @@ export default function ClassDetailView({
           </div>
         </div>
 
-        {/* Tab Navigation */}
-        <div className="flex flex-wrap gap-1.5 mt-5 pt-3 border-t border-slate-200 dark:border-[#1b263b] font-mono">
-          {[
-            { id: 'meetings', icon: BookOpen, label: language === 'en' ? 'SYLLABUS' : 'SILABUS' },
-            { id: 'material', icon: FileText, label: language === 'en' ? 'READING' : 'DELTA JSON' },
-            { id: 'video', icon: PlayCircle, label: 'VIDEO CDN' },
-            { id: 'pdf', icon: Download, label: 'MANUAL BOOK' },
-            {
-              id: 'exam',
-              icon: HelpCircle,
-              label: language === 'en' ? 'PRETEST & EXAM' : 'PRETEST & EVALUASI',
-              danger: true,
-            },
-            {
-              id: 'tasks',
-              icon: Upload,
-              label: language === 'en' ? 'TASKS SUBMISSION' : 'PENGUMPULAN TUGAS FILE',
-            },
-          ].map((tabItem) => {
-            const Icon = tabItem.icon;
-            const isActive = activeTab === tabItem.id;
-            return (
-              <button
-                key={tabItem.id}
-                type="button"
-                onClick={() => setActiveTab(tabItem.id)}
-                className={`px-3 py-1.5 rounded-xs text-[11px] font-bold transition flex items-center gap-1.5 ${
-                  tabItem.danger
-                    ? isActive
-                      ? 'bg-rose-600 text-white shadow-md'
-                      : 'bg-rose-50 dark:bg-[#1d1219] text-rose-700 dark:text-rose-300 hover:bg-rose-100 dark:hover:bg-rose-950/60 border border-rose-200 dark:border-rose-800/50'
-                    : isActive
-                    ? 'bg-[#f59e0b] text-black shadow-md'
-                    : 'bg-slate-100 dark:bg-[#141c2b] text-slate-700 dark:text-slate-300 hover:text-amber-700 dark:hover:text-[#f59e0b] border border-slate-200 dark:border-[#212f45]'
-                }`}
-              >
-                <Icon className="w-3 h-3" />
-                {tabItem.label}
-              </button>
-            );
-          })}
-        </div>
+        {/* Tab Navigation (hidden in Syllabus Preview Mode for non-enrolled signed-in students) */}
+        {!isPreviewMode && (
+          <div className="flex flex-wrap gap-1.5 mt-5 pt-3 border-t border-slate-200 dark:border-[#1b263b] font-mono">
+            {tabsToRender.map((tabItem) => {
+              const Icon = tabItem.icon;
+              const isActive = activeTab === tabItem.id;
+              return (
+                <button
+                  key={tabItem.id}
+                  type="button"
+                  onClick={() => setActiveTab(tabItem.id)}
+                  className={`px-3 py-1.5 rounded-xs text-[11px] font-bold transition flex items-center gap-1.5 ${
+                    tabItem.danger
+                      ? isActive
+                        ? 'bg-rose-600 text-white shadow-md'
+                        : 'bg-rose-50 dark:bg-[#1d1219] text-rose-700 dark:text-rose-300 hover:bg-rose-100 dark:hover:bg-rose-950/60 border border-rose-200 dark:border-rose-800/50'
+                      : isActive
+                      ? 'bg-[#f59e0b] text-black shadow-md'
+                      : 'bg-slate-100 dark:bg-[#141c2b] text-slate-700 dark:text-slate-300 hover:text-amber-700 dark:hover:text-[#f59e0b] border border-slate-200 dark:border-[#212f45]'
+                  }`}
+                >
+                  <Icon className="w-3 h-3" />
+                  {tabItem.label}
+                </button>
+              );
+            })}
+          </div>
+        )}
       </div>
 
-      {/* TAB: Syllabus Meetings */}
-      {activeTab === 'meetings' && (
+      {/* SYLLABUS PREVIEW MODE (Signed-in Student NOT Enrolled) */}
+      {isPreviewMode && (
+        <div className="space-y-4">
+          <div className="bg-gradient-to-r from-amber-50 via-white to-sky-50 dark:from-[#1b160c] dark:via-[#121822] dark:to-[#0f1a29] p-5 rounded-xl border border-amber-300 dark:border-[#f59e0b]/40 shadow-sm flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+            <div className="space-y-1">
+              <span className="text-[10px] font-mono font-bold text-amber-700 dark:text-[#f59e0b] uppercase tracking-wider">
+                // {language === 'en' ? 'SYLLABUS PREVIEW MODE' : 'MODE PRATINJAU SILABUS'}
+              </span>
+              <h3 className="text-sm sm:text-base font-bold text-slate-900 dark:text-slate-100">
+                {language === 'en'
+                  ? 'You are viewing the public syllabus outline'
+                  : 'Anda sedang melihat pratinjau silabus kelas ini'}
+              </h3>
+              <p className="text-xs text-slate-600 dark:text-slate-300">
+                {language === 'en'
+                  ? 'Join this class to unlock Delta JSON modules, video streams, pretest/post-test, attendance QR, and task submissions.'
+                  : 'Gabung kelas ini untuk membuka akses penuh materi Delta JSON, video pembelajaran, presensi QR, pretest/post-test, dan pengumpulan tugas.'}
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={handleJoinFromPreview}
+              disabled={joiningClass}
+              className="shrink-0 bg-[#f59e0b] hover:bg-[#d97706] text-black text-xs font-mono font-bold px-5 py-2.5 rounded-lg shadow-md transition flex items-center gap-2 disabled:opacity-50"
+            >
+              <KeyRound className="w-4 h-4" />
+              {joiningClass
+                ? language === 'en'
+                  ? 'JOINING...'
+                  : 'MEMPROSES...'
+                : language === 'en'
+                  ? 'Join This Class'
+                  : 'Gabung Kelas Ini'}
+            </button>
+          </div>
+
+          {joinFeedback && (
+            <div
+              className={`p-3 rounded-lg text-xs font-mono flex items-center gap-2 border ${
+                joinFeedback.type === 'success'
+                  ? 'bg-emerald-50 dark:bg-emerald-950/50 text-emerald-700 dark:text-emerald-300 border-emerald-200 dark:border-emerald-500/40'
+                  : 'bg-rose-50 dark:bg-rose-950/50 text-rose-700 dark:text-rose-300 border-rose-200 dark:border-rose-500/40'
+              }`}
+            >
+              {joinFeedback.type === 'success' ? (
+                <CheckCircle2 className="w-4 h-4 shrink-0" />
+              ) : (
+                <AlertTriangle className="w-4 h-4 shrink-0" />
+              )}
+              <span>{joinFeedback.text}</span>
+            </div>
+          )}
+
+          <div className="bg-white dark:bg-[#121822] p-5 rounded-xl border border-slate-200 dark:border-[#232f42] space-y-3">
+            <div className="flex items-center justify-between border-b border-slate-200 dark:border-[#1b263b] pb-3">
+              <h3 className="text-xs font-mono font-bold text-amber-700 dark:text-[#f59e0b] uppercase tracking-wider flex items-center gap-1.5">
+                <BookOpen className="w-4 h-4" />
+                <span>
+                  {language === 'en'
+                    ? '// READ-ONLY SYLLABUS OUTLINE (16 SESSIONS)'
+                    : '// RANGKAIAN SILABUS PERTEMUAN (1–16)'}
+                </span>
+              </h3>
+              <span className="text-[10px] font-mono text-slate-500 dark:text-slate-400">
+                {meetingsList.length} {language === 'en' ? 'SESSIONS' : 'PERTEMUAN'}
+              </span>
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-2.5">
+              {meetingsList.map((meet) => (
+                <div
+                  key={meet.id}
+                  className="p-3 rounded-lg border border-slate-200 dark:border-[#1b2538] bg-slate-50 dark:bg-[#0b101a] flex items-center justify-between gap-3"
+                >
+                  <div className="flex items-center gap-3 min-w-0">
+                    <span className="w-7 h-7 rounded-xs bg-slate-200 dark:bg-[#1e293d] text-slate-700 dark:text-slate-300 font-mono font-bold text-xs flex items-center justify-center shrink-0">
+                      {meet.order < 10 ? `0${meet.order}` : meet.order}
+                    </span>
+                    <div className="min-w-0">
+                      <p className="text-xs font-mono font-bold text-slate-800 dark:text-slate-200 truncate">
+                        {meet.title}
+                      </p>
+                      <p className="text-[10px] font-mono text-slate-500 dark:text-slate-400">
+                        {meet.date}
+                      </p>
+                    </div>
+                  </div>
+                  <Lock className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* TAB: Syllabus Meetings (Active Member / Demo / Educator / Admin) */}
+      {!isPreviewMode && activeTab === 'meetings' && (
         <div className="bg-white dark:bg-[#121822] p-5 rounded-xl border border-slate-200 dark:border-[#232f42] space-y-4">
-          <div className="flex items-center justify-between border-b border-slate-200 dark:border-[#1b263b] pb-3">
+          <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-200 dark:border-[#1b263b] pb-3">
             <h3 className="text-xs font-mono font-bold text-amber-700 dark:text-[#f59e0b] uppercase tracking-wider flex items-center gap-1.5">
               <BookOpen className="w-4 h-4 text-amber-600 dark:text-[#f59e0b]" />
               <span>
-                {language === 'en' ? '// CLASS SESSIONS & SYLLABUS' : '// DAFTAR PERTEMUAN KELAS'}
+                {isEducatorOrAdmin
+                  ? language === 'en'
+                    ? '// MANAGE CLASS SESSIONS (1–16)'
+                    : '// KELOLA PERTEMUAN & SILABUS (1–16)'
+                  : language === 'en'
+                    ? '// CLASS SESSIONS & SYLLABUS'
+                    : '// DAFTAR PERTEMUAN KELAS'}
               </span>
             </h3>
             <span className="text-[10px] font-mono text-sky-700 dark:text-[#00e5ff] bg-sky-50 dark:bg-[#00e5ff]/10 border border-sky-200 dark:border-[#00e5ff]/30 px-2 py-0.5 rounded-xs">
-              {classData.meetings?.length || 16} {language === 'en' ? 'SESSIONS' : 'PERTEMUAN'}
+              {meetingsList.length} {language === 'en' ? 'SESSIONS' : 'PERTEMUAN'}
             </span>
           </div>
 
+          {meetingsFeedback && (
+            <div
+              className={`p-3 rounded-lg text-xs font-mono flex items-center gap-2 border ${
+                meetingsFeedback.type === 'success'
+                  ? 'bg-emerald-50 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-300 border-emerald-200 dark:border-emerald-500/40'
+                  : 'bg-rose-50 dark:bg-rose-950/40 text-rose-700 dark:text-rose-300 border-rose-200 dark:border-rose-500/40'
+              }`}
+            >
+              {meetingsFeedback.type === 'success' ? (
+                <CheckCircle2 className="w-4 h-4 shrink-0" />
+              ) : (
+                <AlertTriangle className="w-4 h-4 shrink-0" />
+              )}
+              <span>{meetingsFeedback.text}</span>
+            </div>
+          )}
+
           <div className="space-y-2.5">
-            {classData.meetings?.map((meet) => {
+            {meetingsList.map((meet) => {
               const isCurrent = meet.status === 'in_progress';
-              const isLocked = meet.status === 'locked';
+              const isLockedForStudent = !isEducatorOrAdmin && meet.status === 'locked';
+              const isEditingThis = editingMeetingId === meet.id;
               return (
                 <div
                   key={meet.id}
@@ -703,7 +1209,7 @@ export default function ClassDetailView({
                       : 'border-slate-200 dark:border-[#1b2538] bg-slate-50 dark:bg-[#0b101a]'
                   }`}
                 >
-                  <div className="flex items-start gap-3">
+                  <div className="flex items-start gap-3 flex-1 min-w-0">
                     <div
                       className={`w-7 h-7 rounded-xs flex items-center justify-center font-mono font-bold text-xs shrink-0 ${
                         isCurrent
@@ -713,32 +1219,126 @@ export default function ClassDetailView({
                     >
                       {meet.order < 10 ? `0${meet.order}` : meet.order}
                     </div>
-                    <div>
-                      <h4 className="text-xs font-mono font-bold text-slate-900 dark:text-slate-100">
-                        {meet.title}
-                      </h4>
-                      <p className="text-[10px] font-mono text-slate-500 dark:text-slate-400 mt-0.5">
-                        {language === 'en' ? 'Schedule' : 'Jadwal'}: {meet.date}
-                      </p>
+                    <div className="flex-1 min-w-0">
+                      {isEditingThis ? (
+                        <div className="space-y-2">
+                          <input
+                            type="text"
+                            value={editMeetingTitle}
+                            onChange={(e) => setEditMeetingTitle(e.target.value)}
+                            className="w-full px-2.5 py-1.5 text-xs font-mono rounded border border-amber-400 bg-white dark:bg-[#070b12] text-slate-900 dark:text-slate-100"
+                            placeholder="Judul Pertemuan"
+                          />
+                          <div className="flex flex-wrap items-center gap-2">
+                            <input
+                              type="text"
+                              value={editMeetingDate}
+                              onChange={(e) => setEditMeetingDate(e.target.value)}
+                              className="flex-1 min-w-[160px] px-2.5 py-1 text-[11px] font-mono rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-[#070b12] text-slate-800 dark:text-slate-200"
+                              placeholder="Jadwal Pertemuan"
+                            />
+                            <button
+                              type="button"
+                              onClick={() => handleSaveMeetingEdit(meet)}
+                              disabled={savingMeetings}
+                              className="bg-emerald-600 hover:bg-emerald-500 text-white text-[10px] font-mono font-bold px-2.5 py-1 rounded flex items-center gap-1"
+                            >
+                              <Save className="w-3 h-3" />
+                              {language === 'en' ? 'Save' : 'Simpan'}
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => setEditingMeetingId(null)}
+                              className="bg-slate-200 dark:bg-slate-800 text-slate-700 dark:text-slate-300 text-[10px] font-mono font-bold px-2.5 py-1 rounded"
+                            >
+                              {t('dialog_cancel')}
+                            </button>
+                          </div>
+                        </div>
+                      ) : (
+                        <>
+                          <h4 className="text-xs font-mono font-bold text-slate-900 dark:text-slate-100">
+                            {meet.title}
+                          </h4>
+                          <p className="text-[10px] font-mono text-slate-500 dark:text-slate-400 mt-0.5">
+                            {language === 'en' ? 'Schedule' : 'Jadwal'}: {meet.date}
+                          </p>
+                        </>
+                      )}
 
-                      <div className="flex flex-wrap items-center gap-1.5 mt-2 font-mono">
-                        <span className="text-[9px] bg-white dark:bg-[#0d1421] border border-slate-200 dark:border-[#212f45] px-1.5 py-0.5 rounded-xs text-slate-700 dark:text-slate-300">
-                          {meet.pretestDone ? '✓ PRETEST SELESAI' : '✕ PRETEST BELUM'}
-                        </span>
-                        <span className="text-[9px] bg-white dark:bg-[#0d1421] border border-slate-200 dark:border-[#212f45] px-1.5 py-0.5 rounded-xs text-slate-700 dark:text-slate-300">
-                          {meet.posttestDone ? '✓ POST-TEST SELESAI' : '✕ POST-TEST BELUM'}
-                        </span>
-                        {meet.score && (
-                          <span className="text-[9px] bg-emerald-50 dark:bg-emerald-950/60 border border-emerald-200 dark:border-emerald-500/40 text-emerald-700 dark:text-emerald-300 font-bold px-1.5 py-0.5 rounded-xs">
-                            SKOR: {meet.score}
+                      {!isEducatorOrAdmin ? (
+                        <div className="flex flex-wrap items-center gap-1.5 mt-2 font-mono">
+                          <span className="text-[9px] bg-white dark:bg-[#0d1421] border border-slate-200 dark:border-[#212f45] px-1.5 py-0.5 rounded-xs text-slate-700 dark:text-slate-300">
+                            {meet.pretestDone ? '✓ PRETEST SELESAI' : '✕ PRETEST BELUM'}
                           </span>
-                        )}
-                      </div>
+                          <span className="text-[9px] bg-white dark:bg-[#0d1421] border border-slate-200 dark:border-[#212f45] px-1.5 py-0.5 rounded-xs text-slate-700 dark:text-slate-300">
+                            {meet.posttestDone ? '✓ POST-TEST SELESAI' : '✕ POST-TEST BELUM'}
+                          </span>
+                          {meet.score && (
+                            <span className="text-[9px] bg-emerald-50 dark:bg-emerald-950/60 border border-emerald-200 dark:border-emerald-500/40 text-emerald-700 dark:text-emerald-300 font-bold px-1.5 py-0.5 rounded-xs">
+                              SKOR: {meet.score}
+                            </span>
+                          )}
+                        </div>
+                      ) : (
+                        <div className="flex flex-wrap items-center gap-1.5 mt-2 font-mono">
+                          <span
+                            className={`text-[9px] px-1.5 py-0.5 rounded-xs border font-bold ${
+                              meet.status === 'locked'
+                                ? 'bg-slate-100 dark:bg-slate-800/80 border-slate-300 dark:border-slate-700 text-slate-500 dark:text-slate-400'
+                                : 'bg-emerald-50 dark:bg-emerald-950/60 border-emerald-200 dark:border-emerald-500/40 text-emerald-700 dark:text-emerald-300'
+                            }`}
+                          >
+                            {meet.status === 'locked'
+                              ? language === 'en'
+                                ? 'LOCKED FOR STUDENTS'
+                                : 'TERKUNCI BAGI MAHASISWA'
+                              : language === 'en'
+                                ? 'OPEN FOR STUDENTS'
+                                : 'TERBUKA BAGI MAHASISWA'}
+                          </span>
+                        </div>
+                      )}
                     </div>
                   </div>
 
-                  <div className="flex items-center gap-2 self-end sm:self-center font-mono">
-                    {isLocked ? (
+                  <div className="flex flex-wrap items-center gap-2 self-end sm:self-center font-mono">
+                    {isEducatorOrAdmin && !isEditingThis && (
+                      <>
+                        <button
+                          type="button"
+                          onClick={() => handleToggleMeetingLock(meet)}
+                          disabled={savingMeetings}
+                          className={`text-[10px] font-bold px-2.5 py-1.5 rounded-xs border transition flex items-center gap-1 ${
+                            meet.status === 'locked'
+                              ? 'bg-emerald-50 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-300 border-emerald-200 dark:border-emerald-500/40 hover:bg-emerald-100'
+                              : 'bg-amber-50 dark:bg-amber-950/40 text-amber-700 dark:text-amber-300 border-amber-200 dark:border-amber-500/40 hover:bg-amber-100'
+                          }`}
+                        >
+                          {meet.status === 'locked' ? (
+                            <>
+                              <Unlock className="w-3 h-3" />
+                              {language === 'en' ? 'Open' : 'Buka'}
+                            </>
+                          ) : (
+                            <>
+                              <Lock className="w-3 h-3" />
+                              {language === 'en' ? 'Lock' : 'Kunci'}
+                            </>
+                          )}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => handleStartEditMeeting(meet)}
+                          className="bg-white dark:bg-[#1c2432] hover:bg-slate-100 dark:hover:bg-[#253245] text-slate-700 dark:text-slate-300 border border-slate-300 dark:border-slate-700 text-[10px] font-bold px-2.5 py-1.5 rounded-xs transition flex items-center gap-1"
+                        >
+                          <Edit3 className="w-3 h-3" />
+                          {language === 'en' ? 'Edit' : 'Ubah'}
+                        </button>
+                      </>
+                    )}
+
+                    {isLockedForStudent ? (
                       <span className="text-[10px] text-slate-400 flex items-center gap-1">
                         <Lock className="w-3 h-3" /> {language === 'en' ? 'LOCKED' : 'TERKUNCI'}
                       </span>
@@ -763,7 +1363,7 @@ export default function ClassDetailView({
       )}
 
       {/* TAB: Delta JSON Reading Module (Pure React JSX, Zero dangerouslySetInnerHTML) */}
-      {activeTab === 'material' && (
+      {!isPreviewMode && activeTab === 'material' && (
         <div className="bg-white dark:bg-[#121822] p-5 sm:p-6 rounded-xl border border-slate-200 dark:border-[#232f42] space-y-4">
           <div className="flex flex-wrap items-center justify-between gap-2 pb-3 border-b border-slate-200 dark:border-[#1b263b]">
             <div>
@@ -792,7 +1392,7 @@ export default function ClassDetailView({
       )}
 
       {/* TAB: Video Learning Player */}
-      {activeTab === 'video' && (
+      {!isPreviewMode && activeTab === 'video' && (
         <div className="bg-white dark:bg-[#121822] p-5 rounded-xl border border-slate-200 dark:border-[#232f42] space-y-4">
           <div className="flex items-center justify-between border-b border-slate-200 dark:border-[#1b263b] pb-3">
             <h3 className="text-xs font-mono font-bold text-amber-700 dark:text-[#f59e0b] uppercase tracking-wider">
@@ -860,7 +1460,7 @@ export default function ClassDetailView({
       )}
 
       {/* TAB: Manual Book PDF */}
-      {activeTab === 'pdf' && (
+      {!isPreviewMode && activeTab === 'pdf' && (
         <div className="bg-white dark:bg-[#121822] p-5 rounded-xl border border-slate-200 dark:border-[#232f42] space-y-4">
           <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-200 dark:border-[#1b263b] pb-3">
             <div>
@@ -927,8 +1527,8 @@ export default function ClassDetailView({
         </div>
       )}
 
-      {/* TAB: Pretest & Post-Test */}
-      {activeTab === 'exam' && (
+      {/* TAB: Pretest & Post-Test (Student Only, never shown to Lecturer/Admin) */}
+      {!isPreviewMode && !isEducatorOrAdmin && activeTab === 'exam' && (
         <div className="bg-white dark:bg-[#121822] p-5 sm:p-6 rounded-xl border border-slate-200 dark:border-[#232f42] space-y-4">
           {!examActive && !examFinished && (
             <div className="text-center py-6 max-w-lg mx-auto space-y-3 font-mono">
@@ -1111,8 +1711,8 @@ export default function ClassDetailView({
         </div>
       )}
 
-      {/* TAB: Task Submissions */}
-      {activeTab === 'tasks' && (
+      {/* TAB: Task Submissions (Student) */}
+      {!isPreviewMode && !isEducatorOrAdmin && activeTab === 'tasks' && (
         <div className="bg-white dark:bg-[#121822] p-5 rounded-xl border border-slate-200 dark:border-[#232f42] space-y-4">
           <div className="flex items-center justify-between border-b border-slate-200 dark:border-[#1b263b] pb-3">
             <div>
@@ -1153,7 +1753,7 @@ export default function ClassDetailView({
                   >
                     <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5">
                       <div>
-                        <div className="flex items-center gap-2">
+                        <div className="flex flex-wrap items-center gap-2">
                           <span
                             className={`text-[9px] font-mono font-bold px-2 py-0.5 rounded-xs uppercase ${
                               isDone
@@ -1163,6 +1763,11 @@ export default function ClassDetailView({
                           >
                             {isDone ? 'TELAH DIKUMPULKAN ✓' : 'BELUM MENGUMPULKAN'}
                           </span>
+                          {typeof task.grade === 'number' && (
+                            <span className="text-[9px] font-mono font-bold px-2 py-0.5 rounded-xs bg-indigo-50 dark:bg-indigo-950 text-indigo-700 dark:text-indigo-300 border border-indigo-200 dark:border-indigo-500/40">
+                              NILAI: {task.grade}/100
+                            </span>
+                          )}
                           <span className="text-[10px] font-mono text-slate-500 dark:text-slate-400">
                             Tenggat:{' '}
                             <strong className="text-slate-700 dark:text-slate-300">
@@ -1176,6 +1781,11 @@ export default function ClassDetailView({
                         <p className="text-xs text-slate-600 dark:text-slate-400 mt-1 leading-relaxed">
                           {task.note}
                         </p>
+                        {task.feedback && (
+                          <p className="text-[11px] font-mono text-indigo-700 dark:text-indigo-300 mt-1.5">
+                            Catatan Dosen: {task.feedback}
+                          </p>
+                        )}
                       </div>
 
                       <div className="flex items-center gap-2 self-end sm:self-center shrink-0 font-mono">
@@ -1237,6 +1847,555 @@ export default function ClassDetailView({
                   </div>
                 );
               })}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* INSTRUCTOR / ADMIN TAB: QR Attendance Control & Attendees */}
+      {!isPreviewMode && isEducatorOrAdmin && activeTab === 'attendance' && (
+        <div className="bg-white dark:bg-[#121822] p-5 rounded-xl border border-slate-200 dark:border-[#232f42] space-y-5">
+          <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-200 dark:border-[#1b263b] pb-3">
+            <div>
+              <h3 className="text-xs font-mono font-bold text-amber-700 dark:text-[#f59e0b] uppercase tracking-wider flex items-center gap-1.5">
+                <QrCode className="w-4 h-4" />
+                <span>
+                  {language === 'en'
+                    ? '// CLASS ATTENDANCE SESSION & ATTENDEES'
+                    : '// SESI PRESENSI QR & DAFTAR HADIR'}
+                </span>
+              </h3>
+              <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-0.5">
+                {language === 'en'
+                  ? 'Open or close a meeting attendance session and verify live Firestore check-ins.'
+                  : 'Buka atau tutup kode sesi presensi pertemuan dan pantau mahasiswa yang telah hadir.'}
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={() => void loadInstructorAttendance()}
+              disabled={attLoading}
+              className="text-[11px] font-mono font-bold px-3 py-1.5 rounded-xs bg-slate-100 dark:bg-[#1c2432] text-slate-700 dark:text-slate-200 border border-slate-200 dark:border-slate-700 flex items-center gap-1.5 hover:bg-slate-200 dark:hover:bg-[#253245]"
+            >
+              <RefreshCw className={`w-3.5 h-3.5 ${attLoading ? 'animate-spin' : ''}`} />
+              {language === 'en' ? 'Refresh' : 'Muat Ulang'}
+            </button>
+          </div>
+
+          {attFeedback && (
+            <div
+              className={`p-3 rounded-lg text-xs font-mono flex items-center gap-2 border ${
+                attFeedback.type === 'success'
+                  ? 'bg-emerald-50 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-300 border-emerald-200 dark:border-emerald-500/40'
+                  : 'bg-rose-50 dark:bg-rose-950/40 text-rose-700 dark:text-rose-300 border-rose-200 dark:border-rose-500/40'
+              }`}
+            >
+              {attFeedback.type === 'success' ? (
+                <CheckCircle2 className="w-4 h-4 shrink-0" />
+              ) : (
+                <AlertTriangle className="w-4 h-4 shrink-0" />
+              )}
+              <span>{attFeedback.text}</span>
+            </div>
+          )}
+
+          {/* Active Session Banner OR Open Session Form */}
+          {attSession?.isOpen ? (
+            <div className="p-4 rounded-xl bg-emerald-50/70 dark:bg-emerald-950/30 border border-emerald-300 dark:border-emerald-500/40 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+              <div className="space-y-1 font-mono">
+                <span className="text-[10px] font-bold text-emerald-700 dark:text-emerald-300 uppercase">
+                  ● {language === 'en' ? 'ATTENDANCE SESSION OPEN' : 'SESI PRESENSI SEDANG AKTIF'} —{' '}
+                  {language === 'en' ? 'MEETING' : 'PERTEMUAN'} {attSession.meetingNo}
+                </span>
+                <div className="text-xl sm:text-2xl font-black tracking-widest text-slate-900 dark:text-white">
+                  {attSession.sessionCode}
+                </div>
+                <p className="text-[11px] text-slate-600 dark:text-slate-400">
+                  {language === 'en' ? 'Expires at' : 'Berakhir pada'}:{' '}
+                  {attSession.expiresAt
+                    ? new Date(attSession.expiresAt).toLocaleTimeString('id-ID', {
+                        hour: '2-digit',
+                        minute: '2-digit',
+                      })
+                    : '-'}{' '}
+                  WIB
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={handleCloseAttendance}
+                disabled={attLoading}
+                className="bg-rose-600 hover:bg-rose-500 text-white text-xs font-mono font-bold px-4 py-2 rounded-lg shadow-sm transition shrink-0"
+              >
+                {language === 'en' ? 'CLOSE SESSION' : 'TUTUP SESI PRESENSI'}
+              </button>
+            </div>
+          ) : (
+            <form
+              onSubmit={handleOpenAttendance}
+              className="p-4 rounded-xl bg-slate-50 dark:bg-[#0a0f18] border border-slate-200 dark:border-[#1e2a3f] grid grid-cols-1 sm:grid-cols-4 gap-3 items-end font-mono"
+            >
+              <div>
+                <label className="block text-[10px] font-bold text-slate-600 dark:text-slate-400 mb-1 uppercase">
+                  {language === 'en' ? 'Meeting (1–16)' : 'Pertemuan (1–16)'}
+                </label>
+                <select
+                  value={attMeetingNo}
+                  onChange={(e) => setAttMeetingNo(Number(e.target.value))}
+                  className="w-full px-2.5 py-2 text-xs rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-[#121822] text-slate-900 dark:text-slate-100"
+                >
+                  {meetingsList.map((m) => (
+                    <option key={m.id} value={m.order}>
+                      Pertemuan {m.order < 10 ? `0${m.order}` : m.order}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <label className="block text-[10px] font-bold text-slate-600 dark:text-slate-400 mb-1 uppercase">
+                  {language === 'en' ? 'Duration (Mins)' : 'Durasi (Menit)'}
+                </label>
+                <select
+                  value={attDurationMins}
+                  onChange={(e) => setAttDurationMins(Number(e.target.value))}
+                  className="w-full px-2.5 py-2 text-xs rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-[#121822] text-slate-900 dark:text-slate-100"
+                >
+                  <option value={10}>10 Menit</option>
+                  <option value={15}>15 Menit</option>
+                  <option value={30}>30 Menit</option>
+                  <option value={60}>60 Menit</option>
+                </select>
+              </div>
+              <div>
+                <label className="block text-[10px] font-bold text-slate-600 dark:text-slate-400 mb-1 uppercase">
+                  {language === 'en' ? 'Custom Code (Optional)' : 'Kode Kustom (Opsional)'}
+                </label>
+                <input
+                  type="text"
+                  value={attCustomCode}
+                  onChange={(e) => setAttCustomCode(e.target.value.toUpperCase())}
+                  placeholder="Otomatis jika kosong"
+                  className="w-full px-2.5 py-2 text-xs rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-[#121822] text-slate-900 dark:text-slate-100"
+                />
+              </div>
+              <button
+                type="submit"
+                disabled={attLoading}
+                className="bg-[#f59e0b] hover:bg-[#d97706] text-black text-xs font-bold px-4 py-2 rounded-lg shadow-sm transition flex items-center justify-center gap-1.5"
+              >
+                <QrCode className="w-4 h-4" />
+                {language === 'en' ? 'OPEN QR SESSION' : 'BUKA SESI QR'}
+              </button>
+            </form>
+          )}
+
+          {/* Attendees List */}
+          <div className="space-y-3">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <h4 className="text-xs font-mono font-bold text-slate-800 dark:text-slate-200 flex items-center gap-1.5">
+                <Users className="w-4 h-4 text-sky-600 dark:text-[#00e5ff]" />
+                {language === 'en' ? 'Checked-In Students' : 'Daftar Mahasiswa Hadir'} ({attendees.length})
+              </h4>
+              <select
+                value={attendeesFilterMeeting}
+                onChange={(e) => {
+                  const val = e.target.value;
+                  setAttendeesFilterMeeting(val);
+                  void loadInstructorAttendance(val);
+                }}
+                className="px-2.5 py-1 text-xs font-mono rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-[#0a0f18] text-slate-800 dark:text-slate-200"
+              >
+                <option value="">{language === 'en' ? 'All Meetings' : 'Semua Pertemuan'}</option>
+                {meetingsList.map((m) => (
+                  <option key={m.id} value={m.order}>
+                    Pertemuan {m.order}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            {attendees.length === 0 ? (
+              <div className="py-8 text-center bg-slate-50 dark:bg-[#0a0f18] rounded-xl border border-dashed border-slate-200 dark:border-[#232f42] text-xs font-mono text-slate-500 dark:text-slate-400">
+                {language === 'en'
+                  ? 'No attendance records found for this filter.'
+                  : 'Belum ada catatan presensi mahasiswa untuk filter ini.'}
+              </div>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full text-left text-xs font-mono">
+                  <thead className="bg-slate-50 dark:bg-[#0a0f18] text-slate-500 dark:text-slate-400 uppercase text-[10px] border-b border-slate-200 dark:border-[#232f42]">
+                    <tr>
+                      <th className="py-2.5 px-3">{language === 'en' ? 'Student' : 'Mahasiswa'}</th>
+                      <th className="py-2.5 px-3">{language === 'en' ? 'Meeting' : 'Pertemuan'}</th>
+                      <th className="py-2.5 px-3">{language === 'en' ? 'Code' : 'Kode'}</th>
+                      <th className="py-2.5 px-3">{language === 'en' ? 'Time' : 'Waktu'}</th>
+                      <th className="py-2.5 px-3">Status</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100 dark:divide-[#1e2a3f]">
+                    {attendees.map((att) => (
+                      <tr key={att.id}>
+                        <td className="py-2.5 px-3 font-semibold text-slate-900 dark:text-slate-100">
+                          {att.studentName}
+                        </td>
+                        <td className="py-2.5 px-3 text-slate-600 dark:text-slate-300">
+                          P{att.meetingNo}
+                        </td>
+                        <td className="py-2.5 px-3 text-amber-700 dark:text-[#f59e0b]">
+                          {att.sessionCode}
+                        </td>
+                        <td className="py-2.5 px-3 text-slate-500 dark:text-slate-400">
+                          {att.timestampLabel}
+                        </td>
+                        <td className="py-2.5 px-3">
+                          <span className="px-2 py-0.5 rounded-xs text-[10px] font-bold bg-emerald-50 dark:bg-emerald-950/60 text-emerald-700 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-500/40">
+                            {att.status}
+                          </span>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* INSTRUCTOR / ADMIN TAB: Submissions Grading */}
+      {!isPreviewMode && isEducatorOrAdmin && activeTab === 'grading' && (
+        <div className="bg-white dark:bg-[#121822] p-5 rounded-xl border border-slate-200 dark:border-[#232f42] space-y-4">
+          <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-200 dark:border-[#1b263b] pb-3">
+            <div>
+              <h3 className="text-xs font-mono font-bold text-amber-700 dark:text-[#f59e0b] uppercase tracking-wider flex items-center gap-1.5">
+                <Award className="w-4 h-4" />
+                <span>
+                  {language === 'en'
+                    ? '// CLASS SUBMISSIONS & GRADING'
+                    : '// PENILAIAN TUGAS MAHASISWA'}
+                </span>
+              </h3>
+              <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-0.5">
+                {language === 'en'
+                  ? 'Review student submissions in this class and save 0–100 grades + feedback.'
+                  : 'Tinjau pengumpulan tugas mahasiswa pada kelas ini dan simpan nilai (0–100) beserta umpan balik.'}
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={() => void loadInstructorGrading()}
+              disabled={gradingLoading}
+              className="text-[11px] font-mono font-bold px-3 py-1.5 rounded-xs bg-slate-100 dark:bg-[#1c2432] text-slate-700 dark:text-slate-200 border border-slate-200 dark:border-slate-700 flex items-center gap-1.5"
+            >
+              <RefreshCw className={`w-3.5 h-3.5 ${gradingLoading ? 'animate-spin' : ''}`} />
+              {language === 'en' ? 'Refresh' : 'Muat Ulang'}
+            </button>
+          </div>
+
+          {gradingNotice && (
+            <div
+              className={`p-3 rounded-lg text-xs font-mono flex items-center gap-2 border ${
+                gradingNotice.type === 'success'
+                  ? 'bg-emerald-50 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-300 border-emerald-200 dark:border-emerald-500/40'
+                  : 'bg-rose-50 dark:bg-rose-950/40 text-rose-700 dark:text-rose-300 border-rose-200 dark:border-rose-500/40'
+              }`}
+            >
+              {gradingNotice.type === 'success' ? (
+                <CheckCircle2 className="w-4 h-4 shrink-0" />
+              ) : (
+                <AlertTriangle className="w-4 h-4 shrink-0" />
+              )}
+              <span>{gradingNotice.text}</span>
+            </div>
+          )}
+
+          {gradingLoading ? (
+            <div className="py-8 text-center text-xs font-mono text-slate-400">
+              Memuat daftar pengumpulan tugas...
+            </div>
+          ) : classSubmissions.length === 0 ? (
+            <div className="py-8 text-center bg-slate-50 dark:bg-[#0a0f18] rounded-xl border border-dashed border-slate-200 dark:border-[#232f42] text-xs font-mono text-slate-500 dark:text-slate-400">
+              {language === 'en'
+                ? 'No student submissions recorded in Firestore for this class yet.'
+                : 'Belum ada pengumpulan tugas mahasiswa pada kelas ini di Firestore.'}
+            </div>
+          ) : (
+            <div className="space-y-3">
+              {classSubmissions.map((sub) => (
+                <div
+                  key={sub.id}
+                  className="p-4 rounded-xl border border-slate-200 dark:border-[#1e2a3f] bg-slate-50 dark:bg-[#0a0f18] space-y-3"
+                >
+                  <div className="flex flex-wrap items-start justify-between gap-2">
+                    <div>
+                      <div className="flex items-center gap-2">
+                        <span className="text-xs font-bold text-slate-900 dark:text-slate-100">
+                          {sub.studentName}
+                        </span>
+                        <span
+                          className={`text-[9px] font-mono font-bold px-2 py-0.5 rounded-xs border ${
+                            sub.status === 'graded'
+                              ? 'bg-emerald-50 dark:bg-emerald-950/60 text-emerald-700 dark:text-emerald-300 border-emerald-200 dark:border-emerald-500/40'
+                              : 'bg-amber-50 dark:bg-amber-950/60 text-amber-700 dark:text-amber-300 border-amber-200 dark:border-amber-500/40'
+                          }`}
+                        >
+                          {sub.status === 'graded' ? `DINILAI (${sub.grade})` : 'MENUNGGU NILAI'}
+                        </span>
+                      </div>
+                      <p className="text-xs font-mono text-slate-600 dark:text-slate-300 mt-0.5">
+                        {sub.assignment} • {sub.submittedAt}
+                      </p>
+                      {sub.notes && (
+                        <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-1">
+                          Catatan: {sub.notes}
+                        </p>
+                      )}
+                    </div>
+                    {sub.fileUrl && (
+                      <a
+                        href={sub.fileUrl}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="text-xs font-mono font-bold text-blue-600 dark:text-[#00e5ff] hover:underline flex items-center gap-1"
+                      >
+                        <ExternalLink className="w-3.5 h-3.5" />
+                        {sub.fileName || 'Buka Berkas'}
+                      </a>
+                    )}
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-12 gap-2 items-center pt-2 border-t border-slate-200 dark:border-[#1b263b] font-mono">
+                    <div className="sm:col-span-2">
+                      <input
+                        type="number"
+                        min={0}
+                        max={100}
+                        value={gradeInputs[sub.id] ?? ''}
+                        onChange={(e) =>
+                          setGradeInputs((prev) => ({ ...prev, [sub.id]: e.target.value }))
+                        }
+                        placeholder="0–100"
+                        className="w-full px-2.5 py-1.5 text-xs rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-[#121822] text-slate-900 dark:text-slate-100"
+                      />
+                    </div>
+                    <div className="sm:col-span-7">
+                      <input
+                        type="text"
+                        value={feedbackInputs[sub.id] ?? ''}
+                        onChange={(e) =>
+                          setFeedbackInputs((prev) => ({ ...prev, [sub.id]: e.target.value }))
+                        }
+                        placeholder={
+                          language === 'en'
+                            ? 'Optional feedback for student...'
+                            : 'Umpan balik / catatan dosen (opsional)...'
+                        }
+                        className="w-full px-2.5 py-1.5 text-xs rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-[#121822] text-slate-900 dark:text-slate-100"
+                      />
+                    </div>
+                    <div className="sm:col-span-3 flex justify-end">
+                      <button
+                        type="button"
+                        onClick={() => handleSaveSubmissionGrade(sub)}
+                        disabled={gradingId === sub.id}
+                        className="w-full sm:w-auto bg-[#f59e0b] hover:bg-[#d97706] text-black text-xs font-bold px-3.5 py-1.5 rounded-lg transition flex items-center justify-center gap-1.5 disabled:opacity-50"
+                      >
+                        <Save className="w-3.5 h-3.5" />
+                        {gradingId === sub.id
+                          ? language === 'en'
+                            ? 'Saving...'
+                            : 'Menyimpan...'
+                          : language === 'en'
+                            ? 'Save Grade'
+                            : 'Simpan Nilai'}
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* INSTRUCTOR / ADMIN TAB: Server-Fetched Reference Keys & Class Exam Statistics */}
+      {!isPreviewMode && isEducatorOrAdmin && activeTab === 'exam_insights' && (
+        <div className="bg-white dark:bg-[#121822] p-5 rounded-xl border border-slate-200 dark:border-[#232f42] space-y-5">
+          <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-200 dark:border-[#1b263b] pb-3">
+            <div>
+              <h3 className="text-xs font-mono font-bold text-amber-700 dark:text-[#f59e0b] uppercase tracking-wider flex items-center gap-1.5">
+                <BarChart3 className="w-4 h-4" />
+                <span>
+                  {language === 'en'
+                    ? '// EVALUATION REFERENCE KEYS & EXAM STATISTICS'
+                    : '// KUNCI EVALUASI SERVER & STATISTIK UJIAN KELAS'}
+                </span>
+              </h3>
+              <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-0.5">
+                {language === 'en'
+                  ? 'Reference keys are retrieved exclusively from /api/grade for authorized instructors/admins.'
+                  : 'Kunci jawaban referensi diambil langsung dari server /api/grade khusus Dosen & Admin.'}
+              </p>
+            </div>
+            <div className="flex items-center gap-1.5 font-mono">
+              {['pretest', 'posttest'].map((et) => (
+                <button
+                  key={et}
+                  type="button"
+                  onClick={() => setEvalKeyType(et)}
+                  className={`px-3 py-1.5 rounded-xs text-[10px] font-bold uppercase border transition ${
+                    evalKeyType === et
+                      ? 'bg-[#f59e0b] text-black border-[#f59e0b]'
+                      : 'bg-slate-100 dark:bg-[#1c2432] text-slate-700 dark:text-slate-300 border-slate-200 dark:border-slate-700'
+                  }`}
+                >
+                  {et}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {evalAnalyticsError && (
+            <div className="p-3 rounded-lg bg-rose-50 dark:bg-rose-950/50 border border-rose-200 dark:border-rose-500/40 text-rose-700 dark:text-rose-300 text-xs font-mono flex items-center gap-2">
+              <AlertTriangle className="w-4 h-4 shrink-0" />
+              <span>{evalAnalyticsError}</span>
+            </div>
+          )}
+
+          {/* Class Exam Statistics Summary */}
+          {(() => {
+            const scoredAttempts = classExamAttempts.filter((a) => typeof a.score === 'number');
+            const avgScore =
+              scoredAttempts.length > 0
+                ? Math.round(
+                    scoredAttempts.reduce((acc, a) => acc + a.score, 0) / scoredAttempts.length
+                  )
+                : 0;
+            const passedCount = scoredAttempts.filter((a) => a.score >= 75).length;
+            return (
+              <div className="grid grid-cols-3 gap-3 font-mono">
+                <div className="p-3 rounded-xl bg-slate-50 dark:bg-[#0a0f18] border border-slate-200 dark:border-[#1e2a3f]">
+                  <span className="text-[10px] text-slate-500 dark:text-slate-400 block">
+                    TOTAL PESERTA UJIAN
+                  </span>
+                  <span className="text-lg font-black text-slate-900 dark:text-white">
+                    {classExamAttempts.length}
+                  </span>
+                </div>
+                <div className="p-3 rounded-xl bg-slate-50 dark:bg-[#0a0f18] border border-slate-200 dark:border-[#1e2a3f]">
+                  <span className="text-[10px] text-slate-500 dark:text-slate-400 block">
+                    RATA-RATA SKOR
+                  </span>
+                  <span className="text-lg font-black text-amber-600 dark:text-[#f59e0b]">
+                    {avgScore} / 100
+                  </span>
+                </div>
+                <div className="p-3 rounded-xl bg-slate-50 dark:bg-[#0a0f18] border border-slate-200 dark:border-[#1e2a3f]">
+                  <span className="text-[10px] text-slate-500 dark:text-slate-400 block">
+                    LULUS (≥ 75)
+                  </span>
+                  <span className="text-lg font-black text-emerald-600 dark:text-emerald-400">
+                    {passedCount} / {scoredAttempts.length}
+                  </span>
+                </div>
+              </div>
+            );
+          })()}
+
+          {/* Server Reference Answer Keys */}
+          <div className="space-y-2.5">
+            <div className="flex items-center justify-between">
+              <h4 className="text-xs font-mono font-bold text-slate-800 dark:text-slate-200 flex items-center gap-1.5">
+                <KeyRound className="w-4 h-4 text-amber-600 dark:text-[#f59e0b]" />
+                {language === 'en' ? 'Reference Answer Key' : 'Kunci Jawaban Referensi'} (
+                {evalKeyType.toUpperCase()})
+              </h4>
+              {instructorKeySource && (
+                <span className="text-[10px] font-mono text-sky-700 dark:text-[#00e5ff] bg-sky-50 dark:bg-[#00e5ff]/10 px-2 py-0.5 rounded border border-sky-200 dark:border-[#00e5ff]/30">
+                  SOURCE: {instructorKeySource.toUpperCase()}
+                </span>
+              )}
+            </div>
+
+            {evalAnalyticsLoading ? (
+              <div className="py-6 text-center text-xs font-mono text-slate-400">
+                Memuat kunci evaluasi dari server...
+              </div>
+            ) : (
+              <div className="space-y-2.5">
+                {examQuestions.map((q, idx) => {
+                  const refOptionIdx = instructorKeyMap?.[q.id];
+                  return (
+                    <div
+                      key={q.id}
+                      className="p-3.5 rounded-lg border border-slate-200 dark:border-[#1e2a3f] bg-slate-50 dark:bg-[#0a0f18] space-y-2"
+                    >
+                      <p className="text-xs font-mono font-bold text-slate-900 dark:text-slate-100">
+                        [SOAL 0{idx + 1}] {q.question}
+                      </p>
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5">
+                        {q.options.map((opt, optIdx) => {
+                          const isRefAnswer = refOptionIdx === optIdx;
+                          return (
+                            <div
+                              key={optIdx}
+                              className={`p-2 rounded text-[11px] font-mono border ${
+                                isRefAnswer
+                                  ? 'bg-emerald-50 dark:bg-emerald-950/50 border-emerald-300 dark:border-emerald-500/50 text-emerald-800 dark:text-emerald-300 font-bold'
+                                  : 'bg-white dark:bg-[#121822] border-slate-200 dark:border-[#1e2a3f] text-slate-600 dark:text-slate-400'
+                              }`}
+                            >
+                              {isRefAnswer ? '✓ ' : ''}
+                              {opt}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+
+          {/* Student Exam Attempts List */}
+          {classExamAttempts.length > 0 && (
+            <div className="space-y-2">
+              <h4 className="text-xs font-mono font-bold text-slate-800 dark:text-slate-200">
+                {language === 'en' ? 'Recent Class Attempts' : 'Riwayat Evaluasi Mahasiswa'}
+              </h4>
+              <div className="overflow-x-auto">
+                <table className="w-full text-left text-xs font-mono">
+                  <thead className="bg-slate-50 dark:bg-[#0a0f18] text-slate-500 dark:text-slate-400 uppercase text-[10px] border-b border-slate-200 dark:border-[#232f42]">
+                    <tr>
+                      <th className="py-2 px-3">UID / Mahasiswa</th>
+                      <th className="py-2 px-3">Tipe</th>
+                      <th className="py-2 px-3">Skor</th>
+                      <th className="py-2 px-3">Status</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100 dark:divide-[#1e2a3f]">
+                    {classExamAttempts.map((att) => (
+                      <tr key={att.id}>
+                        <td className="py-2 px-3 text-slate-800 dark:text-slate-200">
+                          {att.uid || att.id}
+                        </td>
+                        <td className="py-2 px-3 uppercase text-slate-600 dark:text-slate-400">
+                          {att.examType || 'pretest'}
+                        </td>
+                        <td className="py-2 px-3 font-bold text-amber-600 dark:text-[#f59e0b]">
+                          {typeof att.score === 'number' ? `${att.score} / 100` : '-'}
+                        </td>
+                        <td className="py-2 px-3">
+                          <span className="px-2 py-0.5 rounded-xs text-[10px] bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300">
+                            {att.examActive ? 'SEDANG UJIAN' : 'SELESAI'}
+                          </span>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
             </div>
           )}
         </div>

@@ -42,6 +42,28 @@ const sanitizeRole = (value) => {
   return ROLES.STUDENT;
 };
 
+const resolveInstitutionalIdentity = (email) => {
+  const cleanEmail = String(email || '').trim().toLowerCase();
+  if (!cleanEmail) return null;
+  if (/^admin(\.[^@]+)?@smartsa\.edu$/.test(cleanEmail)) {
+    return {
+      role: ROLES.ADMIN,
+      nidn: '',
+      nip: 'ADM-001',
+      nim: '',
+    };
+  }
+  if (/^dosen(\.[^@]+)?@smartsa\.edu$/.test(cleanEmail)) {
+    return {
+      role: ROLES.LECTURER,
+      nidn: '0012088501',
+      nip: '',
+      nim: '',
+    };
+  }
+  return null;
+};
+
 const isAuthProfilePhotoUrlSafe = (url) => {
   if (typeof url !== 'string') return false;
   const trimmed = url.trim();
@@ -54,34 +76,105 @@ const isAuthProfilePhotoUrlSafe = (url) => {
 
 const buildUserProfile = (firebaseUser, firestoreData = null) => {
   const safeFs = stripSensitiveFields(firestoreData);
-  const resolvedRole = sanitizeRole(safeFs?.role);
+  const email = firebaseUser.email || safeFs?.email || '';
+  const institutional = resolveInstitutionalIdentity(email);
+  const fsRole = safeFs?.role ? sanitizeRole(safeFs.role) : null;
+  const resolvedRole =
+    fsRole === ROLES.ADMIN || fsRole === ROLES.LECTURER
+      ? fsRole
+      : institutional?.role || ROLES.STUDENT;
   const resolvedName =
     safeFs?.displayName ||
     firebaseUser.displayName ||
-    (firebaseUser.email ? firebaseUser.email.split('@')[0] : 'Pengguna Smartsa');
-  const resolvedNim = safeFs?.nim || safeFs?.nidn || safeFs?.nip || '';
+    (email ? email.split('@')[0] : 'Pengguna Smartsa');
+  const resolvedNidn =
+    resolvedRole === ROLES.LECTURER
+      ? safeFs?.nidn || institutional?.nidn || safeFs?.nim || ''
+      : safeFs?.nidn || '';
+  const resolvedNip =
+    resolvedRole === ROLES.ADMIN
+      ? safeFs?.nip || institutional?.nip || safeFs?.nim || ''
+      : safeFs?.nip || '';
+  const resolvedNim =
+    resolvedRole === ROLES.LECTURER
+      ? resolvedNidn
+      : resolvedRole === ROLES.ADMIN
+        ? resolvedNip
+        : safeFs?.nim || '';
   const resolvedInstitution = safeFs?.institution || 'Universitas Negeri Surabaya';
   const resolvedPhotoURL = safeFs?.photoURL || firebaseUser.photoURL || null;
 
   return {
     ...(safeFs || {}),
     uid: firebaseUser.uid,
-    email: firebaseUser.email || safeFs?.email || '',
+    email,
     displayName: resolvedName,
     role: resolvedRole,
     institution: resolvedInstitution,
     nim: resolvedNim,
-    ...(resolvedRole === ROLES.LECTURER && resolvedNim ? { nidn: resolvedNim } : {}),
+    ...(resolvedNidn ? { nidn: resolvedNidn } : {}),
+    ...(resolvedNip ? { nip: resolvedNip } : {}),
     photoURL: resolvedPhotoURL,
     emailVerified: Boolean(firebaseUser.emailVerified),
     isDemoMode: false,
   };
 };
 
+async function syncInstitutionalUserDoc(firebaseUser, firestoreData, docExists) {
+  if (!db || !firebaseUser?.uid) return;
+  const profile = buildUserProfile(firebaseUser, firestoreData);
+  const institutional = resolveInstitutionalIdentity(profile.email);
+
+  if (!docExists) {
+    try {
+      const initialDoc = {
+        uid: profile.uid,
+        email: profile.email,
+        displayName: profile.displayName,
+        role: institutional ? institutional.role : ROLES.STUDENT,
+        institution: profile.institution,
+        nim: profile.nim || '',
+        ...(profile.nidn ? { nidn: profile.nidn } : {}),
+        ...(profile.nip ? { nip: profile.nip } : {}),
+        photoURL: profile.photoURL,
+        emailVerified: profile.emailVerified,
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      };
+      await setDoc(doc(db, 'users', firebaseUser.uid), initialDoc);
+    } catch (e) {
+      console.warn('Sinkronisasi dokumen awal ke Firestore diabaikan:', e);
+    }
+    return;
+  }
+
+  if (
+    institutional &&
+    (!firestoreData?.role || firestoreData.role === ROLES.STUDENT) &&
+    institutional.role !== ROLES.STUDENT
+  ) {
+    try {
+      await setDoc(
+        doc(db, 'users', firebaseUser.uid),
+        {
+          role: institutional.role,
+          ...(institutional.nidn && !firestoreData?.nidn ? { nidn: institutional.nidn } : {}),
+          ...(institutional.nip && !firestoreData?.nip ? { nip: institutional.nip } : {}),
+          updatedAt: serverTimestamp(),
+        },
+        { merge: true }
+      );
+    } catch (e) {
+      console.warn('Sinkronisasi role institusional ke Firestore diabaikan:', e);
+    }
+  }
+}
+
 export function AuthProvider({ children }) {
   const [currentUser, setCurrentUser] = useState(null);
   const [userProfile, setUserProfile] = useState(DEMO_USERS.student);
   const [role, setRole] = useState(ROLES.STUDENT);
+  const [devRoleOverride, setDevRoleOverride] = useState(null);
   const [loading, setLoading] = useState(() => Boolean(auth));
   const [isDemoMode, setIsDemoMode] = useState(true);
   const [authError, setAuthError] = useState(null);
@@ -116,26 +209,7 @@ export function AuthProvider({ children }) {
         setUserProfile(profile);
         setRole(profile.role);
 
-        // Hanya buat dokumen awal jika belum ada (role wajib 'student' sesuai firestore.rules)
-        if (!docExists && db) {
-          try {
-            const initialDoc = {
-              uid: profile.uid,
-              email: profile.email,
-              displayName: profile.displayName,
-              role: ROLES.STUDENT,
-              institution: profile.institution,
-              nim: profile.nim,
-              photoURL: profile.photoURL,
-              emailVerified: profile.emailVerified,
-              createdAt: serverTimestamp(),
-              updatedAt: serverTimestamp(),
-            };
-            await setDoc(doc(db, 'users', user.uid), initialDoc);
-          } catch (e) {
-            console.warn('Sinkronisasi dokumen awal ke Firestore diabaikan:', e);
-          }
-        }
+        await syncInstitutionalUserDoc(user, firestoreData, docExists);
       } else {
         setCurrentUser(null);
         setIsDemoMode(true);
@@ -178,10 +252,12 @@ export function AuthProvider({ children }) {
       const fbUser = res.user;
 
       let fsData = null;
+      let docExists = false;
       if (db) {
         try {
           const userDoc = await getDoc(doc(db, 'users', fbUser.uid));
           if (userDoc.exists()) {
+            docExists = true;
             fsData = stripSensitiveFields(userDoc.data());
           }
         } catch (e) {
@@ -190,6 +266,7 @@ export function AuthProvider({ children }) {
       }
 
       const fullProfile = buildUserProfile(fbUser, fsData);
+      await syncInstitutionalUserDoc(fbUser, fsData, docExists);
       setCurrentUser(fbUser);
       setUserProfile(fullProfile);
       setRole(fullProfile.role);
@@ -201,7 +278,7 @@ export function AuthProvider({ children }) {
     }
   };
 
-  // 2. Registrasi Akun Baru dengan Email & Password (selalu role: 'student' sesuai firestore.rules)
+  // 2. Registrasi Akun Baru dengan Email & Password (selalu 'student' kecuali domain resmi @smartsa.edu)
   const register = async (
     email,
     password,
@@ -213,9 +290,10 @@ export function AuthProvider({ children }) {
     setAuthError(null);
     ensureFirebaseAuth();
     const cleanEmail = (email || '').trim().toLowerCase();
-    const safeRole = ROLES.STUDENT;
+    const institutional = resolveInstitutionalIdentity(cleanEmail);
+    const safeRole = institutional ? institutional.role : ROLES.STUDENT;
     const cleanName = (displayName || '').trim() || (cleanEmail ? cleanEmail.split('@')[0] : 'Pengguna Smartsa');
-    const cleanNim = (nim || '').trim();
+    const cleanNim = (nim || '').trim() || institutional?.nidn || institutional?.nip || '';
     const cleanInstitution = (institution || '').trim() || 'Universitas Negeri Surabaya';
 
     try {
@@ -240,6 +318,8 @@ export function AuthProvider({ children }) {
         role: safeRole,
         institution: cleanInstitution,
         nim: cleanNim,
+        ...(institutional?.nidn ? { nidn: institutional.nidn } : {}),
+        ...(institutional?.nip ? { nip: institutional.nip } : {}),
         emailVerified: Boolean(res.user.emailVerified),
         photoURL: null,
         createdAt: serverTimestamp(),
@@ -285,15 +365,19 @@ export function AuthProvider({ children }) {
           const userDoc = await getDoc(userRef);
           if (userDoc.exists()) {
             firestoreData = stripSensitiveFields(userDoc.data());
+            await syncInstitutionalUserDoc(res.user, firestoreData, true);
           } else {
+            const inst = resolveInstitutionalIdentity(res.user.email);
             firestoreData = {
               uid: res.user.uid,
               email: res.user.email || '',
               displayName: res.user.displayName || 'Mahasiswa Smartsa',
               photoURL: res.user.photoURL || null,
-              role: ROLES.STUDENT,
+              role: inst ? inst.role : ROLES.STUDENT,
               institution: 'Universitas Negeri Surabaya',
-              nim: '',
+              nim: inst?.nidn || inst?.nip || '',
+              ...(inst?.nidn ? { nidn: inst.nidn } : {}),
+              ...(inst?.nip ? { nip: inst.nip } : {}),
               emailVerified: Boolean(res.user.emailVerified),
               provider: 'google.com',
               createdAt: serverTimestamp(),
@@ -334,15 +418,19 @@ export function AuthProvider({ children }) {
           const userDoc = await getDoc(userRef);
           if (userDoc.exists()) {
             firestoreData = stripSensitiveFields(userDoc.data());
+            await syncInstitutionalUserDoc(res.user, firestoreData, true);
           } else {
+            const inst = resolveInstitutionalIdentity(res.user.email);
             firestoreData = {
               uid: res.user.uid,
               email: res.user.email || '',
               displayName: res.user.displayName || 'Pengguna GitHub',
               photoURL: res.user.photoURL || null,
-              role: ROLES.STUDENT,
+              role: inst ? inst.role : ROLES.STUDENT,
               institution: 'Universitas Negeri Surabaya',
-              nim: '',
+              nim: inst?.nidn || inst?.nip || '',
+              ...(inst?.nidn ? { nidn: inst.nidn } : {}),
+              ...(inst?.nip ? { nip: inst.nip } : {}),
               emailVerified: Boolean(res.user.emailVerified),
               provider: 'github.com',
               createdAt: serverTimestamp(),
@@ -378,6 +466,7 @@ export function AuthProvider({ children }) {
       console.warn('SignOut error:', e);
     }
     clearLegacyAuthStorage();
+    setDevRoleOverride(null);
     setCurrentUser(null);
     setIsDemoMode(true);
     setUserProfile(DEMO_USERS.student);
@@ -494,12 +583,50 @@ export function AuthProvider({ children }) {
     }
   };
 
+  const isDevSimulated = Boolean(import.meta.env.DEV && devRoleOverride);
+  const effectiveRole = isDevSimulated ? sanitizeRole(devRoleOverride) : role;
+  const effectiveUserProfile = isDevSimulated
+    ? {
+        ...userProfile,
+        role: effectiveRole,
+        ...(isDemoMode && DEMO_USERS[effectiveRole]
+          ? {
+              displayName: DEMO_USERS[effectiveRole].displayName,
+              institution: DEMO_USERS[effectiveRole].institution || userProfile.institution,
+              nim:
+                DEMO_USERS[effectiveRole].nim ||
+                DEMO_USERS[effectiveRole].nidn ||
+                DEMO_USERS[effectiveRole].nip ||
+                '',
+              nidn: DEMO_USERS[effectiveRole].nidn || '',
+              nip: DEMO_USERS[effectiveRole].nip || '',
+            }
+          : {
+              nidn: effectiveRole === ROLES.LECTURER ? userProfile.nidn || '0012088501' : userProfile.nidn,
+              nip: effectiveRole === ROLES.ADMIN ? userProfile.nip || 'ADM-001' : userProfile.nip,
+            }),
+      }
+    : userProfile;
+
+  const simulateDevRole = import.meta.env.DEV
+    ? (targetRole) => {
+        if (!targetRole) {
+          setDevRoleOverride(null);
+          return;
+        }
+        setDevRoleOverride(sanitizeRole(targetRole));
+      }
+    : null;
+
   return (
     <AuthContext.Provider
       value={{
         currentUser,
-        userProfile,
-        role,
+        userProfile: effectiveUserProfile,
+        role: effectiveRole,
+        actualRole: role,
+        isRoleSimulated: isDevSimulated,
+        simulateDevRole,
         loading,
         isDemoMode,
         authError,

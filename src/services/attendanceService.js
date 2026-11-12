@@ -364,6 +364,7 @@ export async function recordMeetingAttendance({
     attendanceId,
     classId,
     uid,
+    studentName: auth?.currentUser?.displayName || auth?.currentUser?.email || 'Mahasiswa',
     meetingNo: resolvedOrder,
     meetingTitle: meetingTitle || `Pertemuan ${padded}: ${classData.title || classData.name || ''}`.trim(),
     sessionCode: expectedCode,
@@ -383,4 +384,51 @@ export async function recordMeetingAttendance({
     addedPercent: 6,
     message: `Presensi Pertemuan ${padded} berhasil diverifikasi di Firestore! Progres bertambah +6%.`,
   };
+}
+
+export async function fetchMeetingAttendees(classId, meetingNo = null) {
+  if (!classId) return [];
+
+  if (!auth?.currentUser || !db) {
+    const demo = demoAttendanceStore.get(classId);
+    if (!demo?.history?.length) return [];
+    const targetNo = meetingNo ? Number(meetingNo) : null;
+    return demo.history
+      .filter((h) => !targetNo || Number(h.meetingOrder) === targetNo)
+      .map((h) => ({
+        id: h.id,
+        uid: 'demo_student',
+        studentName: 'Mahasiswa Demo',
+        meetingNo: h.meetingOrder,
+        sessionCode: h.barcode,
+        timestampLabel: h.timestamp,
+        status: h.status,
+      }));
+  }
+
+  try {
+    // Query filter tunggal classId agar bebas kebutuhan composite index
+    const q = query(collection(db, 'attendance'), where('classId', '==', classId));
+    const snap = await getDocs(q);
+    const targetNo = meetingNo ? Number(meetingNo) : null;
+    return snap.docs
+      .map((docSnap) => {
+        const d = docSnap.data();
+        return {
+          id: docSnap.id,
+          uid: d.uid || '',
+          studentName: d.studentName || d.uid || 'Mahasiswa',
+          meetingNo: Number(d.meetingNo || 0),
+          sessionCode: d.sessionCode || '',
+          timestampLabel: parseTimestampLabel(d),
+          _sortMs: parseMillis(d.recordedAt),
+          status: d.status || 'TERVERIFIKASI',
+        };
+      })
+      .filter((item) => !targetNo || item.meetingNo === targetNo)
+      .sort((a, b) => b._sortMs - a._sortMs || a.meetingNo - b.meetingNo);
+  } catch (err) {
+    console.warn('[attendanceService] Gagal memuat daftar hadir kelas:', err.message);
+    return [];
+  }
 }

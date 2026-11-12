@@ -20,7 +20,12 @@ import {
   AlertCircle,
 } from 'lucide-react';
 
-export default function ClassesView({ onSelectClass, requestedModal, onClearRequestedModal }) {
+export default function ClassesView({
+  onSelectClass,
+  requestedModal,
+  onClearRequestedModal,
+  onMembershipChanged,
+}) {
   const { role, currentUser, userProfile } = useAuth();
   const { t, language } = useLanguage();
   const [classes, setClasses] = useState([]);
@@ -117,6 +122,7 @@ export default function ClassesView({ onSelectClass, requestedModal, onClearRequ
             : [joinedClass, ...prev]
         );
         setJoinedIds((prev) => new Set([...prev, joinedClass.id]));
+        onMembershipChanged?.(joinedClass.id, joinedClass);
       }
 
       setFeedback({
@@ -187,8 +193,38 @@ export default function ClassesView({ onSelectClass, requestedModal, onClearRequ
     }
   };
 
+  const isEducatorOrAdmin = role === ROLES.LECTURER || role === ROLES.ADMIN;
+
   return (
     <div className="space-y-6">
+      {/* Role-aware Section Header */}
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+        <div>
+          <h2 className="text-lg sm:text-xl font-black text-slate-900 dark:text-slate-100">
+            {role === ROLES.ADMIN
+              ? language === 'en'
+                ? 'Class Catalog Management'
+                : 'Manajemen Katalog Kelas'
+              : role === ROLES.LECTURER
+                ? language === 'en'
+                  ? 'Taught & Managed Classes'
+                  : 'Kelas Ampuan & Pengelolaan'
+                : language === 'en'
+                  ? 'My Classes & Catalog'
+                  : 'Kelas Saya & Katalog'}
+          </h2>
+          <p className="text-xs text-slate-500 dark:text-slate-400">
+            {isEducatorOrAdmin
+              ? language === 'en'
+                ? 'Create new classes, open meeting modules, manage attendance sessions, and grade student work.'
+                : 'Buat kelas baru, kelola pertemuan 1–16, buka sesi presensi, dan nilai tugas mahasiswa.'
+              : language === 'en'
+                ? 'Join a class with its enrollment code or preview the syllabus before joining.'
+                : 'Gabung kelas menggunakan kode kelas atau lihat pratinjau silabus sebelum mendaftar.'}
+          </p>
+        </div>
+      </div>
+
       {/* Header Controls */}
       <div className="bg-white dark:bg-[#121822] p-5 rounded-2xl border border-slate-200 dark:border-[#232f42] shadow-xs flex flex-col sm:flex-row gap-4 items-center justify-between">
         <div className="relative w-full sm:w-80">
@@ -279,6 +315,7 @@ export default function ClassesView({ onSelectClass, requestedModal, onClearRequ
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
           {filteredClasses.map((cls) => {
             const isJoined = joinedIds.has(cls.id);
+            const isOwner = Boolean(currentUser?.uid && cls.lecturerId === currentUser.uid);
             return (
               <div
                 key={cls.id}
@@ -296,11 +333,23 @@ export default function ClassesView({ onSelectClass, requestedModal, onClearRequ
                   <span className="absolute top-3 right-3 bg-slate-900/80 backdrop-blur-xs text-white text-xs font-mono font-bold px-2 py-0.5 rounded-md">
                     {language === 'en' ? 'Code' : 'Kode'}: {cls.code}
                   </span>
-                  {isJoined && (
+                  {isEducatorOrAdmin ? (
+                    <span className="absolute top-3 left-3 bg-indigo-600/90 text-white text-[10px] font-mono font-bold px-2 py-0.5 rounded-md">
+                      {isOwner
+                        ? language === 'en'
+                          ? 'INSTRUCTOR'
+                          : 'PENGAMPU'
+                        : role === ROLES.ADMIN
+                          ? 'ADMIN ACCESS'
+                          : language === 'en'
+                            ? 'MANAGED'
+                            : 'KELOLA'}
+                    </span>
+                  ) : isJoined ? (
                     <span className="absolute top-3 left-3 bg-emerald-600/90 text-white text-[10px] font-mono font-bold px-2 py-0.5 rounded-md">
                       {language === 'en' ? 'ENROLLED' : 'TERGABUNG'} ✓
                     </span>
-                  )}
+                  ) : null}
                 </div>
 
                 <div className="p-5 flex-1 flex flex-col justify-between">
@@ -327,7 +376,16 @@ export default function ClassesView({ onSelectClass, requestedModal, onClearRequ
                       {cls.meetingsCount} {language === 'en' ? 'Meetings' : 'Pertemuan'}
                     </span>
                     <span className="text-blue-600 dark:text-[#f59e0b] font-semibold group-hover:underline">
-                      {t('public_open_syllabus')} &rarr;
+                      {isEducatorOrAdmin
+                        ? language === 'en'
+                          ? 'Manage Class'
+                          : 'Kelola Kelas'
+                        : isJoined
+                          ? language === 'en'
+                            ? 'Open Class'
+                            : 'Buka Kelas'
+                          : t('public_open_syllabus')}{' '}
+                      &rarr;
                     </span>
                   </div>
                 </div>

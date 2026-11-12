@@ -15,10 +15,17 @@ import {
 } from 'lucide-react';
 
 export default function MobileHeader() {
-  const { role, userProfile } = useAuth();
+  const { role, userProfile, isRoleSimulated, simulateDevRole } = useAuth();
   const { t, getRoleLabel } = useLanguage();
   const { theme, toggleTheme } = useTheme();
   const [notifOpen, setNotifOpen] = useState(false);
+
+  const cycleDevRole = () => {
+    if (!import.meta.env.DEV || !simulateDevRole) return;
+    const order = [ROLES.STUDENT, ROLES.LECTURER, ROLES.ADMIN];
+    const next = order[(order.indexOf(role) + 1) % order.length];
+    simulateDevRole(next);
+  };
 
   const roleBadgeClass =
     role === ROLES.ADMIN
@@ -86,10 +93,16 @@ export default function MobileHeader() {
             {theme === 'dark' ? <Sun className="w-4 h-4" /> : <Moon className="w-4 h-4" />}
           </button>
 
-          {/* Static Authenticated Role Badge */}
-          <div
+          {/* Static Authenticated Role Badge (tappable in DEV to simulate roles) */}
+          <button
+            type="button"
+            onClick={import.meta.env.DEV && simulateDevRole ? cycleDevRole : undefined}
             className={`flex items-center gap-1 text-[10px] font-mono font-bold px-2 py-1 rounded-sm border shadow-xs select-none ${roleBadgeClass}`}
-            title={`${userProfile?.displayName || ''} (${getRoleLabel(role)})`}
+            title={
+              import.meta.env.DEV && simulateDevRole
+                ? `${userProfile?.displayName || ''} (${getRoleLabel(role)}) — Tap to switch DEV role${isRoleSimulated ? ' [SIM]' : ''}`
+                : `${userProfile?.displayName || ''} (${getRoleLabel(role)})`
+            }
           >
             {role === ROLES.ADMIN ? (
               <Shield className="w-3 h-3" />
@@ -99,7 +112,7 @@ export default function MobileHeader() {
               <ShieldCheck className="w-3 h-3" />
             )}
             <span className="tracking-wide uppercase">{getRoleLabel(role)}</span>
-          </div>
+          </button>
 
           {/* Notification Bell Button */}
           <div className="relative">

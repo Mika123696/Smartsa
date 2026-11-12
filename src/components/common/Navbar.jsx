@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { useAuth } from '../../context/useAuth';
 import { useTheme } from '../../context/useTheme';
 import { useLanguage } from '../../context/useLanguage';
+import { ROLES, ROLE_BADGE_COLORS } from '../../constants/roles';
 import {
   GraduationCap,
   BookOpen,
@@ -94,7 +95,11 @@ export default function Navbar({ activeTab, setActiveTab, onOpenAuth }) {
               }`}
             >
               <BookOpen className="w-4 h-4" />
-              {t('nav_open_dashboard')}
+              {role === ROLES.ADMIN
+                ? t('topbar_admin_panel')
+                : role === ROLES.LECTURER
+                  ? t('sidebar_lecturer_dash')
+                  : t('nav_open_dashboard')}
             </button>
           </div>
 
@@ -122,10 +127,12 @@ export default function Navbar({ activeTab, setActiveTab, onOpenAuth }) {
             {currentUser ? (
               <div className="flex items-center gap-2">
                 <div
-                  className="hidden sm:flex items-center gap-1.5 bg-slate-100 dark:bg-slate-800 text-xs px-2.5 py-1.5 rounded-lg border border-slate-200 dark:border-slate-700"
+                  className={`hidden sm:flex items-center gap-1.5 text-xs px-2.5 py-1.5 rounded-lg border ${
+                    ROLE_BADGE_COLORS[role] || 'bg-slate-100 dark:bg-slate-800 border-slate-200 dark:border-slate-700'
+                  }`}
                   title={`${userProfile?.displayName || ''} (${getRoleLabel(role)})`}
                 >
-                  <Shield className="w-3.5 h-3.5 text-blue-600 dark:text-blue-400" />
+                  <Shield className="w-3.5 h-3.5" />
                   <span className="font-semibold">{getRoleLabel(role)}</span>
                 </div>
                 <button
@@ -202,7 +209,11 @@ export default function Navbar({ activeTab, setActiveTab, onOpenAuth }) {
               className="w-full text-left px-3 py-2 rounded-lg text-sm font-semibold text-blue-600 dark:text-blue-400 flex items-center gap-2"
             >
               <BookOpen className="w-4 h-4" />
-              {t('nav_open_dashboard')}
+              {role === ROLES.ADMIN
+                ? t('topbar_admin_panel')
+                : role === ROLES.LECTURER
+                  ? t('sidebar_lecturer_dash')
+                  : t('nav_open_dashboard')}
             </button>
           </div>
         )}

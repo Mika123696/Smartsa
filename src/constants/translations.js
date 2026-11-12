@@ -10,8 +10,8 @@ export const translations = {
 
     // Roles
     role_student: 'Mahasiswa',
-    role_lecturer: 'Dosen',
-    role_admin: 'Admin',
+    role_lecturer: 'Dosen Pengajar',
+    role_admin: 'Administrator',
 
     // Public Navbar & Pages
     nav_home: 'Beranda',
@@ -41,11 +41,11 @@ export const translations = {
     public_about_sub: 'Arsitektur pembelajaran digital hibrida yang dirancang untuk keandalan jaringan, integritas evaluasi, dan asistensi AI terisolasi.',
 
     // Sidebar & Topbar
-    sidebar_student_dash: 'Dashboard Mahasiswa',
-    sidebar_lecturer_dash: 'Dashboard Dosen',
+    sidebar_student_dash: 'Dashboard',
+    sidebar_lecturer_dash: 'Hub Pengajar',
     sidebar_admin_dash: 'Konsol Admin',
     sidebar_my_classes: 'Kelas Saya',
-    sidebar_manage_classes: 'Manajemen Kelas',
+    sidebar_manage_classes: 'Kelola Kelas',
     sidebar_materials: 'Pertemuan & Materi',
     sidebar_schedule: 'Jadwal & Presensi',
     sidebar_discussions: 'Forum Diskusi',
@@ -56,6 +56,7 @@ export const translations = {
     topbar_search_placeholder: 'Cari materi, kuis, atau silabus...',
     topbar_join_class: 'Gabung Kelas',
     topbar_create_class: 'Buat Kelas Baru',
+    topbar_admin_panel: 'Panel Admin',
     topbar_demo_active: 'Mode Demo Aktif',
     topbar_system_notif: 'Pemberitahuan Sistem',
     topbar_mark_read: 'Tandai Dibaca',
@@ -275,6 +276,7 @@ export const translations = {
     id_student: 'NIM / NOMOR INDUK MAHASISWA',
     id_lecturer: 'NIDN / NOMOR INDUK DOSEN',
     id_teacher: 'NIP / NOMOR INDUK PEGAWAI',
+    id_admin: 'ID OTORITAS ADMINISTRATOR',
     not_set: 'Belum diisi',
     demo_student_name: 'Mahasiswa Demo',
     default_user_name: 'Pengguna Smartsa',
@@ -334,7 +336,7 @@ export const translations = {
     // Roles
     role_student: 'Student',
     role_lecturer: 'Lecturer',
-    role_admin: 'Admin',
+    role_admin: 'Administrator',
 
     // Public Navbar & Pages
     nav_home: 'Home',
@@ -364,11 +366,11 @@ export const translations = {
     public_about_sub: 'A hybrid digital learning architecture built for network resilience, evaluation integrity, and isolated AI assistance.',
 
     // Sidebar & Topbar
-    sidebar_student_dash: 'Student Dashboard',
-    sidebar_lecturer_dash: 'Lecturer Dashboard',
+    sidebar_student_dash: 'Dashboard',
+    sidebar_lecturer_dash: 'Educator Hub',
     sidebar_admin_dash: 'Admin Console',
-    sidebar_my_classes: 'My Courses',
-    sidebar_manage_classes: 'Manage Courses',
+    sidebar_my_classes: 'My Classes',
+    sidebar_manage_classes: 'Manage Classes',
     sidebar_materials: 'Modules & Tasks',
     sidebar_schedule: 'Schedule & Attendance',
     sidebar_discussions: 'Discussion Forum',
@@ -378,7 +380,8 @@ export const translations = {
     sidebar_public_portal: 'Public Portal',
     topbar_search_placeholder: 'Search modules, quizzes, or syllabi...',
     topbar_join_class: 'Join Class',
-    topbar_create_class: 'Create Class',
+    topbar_create_class: 'Create New Class',
+    topbar_admin_panel: 'Admin Panel',
     topbar_demo_active: 'Demo Mode Active',
     topbar_system_notif: 'System Notifications',
     topbar_mark_read: 'Mark as Read',
@@ -598,6 +601,7 @@ export const translations = {
     id_student: 'STUDENT ID NUMBER (NIM)',
     id_lecturer: 'LECTURER ID NUMBER (NIDN)',
     id_teacher: 'TEACHER ID NUMBER (NIP)',
+    id_admin: 'ADMINISTRATOR AUTHORITY ID',
     not_set: 'Not set',
     demo_student_name: 'Demo Student',
     default_user_name: 'Smartsa User',

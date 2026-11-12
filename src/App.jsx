@@ -6,7 +6,11 @@ import { LanguageProvider } from './context/LanguageContext';
 import { useLanguage } from './context/useLanguage';
 import { useAuth } from './context/useAuth';
 import { ROLES } from './constants/roles';
-import { fetchClasses, normalizeClassDoc } from './services/lmsFirestoreService';
+import {
+  fetchClasses,
+  fetchJoinedMemberships,
+  normalizeClassDoc,
+} from './services/lmsFirestoreService';
 
 // Common & Public UI Components
 import ErrorBoundary from './components/common/ErrorBoundary';
@@ -75,6 +79,8 @@ function MainApp() {
   const isPublicView = PUBLIC_VIEWS.includes(activeView);
 
   const [classes, setClasses] = useState([]);
+  const [joinedClassIds, setJoinedClassIds] = useState(() => new Set());
+  const [membershipsLoaded, setMembershipsLoaded] = useState(false);
   const [selectedSubject, setSelectedSubject] = useState(null);
   const [detailReturnView, setDetailReturnView] = useState('materi');
   const [requestedClassModal, setRequestedClassModal] = useState(null);
@@ -143,14 +149,36 @@ function MainApp() {
     currentUserRef.current = currentUser;
   }, [currentUser]);
 
-  // Load classes for active user / demo session
+  const refreshClassesAndMemberships = useCallback(async (uidOverride = currentUser?.uid) => {
+    const [res, memberships] = await Promise.all([
+      fetchClasses(),
+      uidOverride ? fetchJoinedMemberships(uidOverride) : Promise.resolve([]),
+    ]);
+    const loaded = res.classes || [];
+    setClasses(loaded);
+    setJoinedClassIds(new Set(memberships.map((m) => m.classId)));
+    setMembershipsLoaded(true);
+    setSelectedSubject((prev) => {
+      if (prev && loaded.some((c) => c.id === prev.id)) {
+        return loaded.find((c) => c.id === prev.id);
+      }
+      return loaded[0] || prev;
+    });
+  }, [currentUser?.uid]);
+
+  // Load classes and memberships for active user / demo session
   useEffect(() => {
     let mounted = true;
     const loadClasses = async () => {
-      const res = await fetchClasses();
+      const [res, memberships] = await Promise.all([
+        fetchClasses(),
+        currentUser?.uid ? fetchJoinedMemberships(currentUser.uid) : Promise.resolve([]),
+      ]);
       if (!mounted) return;
       const loaded = res.classes || [];
       setClasses(loaded);
+      setJoinedClassIds(new Set(memberships.map((m) => m.classId)));
+      setMembershipsLoaded(true);
       setSelectedSubject((prev) => {
         if (prev && loaded.some((c) => c.id === prev.id)) {
           return loaded.find((c) => c.id === prev.id);
@@ -295,9 +323,39 @@ function MainApp() {
   };
 
   const handleQuickAction = () => {
+    if (role === ROLES.ADMIN) {
+      navigateTo('dashboard');
+      return;
+    }
     setRequestedClassModal(role === ROLES.STUDENT ? 'join' : 'create');
     navigateTo('classes-all');
   };
+
+  const handleMembershipChanged = useCallback((classId, updatedClass = null) => {
+    if (classId) {
+      setJoinedClassIds((prev) => new Set([...prev, classId]));
+    }
+    if (updatedClass) {
+      const normalized = normalizeClassDoc(updatedClass.id || classId, updatedClass);
+      setClasses((prev) =>
+        prev.some((c) => c.id === normalized.id)
+          ? prev.map((c) => (c.id === normalized.id ? normalized : c))
+          : [normalized, ...prev]
+      );
+      setSelectedSubject((prev) => (prev?.id === normalized.id ? normalized : prev));
+    }
+  }, []);
+
+  const handleClassUpdated = useCallback((updatedClass) => {
+    if (!updatedClass?.id) return;
+    const normalized = normalizeClassDoc(updatedClass.id, updatedClass);
+    setClasses((prev) =>
+      prev.some((c) => c.id === normalized.id)
+        ? prev.map((c) => (c.id === normalized.id ? normalized : c))
+        : [normalized, ...prev]
+    );
+    setSelectedSubject((prev) => (prev?.id === normalized.id ? normalized : prev));
+  }, []);
 
   const handleOpenCreateClass = () => {
     setRequestedClassModal('create');
@@ -316,6 +374,9 @@ function MainApp() {
         <ClassDetailView
           key={activeClass.id}
           classData={activeClass}
+          isMember={!currentUser || !membershipsLoaded ? undefined : joinedClassIds.has(activeClass.id)}
+          onMembershipChanged={handleMembershipChanged}
+          onClassUpdated={handleClassUpdated}
           onBack={() => navigateTo(detailReturnView || 'materi')}
           onNavigateAI={() => navigateTo('ai')}
           onExamStateChange={setIsExamActive}
@@ -352,6 +413,7 @@ function MainApp() {
             onSelectClass={handleSelectSubject}
             requestedModal={requestedClassModal}
             onClearRequestedModal={() => setRequestedClassModal(null)}
+            onMembershipChanged={handleMembershipChanged}
           />
         </div>
       );
@@ -369,7 +431,7 @@ function MainApp() {
       case 'dashboard':
       default:
         if (role === ROLES.ADMIN) {
-          return <AdminDashboard />;
+          return <AdminDashboard onClassesChanged={() => void refreshClassesAndMemberships()} />;
         }
         if (role === ROLES.LECTURER) {
           return (

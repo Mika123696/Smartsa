@@ -25,9 +25,10 @@ export function LanguageProvider({ children }) {
     const roleKeys = {
       [ROLES.STUDENT]: 'role_student',
       [ROLES.LECTURER]: 'role_lecturer',
+      [ROLES.ADMIN]: 'role_admin',
     };
     const key = roleKeys[role];
-    return key ? t(key) : (role === ROLES.LECTURER ? t('role_lecturer') : t('role_student'));
+    return key ? t(key) : t('role_student');
   };
 
   return (

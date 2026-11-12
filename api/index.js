@@ -306,6 +306,28 @@ function handleUploadSign(body) {
   };
 }
 
+async function resolveCallerRole(db, decodedToken) {
+  if (decodedToken?.role === 'admin' || decodedToken?.role === 'lecturer') {
+    return decodedToken.role;
+  }
+  const email = String(decodedToken?.email || '').trim().toLowerCase();
+  if (/^admin(\.[^@]+)?@smartsa\.edu$/.test(email)) {
+    return 'admin';
+  }
+  if (/^dosen(\.[^@]+)?@smartsa\.edu$/.test(email)) {
+    return 'lecturer';
+  }
+  try {
+    const userDoc = await db.collection('users').doc(decodedToken.uid).get();
+    if (userDoc.exists) {
+      return userDoc.data()?.role || 'student';
+    }
+  } catch (err) {
+    console.warn('[api/grade] resolveCallerRole warning:', err.message);
+  }
+  return 'student';
+}
+
 async function handleGrade(body, decodedToken) {
   const { classId = 'subj_pbo', examType = 'pretest', answers = {}, action = 'submit' } = body || {};
   const safeClassId = String(classId || 'subj_pbo').trim().replace(/[^a-zA-Z0-9_-]/g, '');
@@ -320,6 +342,42 @@ async function handleGrade(body, decodedToken) {
 
   const db = getFirestore();
   const attemptId = `${safeClassId}_${decodedToken.uid}`;
+
+  if (action === 'instructor_keys') {
+    const callerRole = await resolveCallerRole(db, decodedToken);
+    if (callerRole !== 'lecturer' && callerRole !== 'admin') {
+      return {
+        status: 403,
+        payload: {
+          error: 'AKSES DITOLAK: Hanya dosen atau admin yang dapat mengakses kunci evaluasi referensi.',
+          code: 'FORBIDDEN_ROLE',
+        },
+      };
+    }
+
+    let answerKey = SERVER_EXAM_KEYS[safeClassId] || SERVER_EXAM_KEYS.default;
+    try {
+      const keyDoc = await db.collection('exam_keys').doc(safeClassId).get();
+      if (keyDoc.exists) {
+        const keyData = keyDoc.data();
+        const keyMap = keyData?.[safeExamType] || keyData?.answers || keyData?.questions;
+        if (keyMap && typeof keyMap === 'object' && Object.keys(keyMap).length > 0) {
+          answerKey = keyMap;
+        }
+      }
+    } catch (err) {
+      console.warn('[api/grade] instructor_keys lookup warning:', err.message);
+    }
+
+    return {
+      status: 200,
+      payload: {
+        classId: safeClassId,
+        examType: safeExamType,
+        answerKey,
+      },
+    };
+  }
 
   if (action === 'start') {
     const durationMs = 15 * 60 * 1000;

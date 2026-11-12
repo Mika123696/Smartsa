@@ -529,6 +529,130 @@ export async function gradeSubmissionInFirestore({ submissionId, grade, feedback
   });
 }
 
+function toTimestampMillis(value) {
+  if (!value) return 0;
+  if (typeof value === 'number') return value;
+  if (typeof value?.toMillis === 'function') return value.toMillis();
+  const parsed = Date.parse(value);
+  return Number.isNaN(parsed) ? 0 : parsed;
+}
+
+export async function updateClassMeetingsInFirestore(classId, meetings) {
+  if (!classId) throw new Error('ID kelas tidak valid.');
+  if (!Array.isArray(meetings)) throw new Error('Daftar pertemuan tidak valid.');
+  if (!auth?.currentUser || !db) {
+    return { classId, meetings, source: 'demo' };
+  }
+
+  await updateDoc(doc(db, 'classes', classId), {
+    meetings,
+    meetingsCount: meetings.length,
+    updatedAt: serverTimestamp(),
+  });
+
+  return { classId, meetings, source: 'firestore' };
+}
+
+export async function fetchClassSubmissionsForGrading(classId) {
+  if (!classId || !auth?.currentUser || !db) return [];
+
+  try {
+    // Query filter tunggal classId agar bebas kebutuhan composite index
+    const q = query(collection(db, 'submissions'), where('classId', '==', classId));
+    const snap = await getDocs(q);
+    return snap.docs
+      .map((docSnap) => {
+        const d = docSnap.data();
+        return {
+          id: docSnap.id,
+          submissionId: docSnap.id,
+          assignmentId: d.assignmentId || '',
+          classId: d.classId || classId,
+          uid: d.uid || '',
+          studentName: d.studentName || d.uid || 'Mahasiswa',
+          assignment: d.assignmentTitle || d.assignmentId || 'Tugas Perkuliahan',
+          class: d.className || d.classId || 'Kelas Smartsa',
+          submittedAt: d.submittedAtLabel || 'Tercatat di Firestore',
+          _sortMs: toTimestampMillis(d.submittedAt || d.updatedAt),
+          fileUrl: d.fileUrl || d.externalUrl || '',
+          fileName: d.fileName || '',
+          notes: d.notes || '',
+          feedback: d.feedback || '',
+          grade: typeof d.grade === 'number' ? d.grade : typeof d.score === 'number' ? d.score : null,
+          status: typeof d.grade === 'number' || d.status === 'graded' ? 'graded' : 'pending',
+        };
+      })
+      .sort((a, b) => b._sortMs - a._sortMs);
+  } catch (err) {
+    console.warn('[lmsFirestoreService] Gagal memuat submissions kelas:', err.message);
+    return [];
+  }
+}
+
+export async function fetchClassExamAttempts(classId) {
+  if (!classId || !auth?.currentUser || !db) return [];
+
+  try {
+    // Query filter tunggal classId agar bebas kebutuhan composite index
+    const q = query(collection(db, 'exam_attempts'), where('classId', '==', classId));
+    const snap = await getDocs(q);
+    return snap.docs
+      .map((docSnap) => {
+        const d = docSnap.data();
+        return {
+          id: docSnap.id,
+          ...d,
+          _sortMs: toTimestampMillis(d.submittedAt || d.updatedAt || d.examStartedAt),
+        };
+      })
+      .sort((a, b) => b._sortMs - a._sortMs);
+  } catch (err) {
+    console.warn('[lmsFirestoreService] Gagal memuat exam_attempts kelas:', err.message);
+    return [];
+  }
+}
+
+export async function fetchInstructorAnswerKey({ classId = 'subj_pbo', examType = 'pretest' } = {}) {
+  if (auth?.currentUser) {
+    try {
+      const token = await auth.currentUser.getIdToken();
+      const res = await fetch('/api/grade', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({
+          action: 'instructor_keys',
+          classId,
+          examType,
+        }),
+      });
+      const isJson = res.headers.get('content-type')?.includes('application/json');
+      if (isJson) {
+        const data = await res.json();
+        if (!res.ok) {
+          throw new Error(data.error || 'Gagal memuat kunci evaluasi dari server.');
+        }
+        return { answerKey: data.answerKey || {}, source: 'server' };
+      }
+    } catch (err) {
+      if (!import.meta.env.DEV) {
+        throw err;
+      }
+    }
+  }
+
+  if (import.meta.env.DEV) {
+    return {
+      answerKey: { q1: 1, q2: 2, q3: 1, q4: 1 },
+      source: 'dev_fallback',
+    };
+  }
+
+  throw new Error('Kunci evaluasi hanya dapat dimuat melalui endpoint server /api/grade.');
+}
+
 // =========================================================================
 // DISCUSSIONS
 // =========================================================================
@@ -731,4 +855,85 @@ export async function updateUserVerificationByAdmin(uid, { role, verificationSta
     ...(verificationStatus ? { verificationStatus } : {}),
     updatedAt: serverTimestamp(),
   });
+}
+
+export async function updateUserByAdmin(uid, updates = {}) {
+  if (!auth?.currentUser || !db || !uid) {
+    throw new Error('Otorisasi admin diperlukan untuk memperbarui profil pengguna.');
+  }
+  const payload = { updatedAt: serverTimestamp() };
+  if (updates.role === 'student' || updates.role === 'lecturer' || updates.role === 'admin') {
+    payload.role = updates.role;
+  }
+  if (typeof updates.nim === 'string') payload.nim = updates.nim.trim();
+  if (typeof updates.nidn === 'string') payload.nidn = updates.nidn.trim();
+  if (typeof updates.nip === 'string') payload.nip = updates.nip.trim();
+  if (typeof updates.verificationStatus === 'string') {
+    payload.verificationStatus = updates.verificationStatus;
+  }
+
+  await updateDoc(doc(db, 'users', uid), payload);
+  return payload;
+}
+
+export async function updateClassByAdmin(classId, updates = {}) {
+  if (!auth?.currentUser || !db || !classId) {
+    throw new Error('Otorisasi admin diperlukan untuk memperbarui data kelas.');
+  }
+  const payload = { updatedAt: serverTimestamp() };
+  if (typeof updates.instructor === 'string' && updates.instructor.trim()) {
+    payload.instructor = updates.instructor.trim();
+    payload.lecturer = updates.instructor.trim();
+  }
+  if (typeof updates.lecturerId === 'string') {
+    payload.lecturerId = updates.lecturerId.trim();
+  }
+  if (typeof updates.isActive === 'boolean') payload.isActive = updates.isActive;
+  if (typeof updates.isPublic === 'boolean') payload.isPublic = updates.isPublic;
+
+  await updateDoc(doc(db, 'classes', classId), payload);
+  return payload;
+}
+
+export async function deleteClassByAdmin(classId) {
+  if (!auth?.currentUser || !db || !classId) {
+    throw new Error('Otorisasi admin diperlukan untuk menghapus kelas.');
+  }
+  await deleteDoc(doc(db, 'classes', classId));
+}
+
+export async function seedStandardClassesByAdmin() {
+  if (!auth?.currentUser || !db) {
+    throw new Error('Masuk sebagai Admin dengan Firebase aktif untuk melakukan seeding katalog kelas.');
+  }
+
+  const existingSnap = await getDocs(collection(db, 'classes'));
+  const existingIds = new Set(existingSnap.docs.map((d) => d.id));
+
+  let createdCount = 0;
+  let skippedCount = 0;
+
+  for (const rawCls of DEMO_CLASSES) {
+    if (existingIds.has(rawCls.id)) {
+      skippedCount += 1;
+      continue;
+    }
+    const normalized = normalizeClassDoc(rawCls.id, {
+      ...rawCls,
+      lecturerId: rawCls.lecturerId || auth.currentUser.uid,
+    });
+    await setDoc(doc(db, 'classes', rawCls.id), {
+      ...normalized,
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+    });
+    createdCount += 1;
+  }
+
+  const refreshed = await fetchClasses();
+  return {
+    createdCount,
+    skippedCount,
+    classes: refreshed.classes || [],
+  };
 }

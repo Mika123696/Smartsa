@@ -313,4 +313,57 @@ describe('Backend API Dispatcher (api/index.js)', () => {
       })
     );
   });
+
+  it('denies instructor_keys for student and returns server exam_keys for verified lecturer/admin on POST /api/grade', async () => {
+    // 1. Student caller must receive 403
+    mockVerifyIdToken.mockResolvedValueOnce({ uid: 'student_09', email: 'mhs@gmail.com', role: 'student' });
+    mockCollection.mockImplementation((name) => {
+      if (name === 'users') {
+        return {
+          doc: vi.fn(() => ({
+            get: vi.fn(async () => ({ exists: true, data: () => ({ role: 'student' }) })),
+          })),
+        };
+      }
+      return {};
+    });
+
+    const studentReq = {
+      method: 'POST',
+      url: '/api/grade',
+      headers: { authorization: 'Bearer valid-token' },
+      body: { action: 'instructor_keys', classId: 'subj_pbo', examType: 'pretest' },
+    };
+    const studentRes = createMockRes();
+    await handler(studentReq, studentRes);
+    expect(studentRes.statusCode).toBe(403);
+    expect(studentRes.json().code).toBe('FORBIDDEN_ROLE');
+
+    // 2. Institutional @smartsa.edu lecturer caller must receive 200 + answerKey
+    mockVerifyIdToken.mockResolvedValueOnce({ uid: 'lec_01', email: 'dosen@smartsa.edu' });
+    mockCollection.mockImplementation((name) => {
+      if (name === 'exam_keys') {
+        return {
+          doc: vi.fn(() => ({
+            get: vi.fn(async () => ({
+              exists: true,
+              data: () => ({ pretest: { q1: 1, q2: 2, q3: 1, q4: 1 } }),
+            })),
+          })),
+        };
+      }
+      return {};
+    });
+
+    const lecReq = {
+      method: 'POST',
+      url: '/api/grade',
+      headers: { authorization: 'Bearer valid-token' },
+      body: { action: 'instructor_keys', classId: 'subj_pbo', examType: 'pretest' },
+    };
+    const lecRes = createMockRes();
+    await handler(lecReq, lecRes);
+    expect(lecRes.statusCode).toBe(200);
+    expect(lecRes.json().answerKey).toEqual({ q1: 1, q2: 2, q3: 1, q4: 1 });
+  });
 });

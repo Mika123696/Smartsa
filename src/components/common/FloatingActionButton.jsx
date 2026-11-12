@@ -1,14 +1,19 @@
 import { useState, useEffect } from 'react';
+import { useAuth } from '../../context/useAuth';
 import { useLanguage } from '../../context/useLanguage';
+import { ROLES } from '../../constants/roles';
 import {
   Sparkles,
   KeyRound,
+  Plus,
+  ShieldCheck,
   X,
   HelpCircle,
   Cpu,
 } from 'lucide-react';
 
 export default function FloatingActionButton({ onOpenAI, onOpenJoinModal }) {
+  const { role } = useAuth();
   const { t } = useLanguage();
   const [drawerOpen, setDrawerOpen] = useState(false);
 
@@ -98,14 +103,28 @@ export default function FloatingActionButton({ onOpenAI, onOpenJoinModal }) {
                 className="w-full flex items-center gap-3 p-3 rounded-lg bg-slate-50 dark:bg-[#192332] hover:bg-slate-100 dark:hover:bg-[#202d40] border border-slate-200 dark:border-slate-700/80 text-slate-800 dark:text-slate-200 text-xs font-bold transition text-left"
               >
                 <div className="w-8 h-8 rounded-md bg-[#00897b] text-white flex items-center justify-center shrink-0">
-                  <KeyRound className="w-4 h-4" />
+                  {role === ROLES.ADMIN ? (
+                    <ShieldCheck className="w-4 h-4" />
+                  ) : role === ROLES.LECTURER ? (
+                    <Plus className="w-4 h-4" />
+                  ) : (
+                    <KeyRound className="w-4 h-4" />
+                  )}
                 </div>
                 <div>
                   <div className="text-xs font-bold text-slate-900 dark:text-white">
-                    {t('quick_core_join_title')}
+                    {role === ROLES.ADMIN
+                      ? t('topbar_admin_panel')
+                      : role === ROLES.LECTURER
+                        ? t('topbar_create_class')
+                        : t('quick_core_join_title')}
                   </div>
                   <div className="text-[10px] text-slate-500 dark:text-slate-400 font-sans">
-                    {t('quick_core_join_sub')}
+                    {role === ROLES.ADMIN
+                      ? t('sidebar_admin_dash')
+                      : role === ROLES.LECTURER
+                        ? t('sidebar_manage_classes')
+                        : t('quick_core_join_sub')}
                   </div>
                 </div>
               </button>

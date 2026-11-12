@@ -2,21 +2,42 @@ import {
   Home,
   Calendar,
   BookOpen,
+  FileText,
   MessageSquare,
   User,
+  ShieldCheck,
 } from 'lucide-react';
+import { useAuth } from '../../context/useAuth';
 import { useLanguage } from '../../context/useLanguage';
+import { ROLES } from '../../constants/roles';
 
 export default function BottomNav({ activeTab, setActiveTab }) {
-  const { t } = useLanguage();
+  const { role } = useAuth();
+  const { t, language } = useLanguage();
 
-  const tabs = [
-    { id: 'dashboard', label: t('nav_dashboard', 'Dashboard'), icon: Home },
-    { id: 'kelas', label: t('nav_classes', 'Kelas'), icon: Calendar },
-    { id: 'materi', label: t('nav_materials', 'Materi'), icon: BookOpen },
-    { id: 'diskusi', label: t('nav_discussions', 'Diskusi'), icon: MessageSquare },
-    { id: 'profil', label: t('nav_profile', 'Profil'), icon: User },
-  ];
+  const tabs =
+    role === ROLES.ADMIN
+      ? [
+          { id: 'dashboard', label: language === 'en' ? 'Admin' : 'Admin', icon: ShieldCheck },
+          { id: 'classes-all', label: language === 'en' ? 'Classes' : 'Kelola', icon: BookOpen },
+          { id: 'diskusi', label: t('nav_discussions', 'Diskusi'), icon: MessageSquare },
+          { id: 'profil', label: t('nav_profile', 'Profil'), icon: User },
+        ]
+      : role === ROLES.LECTURER
+        ? [
+            { id: 'dashboard', label: language === 'en' ? 'Hub' : 'Hub', icon: Home },
+            { id: 'classes-all', label: t('nav_classes', 'Kelas'), icon: BookOpen },
+            { id: 'materi', label: t('nav_materials', 'Materi'), icon: FileText },
+            { id: 'diskusi', label: t('nav_discussions', 'Diskusi'), icon: MessageSquare },
+            { id: 'profil', label: t('nav_profile', 'Profil'), icon: User },
+          ]
+        : [
+            { id: 'dashboard', label: t('nav_dashboard', 'Dashboard'), icon: Home },
+            { id: 'kelas', label: t('nav_classes', 'Kelas'), icon: Calendar },
+            { id: 'materi', label: t('nav_materials', 'Materi'), icon: BookOpen },
+            { id: 'diskusi', label: t('nav_discussions', 'Diskusi'), icon: MessageSquare },
+            { id: 'profil', label: t('nav_profile', 'Profil'), icon: User },
+          ];
 
   return (
     <nav

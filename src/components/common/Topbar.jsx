@@ -12,10 +12,11 @@ import {
   Moon,
   Globe,
   LogIn,
+  ShieldCheck,
 } from 'lucide-react';
 
 export default function Topbar({ currentView, onQuickAction, onOpenAuth }) {
-  const { role, isDemoMode, currentUser } = useAuth();
+  const { role, isDemoMode, currentUser, isRoleSimulated, simulateDevRole } = useAuth();
   const { theme, toggleTheme } = useTheme();
   const { t, language, setLanguage } = useLanguage();
   const [notifOpen, setNotifOpen] = useState(false);
@@ -23,9 +24,11 @@ export default function Topbar({ currentView, onQuickAction, onOpenAuth }) {
   const getTitle = () => {
     switch (currentView) {
       case 'dashboard':
+        if (role === ROLES.ADMIN) return t('sidebar_admin_dash');
+        if (role === ROLES.LECTURER) return t('sidebar_lecturer_dash');
         return t('topbar_title_dashboard');
       case 'classes-all':
-        return t('topbar_title_classes');
+        return role === ROLES.STUDENT ? t('sidebar_my_classes') : t('sidebar_manage_classes');
       case 'kelas':
         return t('topbar_title_schedule');
       case 'materi':
@@ -54,6 +57,32 @@ export default function Topbar({ currentView, onQuickAction, onOpenAuth }) {
 
       {/* Right Controls */}
       <div className="flex items-center gap-2.5">
+        {/* DEV-only Role Simulator */}
+        {import.meta.env.DEV && simulateDevRole && (
+          <div className="hidden xl:flex items-center gap-1 bg-slate-100 dark:bg-[#161d2a] border border-slate-200 dark:border-[#232f42] rounded-lg px-2 py-1 text-[10px] font-mono">
+            <span className="text-slate-500 dark:text-slate-400 font-bold mr-1">DEV:</span>
+            {[
+              { id: ROLES.STUDENT, label: 'MHS' },
+              { id: ROLES.LECTURER, label: 'DOSEN' },
+              { id: ROLES.ADMIN, label: 'ADMIN' },
+            ].map((opt) => (
+              <button
+                key={opt.id}
+                type="button"
+                onClick={() => simulateDevRole(isRoleSimulated && role === opt.id ? null : opt.id)}
+                className={`px-1.5 py-0.5 rounded font-bold transition ${
+                  role === opt.id
+                    ? 'bg-[#f59e0b] text-black'
+                    : 'text-slate-600 dark:text-slate-300 hover:bg-slate-200 dark:hover:bg-slate-800'
+                }`}
+                title={`Simulasi Role ${opt.label} (DEV only)`}
+              >
+                {opt.label}
+              </button>
+            ))}
+          </div>
+        )}
+
         {/* Quick Action Button */}
         {role === ROLES.STUDENT ? (
           <button
@@ -63,6 +92,15 @@ export default function Topbar({ currentView, onQuickAction, onOpenAuth }) {
           >
             <Plus className="w-3.5 h-3.5" />
             <span>{t('topbar_join_class')}</span>
+          </button>
+        ) : role === ROLES.ADMIN ? (
+          <button
+            type="button"
+            onClick={onQuickAction}
+            className="flex items-center gap-1.5 bg-rose-600 hover:bg-rose-500 text-white text-xs font-bold px-3 py-1.5 rounded-lg shadow-xs transition"
+          >
+            <ShieldCheck className="w-3.5 h-3.5" />
+            <span>{t('topbar_admin_panel')}</span>
           </button>
         ) : (
           <button
