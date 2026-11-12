@@ -1,14 +1,16 @@
 /**
- * Idempotent Firestore seed script for Smartsa LMS.
- * Seeds initial classes (PBO101, BD202, PWPB303, PDA404, UIUX505, PPL606),
- * assignments, and server-only exam_keys using firebase-admin.
+ * Idempotent Firestore & Firebase Auth seed script for Smartsa LMS.
+ * Seeds 3 strictly separated role accounts (mhs@smartsa.edu, dosen@smartsa.edu, admin@smartsa.edu)
+ * in Firebase Auth & Firestore `users/{uid}`, plus initial classes, assignments, and server-only exam_keys.
  *
  * Usage:
  *   node scripts/seed-firestore.mjs
  *   node scripts/seed-firestore.mjs --lecturer-uid <uid>
+ *   SEED_DEFAULT_PASSWORD="YourPassword123!" node scripts/seed-firestore.mjs
  */
 
 import { initializeApp, applicationDefault, cert, getApps } from 'firebase-admin/app';
+import { getAuth } from 'firebase-admin/auth';
 import { getFirestore, FieldValue } from 'firebase-admin/firestore';
 
 function parseArgs(argv) {
@@ -217,17 +219,115 @@ const SEED_ASSIGNMENTS = [
   },
 ];
 
+const SEED_ACCOUNTS = [
+  {
+    email: 'mhs@smartsa.edu',
+    displayName: 'Budi Santoso',
+    role: 'student',
+    institution: 'Universitas Negeri Surabaya',
+    nim: '25050974001',
+    nidn: '',
+    nip: '',
+  },
+  {
+    email: 'dosen@smartsa.edu',
+    displayName: 'Dr. Andi Saputra',
+    role: 'lecturer',
+    institution: 'Universitas Negeri Surabaya',
+    nim: '0012088501',
+    nidn: '0012088501',
+    nip: '',
+  },
+  {
+    email: 'admin@smartsa.edu',
+    displayName: 'Administrator Smartsa',
+    role: 'admin',
+    institution: 'Smartsa Central Administration',
+    nim: 'ADM-001',
+    nidn: '',
+    nip: 'ADM-001',
+  },
+];
+
 const DEFAULT_EXAM_KEY = {
   pretest: { q1: 1, q2: 2, q3: 1, q4: 1 },
   posttest: { q1: 1, q2: 2, q3: 1, q4: 1 },
 };
 
+async function seedRoleAccounts(auth, db, defaultPassword) {
+  const seeded = [];
+
+  for (const acc of SEED_ACCOUNTS) {
+    let userRecord;
+    let created = false;
+
+    try {
+      userRecord = await auth.getUserByEmail(acc.email);
+      const authPatch = {};
+      if (userRecord.displayName !== acc.displayName) {
+        authPatch.displayName = acc.displayName;
+      }
+      if (!userRecord.emailVerified) {
+        authPatch.emailVerified = true;
+      }
+      if (Object.keys(authPatch).length > 0) {
+        userRecord = await auth.updateUser(userRecord.uid, authPatch);
+      }
+    } catch (err) {
+      if (err?.code !== 'auth/user-not-found') {
+        throw err;
+      }
+      userRecord = await auth.createUser({
+        email: acc.email,
+        password: defaultPassword,
+        displayName: acc.displayName,
+        emailVerified: true,
+      });
+      created = true;
+    }
+
+    await auth.setCustomUserClaims(userRecord.uid, { role: acc.role });
+
+    await db
+      .collection('users')
+      .doc(userRecord.uid)
+      .set(
+        {
+          uid: userRecord.uid,
+          email: acc.email,
+          displayName: acc.displayName,
+          role: acc.role,
+          institution: acc.institution,
+          nim: acc.nim,
+          nidn: acc.nidn,
+          nip: acc.nip,
+          photoURL: null,
+          emailVerified: true,
+          verificationStatus: 'verified',
+          ...(created ? { createdAt: FieldValue.serverTimestamp() } : {}),
+          updatedAt: FieldValue.serverTimestamp(),
+        },
+        { merge: true }
+      );
+
+    seeded.push({ uid: userRecord.uid, email: acc.email, role: acc.role, created });
+  }
+
+  return seeded;
+}
+
 async function main() {
   const args = parseArgs(process.argv.slice(2));
-  const lecturerUid = args['lecturer-uid']?.trim() || 'system_seed';
+  const defaultPassword =
+    process.env.SEED_DEFAULT_PASSWORD || args['default-password'] || 'Smartsa123!';
 
   initFirebaseAdmin();
+  const auth = getAuth();
   const db = getFirestore();
+
+  const seededAccounts = await seedRoleAccounts(auth, db, defaultPassword);
+  const lecturerAccount = seededAccounts.find((a) => a.role === 'lecturer');
+  const lecturerUid = args['lecturer-uid']?.trim() || lecturerAccount?.uid || 'system_seed';
 
   for (const subj of SEED_SUBJECTS) {
     const meetings = MEETING_TOPICS.map((topic, i) => {
@@ -300,7 +400,9 @@ async function main() {
   }
 
   console.log(
-    `[seed-firestore] Seeded ${SEED_SUBJECTS.length} classes, ${SEED_ASSIGNMENTS.length} assignments, and ${SEED_SUBJECTS.length} exam_keys (lecturerId=${lecturerUid}).`
+    `[seed-firestore] Seeded ${seededAccounts.length} isolated role accounts (${seededAccounts
+      .map((a) => `${a.email}:${a.role}${a.created ? ':created' : ':synced'}`)
+      .join(', ')}), ${SEED_SUBJECTS.length} classes, ${SEED_ASSIGNMENTS.length} assignments, and ${SEED_SUBJECTS.length} exam_keys (lecturerId=${lecturerUid}).`
   );
 }
 

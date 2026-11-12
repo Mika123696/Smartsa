@@ -274,4 +274,69 @@ describe('Frontend Security & UI Components', () => {
     expect(screen.getByText(/SKOR KOMPETENSI/i)).toBeInTheDocument();
     expect(onExamStateChange).toHaveBeenLastCalledWith(false);
   });
+
+  it('enforces 1 Account = 1 Role, auto-corrects stale admin@smartsa.edu name, and removes DEV role simulation', async () => {
+    const adminFirebaseUser = {
+      uid: 'uid_admin_smartsa',
+      email: 'admin@smartsa.edu',
+      displayName: 'Dr. Andi Saputra',
+      emailVerified: true,
+    };
+
+    mockAuthObj.currentUser = adminFirebaseUser;
+    mockGetDoc.mockResolvedValue({
+      exists: () => true,
+      data: () => ({
+        uid: 'uid_admin_smartsa',
+        email: 'admin@smartsa.edu',
+        displayName: 'Dr. Andi Saputra',
+        role: 'student',
+        photoURL: 'https://images.unsplash.com/photo-1570295999919-56ceb5ecca61?auto=format&fit=crop&w=120&q=80',
+      }),
+    });
+    mockSetDoc.mockResolvedValue(undefined);
+    mockOnAuthStateChanged.mockImplementation((_auth, cb) => {
+      void cb(adminFirebaseUser);
+      return () => {};
+    });
+
+    function AdminIdentityInspector() {
+      const ctx = useAuth();
+      return (
+        <div>
+          <span data-testid="admin-role">{ctx.role}</span>
+          <span data-testid="admin-name">{ctx.userProfile.displayName}</span>
+          <span data-testid="admin-nip">{ctx.userProfile.nip}</span>
+          <span data-testid="admin-photo">{String(ctx.userProfile.photoURL)}</span>
+          <span data-testid="has-sim">{String('simulateDevRole' in ctx)}</span>
+        </div>
+      );
+    }
+
+    render(
+      <AuthProvider>
+        <AdminIdentityInspector />
+      </AuthProvider>
+    );
+
+    await waitFor(() => {
+      expect(screen.getByTestId('admin-role')).toHaveTextContent('admin');
+    });
+
+    expect(screen.getByTestId('admin-name')).toHaveTextContent('Administrator Smartsa');
+    expect(screen.getByTestId('admin-nip')).toHaveTextContent('ADM-001');
+    expect(screen.getByTestId('admin-photo')).toHaveTextContent('null');
+    expect(screen.getByTestId('has-sim')).toHaveTextContent('false');
+
+    expect(mockSetDoc).toHaveBeenCalledWith(
+      { path: 'users/uid_admin_smartsa' },
+      expect.objectContaining({
+        role: 'admin',
+        displayName: 'Administrator Smartsa',
+        nip: 'ADM-001',
+        photoURL: null,
+      }),
+      { merge: true }
+    );
+  });
 });

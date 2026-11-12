@@ -16,7 +16,7 @@ import {
 } from 'lucide-react';
 
 export default function Topbar({ currentView, onQuickAction, onOpenAuth }) {
-  const { role, isDemoMode, currentUser, isRoleSimulated, simulateDevRole } = useAuth();
+  const { role, isDemoMode, currentUser } = useAuth();
   const { theme, toggleTheme } = useTheme();
   const { t, language, setLanguage } = useLanguage();
   const [notifOpen, setNotifOpen] = useState(false);
@@ -57,32 +57,6 @@ export default function Topbar({ currentView, onQuickAction, onOpenAuth }) {
 
       {/* Right Controls */}
       <div className="flex items-center gap-2.5">
-        {/* DEV-only Role Simulator */}
-        {import.meta.env.DEV && simulateDevRole && (
-          <div className="hidden xl:flex items-center gap-1 bg-slate-100 dark:bg-[#161d2a] border border-slate-200 dark:border-[#232f42] rounded-lg px-2 py-1 text-[10px] font-mono">
-            <span className="text-slate-500 dark:text-slate-400 font-bold mr-1">DEV:</span>
-            {[
-              { id: ROLES.STUDENT, label: 'MHS' },
-              { id: ROLES.LECTURER, label: 'DOSEN' },
-              { id: ROLES.ADMIN, label: 'ADMIN' },
-            ].map((opt) => (
-              <button
-                key={opt.id}
-                type="button"
-                onClick={() => simulateDevRole(isRoleSimulated && role === opt.id ? null : opt.id)}
-                className={`px-1.5 py-0.5 rounded font-bold transition ${
-                  role === opt.id
-                    ? 'bg-[#f59e0b] text-black'
-                    : 'text-slate-600 dark:text-slate-300 hover:bg-slate-200 dark:hover:bg-slate-800'
-                }`}
-                title={`Simulasi Role ${opt.label} (DEV only)`}
-              >
-                {opt.label}
-              </button>
-            ))}
-          </div>
-        )}
-
         {/* Quick Action Button */}
         {role === ROLES.STUDENT ? (
           <button

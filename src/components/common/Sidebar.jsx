@@ -54,10 +54,16 @@ export default function Sidebar({ currentView, setCurrentView }) {
   };
 
   const navItems = getNavItems();
+  const neutralRoleFallback =
+    role === ROLES.ADMIN
+      ? 'Administrator'
+      : role === ROLES.LECTURER
+        ? 'Dosen Pengajar'
+        : 'Mahasiswa';
   const displayName =
     userProfile?.displayName ||
     currentUser?.displayName ||
-    t('demo_student_name');
+    neutralRoleFallback;
 
   return (
     <aside className="hidden md:flex md:flex-col w-64 shrink-0 bg-white dark:bg-[#12161f] border-r border-slate-200 dark:border-[#232b38] sticky top-0 h-screen justify-between transition-colors">
@@ -80,11 +86,7 @@ export default function Sidebar({ currentView, setCurrentView }) {
         {/* User mini profile box */}
         <div className="p-4 border-b border-slate-200 dark:border-[#232b38] flex items-center gap-3">
           <SafeImage
-            src={
-              userProfile?.photoURL ||
-              currentUser?.photoURL ||
-              'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?auto=format&fit=crop&w=120&q=80'
-            }
+            src={userProfile?.photoURL || currentUser?.photoURL || null}
             alt={displayName}
             fallbackLabel={displayName}
             variant="avatar"

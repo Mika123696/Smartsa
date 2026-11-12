@@ -56,9 +56,6 @@ export default function ProfileView({ onOpenAuth }) {
     userProfile,
     currentUser,
     role,
-    actualRole,
-    isRoleSimulated,
-    simulateDevRole,
     logout,
     isDemoMode,
     updateUserPhoto,
@@ -95,11 +92,26 @@ export default function ProfileView({ onOpenAuth }) {
     return () => window.removeEventListener('keydown', onKeyDown);
   }, [isPhotoModalOpen, isEditModalOpen]);
 
-  const activeEmail = userProfile?.email || currentUser?.email || 'mahasiswa@smartsa.edu';
+  const neutralRoleFallback =
+    role === ROLES.ADMIN
+      ? 'Administrator'
+      : role === ROLES.LECTURER
+        ? 'Dosen Pengajar'
+        : 'Mahasiswa';
+
+  const activeEmail =
+    userProfile?.email ||
+    currentUser?.email ||
+    (role === ROLES.ADMIN
+      ? 'admin@smartsa.edu'
+      : role === ROLES.LECTURER
+        ? 'dosen@smartsa.edu'
+        : 'mhs@smartsa.edu');
 
   const currentPhoto =
     userProfile?.photoURL ||
-    'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?auto=format&fit=crop&w=120&q=80';
+    currentUser?.photoURL ||
+    null;
 
   const activeNim =
     role === ROLES.LECTURER
@@ -111,7 +123,7 @@ export default function ProfileView({ onOpenAuth }) {
   const activeDisplayName =
     userProfile?.displayName ||
     currentUser?.displayName ||
-    (isDemoMode ? t('demo_student_name', 'Mahasiswa Demo') : t('default_user_name', 'Pengguna Smartsa'));
+    (isDemoMode ? t('demo_student_name', 'Mahasiswa Demo') : neutralRoleFallback);
 
   const activeInstitution =
     userProfile?.institution || 'Universitas Negeri Surabaya';
@@ -342,53 +354,6 @@ export default function ProfileView({ onOpenAuth }) {
           </div>
         </div>
       </div>
-
-      {/* DEV-Only Role Simulator */}
-      {import.meta.env.DEV && simulateDevRole && (
-        <div className="bg-amber-50/70 dark:bg-[#1a160c] p-4 rounded-xl border border-amber-300 dark:border-[#f59e0b]/40 space-y-2.5">
-          <div className="flex flex-wrap items-center justify-between gap-2">
-            <div>
-              <span className="text-[10px] font-mono font-bold text-amber-700 dark:text-[#f59e0b] uppercase tracking-wider block">
-                // DEV ROLE SIMULATOR (LOCAL ONLY)
-              </span>
-              <p className="text-[11px] text-slate-600 dark:text-slate-300 mt-0.5">
-                {language === 'en'
-                  ? `Preview UI as Student, Lecturer, or Admin locally. Real account role: ${getRoleLabel(actualRole)}.`
-                  : `Simulasikan tampilan UI sebagai Mahasiswa, Dosen, atau Admin secara lokal. Role asli akun: ${getRoleLabel(actualRole)}.`}
-              </p>
-            </div>
-            {isRoleSimulated && (
-              <button
-                type="button"
-                onClick={() => simulateDevRole(null)}
-                className="text-[10px] font-mono font-bold px-2.5 py-1 rounded bg-slate-900 dark:bg-slate-800 text-white hover:bg-slate-700 transition"
-              >
-                {language === 'en' ? 'RESET REAL ROLE' : 'RESET ROLE ASLI'}
-              </button>
-            )}
-          </div>
-          <div className="grid grid-cols-3 gap-2">
-            {[
-              { id: ROLES.STUDENT, label: language === 'en' ? 'Student' : 'Mahasiswa' },
-              { id: ROLES.LECTURER, label: language === 'en' ? 'Lecturer' : 'Dosen Pengajar' },
-              { id: ROLES.ADMIN, label: 'Administrator' },
-            ].map((item) => (
-              <button
-                key={item.id}
-                type="button"
-                onClick={() => simulateDevRole(item.id)}
-                className={`py-2 px-2.5 rounded-lg text-xs font-mono font-bold border transition ${
-                  role === item.id
-                    ? 'bg-[#f59e0b] text-black border-[#f59e0b] shadow-xs'
-                    : 'bg-white dark:bg-[#121822] text-slate-700 dark:text-slate-300 border-slate-200 dark:border-[#232f42] hover:border-amber-400'
-                }`}
-              >
-                {item.label}
-              </button>
-            ))}
-          </div>
-        </div>
-      )}
 
       {/* Feedback Alert */}
       {feedback && (
