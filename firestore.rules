@@ -1,0 +1,134 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function hasUserDoc() {
+      return isSignedIn() && exists(/databases/$(database)/documents/users/$(request.auth.uid));
+    }
+
+    function userRole() {
+      return ('role' in request.auth.token && request.auth.token.role != null)
+        ? request.auth.token.role
+        : (hasUserDoc() ? get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role : null);
+    }
+
+    function isAdmin() {
+      return isSignedIn() && userRole() == 'admin';
+    }
+
+    function isLecturer() {
+      return isSignedIn() && userRole() == 'lecturer';
+    }
+
+    function isLecturerOrAdmin() {
+      return isLecturer() || isAdmin();
+    }
+
+    function isClassMember(classId, uid) {
+      return exists(/databases/$(database)/documents/class_members/$(classId + '_' + uid));
+    }
+
+    // 1. users/{uid}
+    match /users/{uid} {
+      allow read: if isSignedIn() && (request.auth.uid == uid || isAdmin());
+      allow create: if isSignedIn()
+        && request.auth.uid == uid
+        && request.resource.data.role == 'student'
+        && !('password' in request.resource.data);
+      allow update: if (isSignedIn()
+        && request.auth.uid == uid
+        && !request.resource.data.diff(resource.data).affectedKeys().hasAny(['role', 'nim', 'nidn', 'password'])
+        && !('password' in request.resource.data))
+        || (isAdmin() && !('password' in request.resource.data));
+      allow delete: if false;
+    }
+
+    // 2. classes/{classId}
+    match /classes/{classId} {
+      allow read: if isSignedIn() || resource.data.isPublic == true;
+      allow create: if isLecturerOrAdmin()
+        && request.resource.data.lecturerId == request.auth.uid;
+      allow update: if isAdmin()
+        || (isLecturer() && resource.data.lecturerId == request.auth.uid);
+      allow delete: if isAdmin()
+        || (isLecturer() && resource.data.lecturerId == request.auth.uid);
+    }
+
+    // 3. class_members/{classId}_{uid} (dikelola server-side via /api/join-class Admin SDK)
+    match /class_members/{memberId} {
+      allow read: if isSignedIn()
+        && (resource.data.uid == request.auth.uid || isLecturerOrAdmin());
+      allow create, update, delete: if false;
+    }
+
+    // 4. attendance/{classId}_m{meetingNo}_{uid}
+    match /attendance/{attendanceId} {
+      allow read: if isSignedIn()
+        && (resource.data.uid == request.auth.uid || isLecturerOrAdmin());
+      allow create: if isSignedIn()
+        && request.resource.data.uid == request.auth.uid
+        && request.resource.data.classId is string
+        && request.resource.data.meetingNo is int
+        && request.resource.data.meetingNo >= 1
+        && request.resource.data.meetingNo <= 32
+        && attendanceId == (request.resource.data.classId + '_m' + string(request.resource.data.meetingNo) + '_' + request.auth.uid)
+        && isClassMember(request.resource.data.classId, request.auth.uid);
+      allow update, delete: if isLecturerOrAdmin();
+    }
+
+    // 5. assignments/{assignmentId}
+    match /assignments/{assignmentId} {
+      allow read: if isSignedIn();
+      allow create, update, delete: if isLecturerOrAdmin();
+    }
+
+    // 6. submissions/{assignmentId}_{uid}
+    match /submissions/{submissionId} {
+      allow read: if isSignedIn()
+        && (resource.data.uid == request.auth.uid || isLecturerOrAdmin());
+      allow create: if isSignedIn()
+        && request.resource.data.uid == request.auth.uid
+        && request.resource.data.assignmentId is string
+        && submissionId == (request.resource.data.assignmentId + '_' + request.auth.uid)
+        && !request.resource.data.keys().hasAny(['grade', 'score', 'feedback', 'gradedBy']);
+      allow update: if isLecturerOrAdmin()
+        || (
+          isSignedIn()
+          && resource.data.uid == request.auth.uid
+          && submissionId == (resource.data.assignmentId + '_' + request.auth.uid)
+          && !request.resource.data.diff(resource.data).affectedKeys().hasAny(['grade', 'score', 'feedback', 'gradedBy', 'uid', 'assignmentId'])
+        );
+      allow delete: if isSignedIn() && (resource.data.uid == request.auth.uid || isAdmin());
+    }
+
+    // 7. exam_attempts/{classId}_{uid} (dikelola server-side via /api/grade Admin SDK)
+    match /exam_attempts/{attemptId} {
+      allow read: if isSignedIn()
+        && (resource.data.uid == request.auth.uid || isLecturerOrAdmin());
+      allow create, update, delete: if false;
+    }
+
+    // 8. exam_keys/{classId} (strictly server-only)
+    match /exam_keys/{classId} {
+      allow read, write: if false;
+    }
+
+    // 9. discussions/{discussionId}
+    match /discussions/{discussionId} {
+      allow read: if isSignedIn();
+      allow create: if isSignedIn()
+        && request.resource.data.authorUid == request.auth.uid;
+      allow update: if isSignedIn()
+        && (
+          resource.data.authorUid == request.auth.uid
+          || isLecturerOrAdmin()
+          || request.resource.data.diff(resource.data).affectedKeys().hasOnly(['likes', 'likedBy', 'replies', 'updatedAt'])
+        );
+      allow delete: if isSignedIn()
+        && (resource.data.authorUid == request.auth.uid || isLecturerOrAdmin());
+    }
+  }
+}

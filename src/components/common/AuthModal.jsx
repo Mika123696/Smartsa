@@ -1,7 +1,7 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { useAuth } from '../../context/useAuth';
-import { useLanguage } from '../../context/LanguageContext';
-import { ROLES, ROLE_LABELS } from '../../constants/roles';
+import { useLanguage } from '../../context/useLanguage';
+import { ROLES } from '../../constants/roles';
 import {
   X,
   Mail,
@@ -13,8 +13,6 @@ import {
   Eye,
   EyeOff,
   ShieldCheck,
-  Sparkles,
-  ArrowRight,
   GraduationCap,
 } from 'lucide-react';
 
@@ -28,21 +26,28 @@ export default function AuthModal({ isOpen, onClose }) {
   } = useAuth();
   const { t, getRoleLabel, language } = useLanguage();
 
-  const [mode, setMode] = useState('login'); // 'login' | 'register' | 'forgot'
+  const [mode, setMode] = useState('login');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
   const [displayName, setDisplayName] = useState('');
-  const [selectedRole, setSelectedRole] = useState(ROLES.STUDENT);
   const [institution, setInstitution] = useState('');
   const [nim, setNim] = useState('');
   const [loading, setLoading] = useState(false);
-  const [socialLoading, setSocialLoading] = useState(null); // 'google' | 'github' | null
+  const [socialLoading, setSocialLoading] = useState(null);
   const [feedback, setFeedback] = useState(null);
+
+  useEffect(() => {
+    if (!isOpen) return;
+    const onKeyDown = (e) => {
+      if (e.key === 'Escape') onClose?.();
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [isOpen, onClose]);
 
   if (!isOpen) return null;
 
-  // Handler Submit Form Email & Password
   const handleSubmit = async (e) => {
     e.preventDefault();
     setFeedback(null);
@@ -53,55 +58,64 @@ export default function AuthModal({ isOpen, onClose }) {
         await login(email, password);
         setFeedback({
           type: 'success',
-          text: language === 'en' 
-            ? 'Authentication successful! Redirecting to dashboard...' 
-            : 'Otentikasi berhasil! Mengalihkan ke dashboard...',
+          text:
+            language === 'en'
+              ? 'Authentication successful! Redirecting to dashboard...'
+              : 'Otentikasi berhasil! Mengalihkan ke dashboard...',
         });
         setTimeout(() => onClose(), 800);
       } else if (mode === 'register') {
-        await register(email, password, displayName, selectedRole, institution, nim);
+        await register(email, password, displayName, ROLES.STUDENT, institution, nim);
         setFeedback({
           type: 'success',
-          text: language === 'en'
-            ? 'Account registered successfully! Academic data & profile synchronized.'
-            : 'Pendaftaran akun berhasil! Data akademik & profil telah tersimpan dan disinkronkan.',
+          text:
+            language === 'en'
+              ? 'Account registered successfully! Academic data & profile synchronized.'
+              : 'Pendaftaran akun berhasil! Data akademik & profil telah tersimpan dan disinkronkan.',
         });
         setTimeout(() => onClose(), 1200);
       } else if (mode === 'forgot') {
         await resetPassword(email);
         setFeedback({
           type: 'success',
-          text: language === 'en'
-            ? 'Password recovery link has been sent to your email.'
-            : 'Tautan pemulihan kata sandi telah dikirim ke kotak masuk email Anda.',
+          text:
+            language === 'en'
+              ? 'Password recovery link has been sent to your email.'
+              : 'Tautan pemulihan kata sandi telah dikirim ke kotak masuk email Anda.',
         });
       }
     } catch (err) {
       let msg = err.message;
       if (err.code === 'auth/invalid-credential' || err.code === 'auth/wrong-password') {
-        msg = language === 'en'
-          ? 'Invalid credentials: Email or password does not match.'
-          : 'Kredensial salah: Alamat email atau kata sandi tidak cocok.';
+        msg =
+          language === 'en'
+            ? 'Invalid credentials: Email or password does not match.'
+            : 'Kredensial salah: Alamat email atau kata sandi tidak cocok.';
       } else if (err.code === 'auth/user-not-found') {
-        msg = language === 'en'
-          ? 'Account not found. Please register a new account.'
-          : 'Akun belum terdaftar. Silakan pilih tab Daftar Akun Baru.';
+        msg =
+          language === 'en'
+            ? 'Account not found. Please register a new account.'
+            : 'Akun belum terdaftar. Silakan pilih tab Daftar Akun Baru.';
       } else if (err.code === 'auth/email-already-in-use') {
-        msg = language === 'en'
-          ? 'This email address is already in use. Please log in directly.'
-          : 'Alamat email ini sudah terdaftar. Silakan langsung masuk.';
+        msg =
+          language === 'en'
+            ? 'This email address is already in use. Please log in directly.'
+            : 'Alamat email ini sudah terdaftar. Silakan langsung masuk.';
       } else if (err.code === 'auth/weak-password') {
-        msg = language === 'en'
-          ? 'Password is too short (minimum 6 characters).'
-          : 'Kata sandi terlalu pendek (minimal 6 karakter).';
+        msg =
+          language === 'en'
+            ? 'Password is too short (minimum 6 characters).'
+            : 'Kata sandi terlalu pendek (minimal 6 karakter).';
       } else if (err.code === 'auth/invalid-email') {
-        msg = language === 'en'
-          ? 'Invalid email address format.'
-          : 'Format alamat email tidak valid.';
+        msg =
+          language === 'en'
+            ? 'Invalid email address format.'
+            : 'Format alamat email tidak valid.';
       } else if (err.code === 'auth/too-many-requests') {
-        msg = language === 'en'
-          ? 'Too many failed attempts. Please try again later.'
-          : 'Terlalu banyak percobaan gagal. Silakan tunggu beberapa saat atau reset sandi.';
+        msg =
+          language === 'en'
+            ? 'Too many failed attempts. Please try again later.'
+            : 'Terlalu banyak percobaan gagal. Silakan tunggu beberapa saat atau reset sandi.';
       }
       setFeedback({ type: 'error', text: msg });
     } finally {
@@ -109,7 +123,6 @@ export default function AuthModal({ isOpen, onClose }) {
     }
   };
 
-  // Handler Login Akun Google
   const handleGoogleLogin = async () => {
     setFeedback(null);
     setSocialLoading('google');
@@ -117,14 +130,20 @@ export default function AuthModal({ isOpen, onClose }) {
       await loginWithGoogle();
       setFeedback({
         type: 'success',
-        text: 'Berhasil terhubung dengan Akun Google!',
+        text:
+          language === 'en'
+            ? 'Connected with Google Account!'
+            : 'Berhasil terhubung dengan Akun Google!',
       });
       setTimeout(() => onClose(), 1000);
     } catch (err) {
       if (err.code === 'auth/popup-closed-by-user') {
         setFeedback({
           type: 'error',
-          text: 'Jendela otentikasi Google ditutup sebelum selesai.',
+          text:
+            language === 'en'
+              ? 'Google sign-in popup was closed before completing.'
+              : 'Jendela otentikasi Google ditutup sebelum selesai.',
         });
       } else {
         setFeedback({
@@ -137,7 +156,6 @@ export default function AuthModal({ isOpen, onClose }) {
     }
   };
 
-  // Handler Login Akun GitHub
   const handleGithubLogin = async () => {
     setFeedback(null);
     setSocialLoading('github');
@@ -145,14 +163,20 @@ export default function AuthModal({ isOpen, onClose }) {
       await loginWithGithub();
       setFeedback({
         type: 'success',
-        text: 'Berhasil terhubung dengan Akun GitHub!',
+        text:
+          language === 'en'
+            ? 'Connected with GitHub Account!'
+            : 'Berhasil terhubung dengan Akun GitHub!',
       });
       setTimeout(() => onClose(), 1000);
     } catch (err) {
       if (err.code === 'auth/popup-closed-by-user') {
         setFeedback({
           type: 'error',
-          text: 'Jendela otentikasi GitHub ditutup sebelum proses selesai.',
+          text:
+            language === 'en'
+              ? 'GitHub sign-in popup was closed before completing.'
+              : 'Jendela otentikasi GitHub ditutup sebelum proses selesai.',
         });
       } else {
         setFeedback({
@@ -166,42 +190,61 @@ export default function AuthModal({ isOpen, onClose }) {
   };
 
   return (
-    <div className="fixed inset-0 bg-black/85 backdrop-blur-xs flex items-center justify-center p-4 z-50 overflow-y-auto">
-      <div className="bg-[#12161f] w-full max-w-md rounded-xl shadow-2xl border border-slate-700/80 overflow-hidden relative my-auto animate-in fade-in zoom-in-95 duration-200 font-sans">
-        {/* Top Hazard Accent Stripe */}
+    <div className="fixed inset-0 bg-black/80 backdrop-blur-xs flex items-center justify-center p-4 z-50 overflow-y-auto">
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="auth-modal-title"
+        className="bg-white dark:bg-[#12161f] w-full max-w-md rounded-xl shadow-2xl border border-slate-200 dark:border-slate-700/80 overflow-hidden relative my-auto animate-in fade-in zoom-in-95 duration-200 font-sans"
+      >
         <div className="absolute top-0 left-0 right-0 h-1 bg-gradient-to-r from-[#f59e0b] via-[#fbbf24] to-[#f59e0b]" />
 
         {/* Modal Header */}
-        <div className="bg-[#161c24] text-white p-5 border-b border-slate-700/80 relative">
+        <div className="bg-slate-50 dark:bg-[#161c24] text-slate-900 dark:text-white p-5 border-b border-slate-200 dark:border-slate-700/80 relative">
           <button
+            type="button"
+            aria-label="Tutup modal autentikasi"
             onClick={onClose}
-            className="w-8 h-8 rounded-full bg-slate-800/80 hover:bg-slate-700 text-slate-300 hover:text-white flex items-center justify-center absolute top-4 right-4 transition"
+            className="w-8 h-8 rounded-full bg-slate-200 dark:bg-slate-800/80 hover:bg-slate-300 dark:hover:bg-slate-700 text-slate-600 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white flex items-center justify-center absolute top-4 right-4 transition"
           >
             <X className="w-4 h-4" />
           </button>
 
-          <div className="flex items-center gap-1.5 text-[10px] font-mono text-[#f59e0b] uppercase tracking-wider mb-1">
+          <div className="flex items-center gap-1.5 text-[10px] font-mono text-amber-600 dark:text-[#f59e0b] uppercase tracking-wider mb-1">
             <ShieldCheck className="w-3.5 h-3.5" />
-            <span>// SMARTSA AUTHENTICATION GATEWAY</span>
+            <span>{t('auth_tag')}</span>
           </div>
-          <h2 className="text-lg font-black tracking-tight text-slate-100">
+          <h2 id="auth-modal-title" className="text-lg font-black tracking-tight text-slate-900 dark:text-slate-100">
             {mode === 'login'
-              ? 'Masuk ke Smartsa LMS'
+              ? language === 'en'
+                ? 'Sign In to Smartsa LMS'
+                : 'Masuk ke Smartsa LMS'
               : mode === 'register'
-              ? 'Daftarkan Akun Baru'
+              ? language === 'en'
+                ? 'Register New Account'
+                : 'Daftarkan Akun Baru'
+              : language === 'en'
+              ? 'Password Recovery'
               : 'Pemulihan Kata Sandi'}
           </h2>
-          <p className="text-xs text-slate-400 mt-0.5">
+          <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
             {mode === 'login'
-              ? 'Akses modul materi, silabus perkuliahan, dan evaluasi hasil belajar.'
+              ? language === 'en'
+                ? 'Access course modules, syllabi, and competency assessments.'
+                : 'Akses modul materi, silabus perkuliahan, dan evaluasi hasil belajar.'
               : mode === 'register'
-              ? 'Buat profil akademik baru untuk memulai pengalaman belajar modern.'
+              ? language === 'en'
+                ? 'Create a new academic profile to start learning.'
+                : 'Buat profil akademik baru untuk memulai pengalaman belajar modern.'
+              : language === 'en'
+              ? 'Send a password reset link to your email address.'
               : 'Kirimkan tautan reset kata sandi ke alamat email Anda.'}
           </p>
 
           {/* Mode Switch Tabs */}
           <div className="flex gap-2 mt-4 pt-1">
             <button
+              type="button"
               onClick={() => {
                 setMode('login');
                 setFeedback(null);
@@ -209,12 +252,13 @@ export default function AuthModal({ isOpen, onClose }) {
               className={`flex-1 py-1.5 text-xs font-mono font-bold rounded-sm transition uppercase tracking-wider ${
                 mode === 'login'
                   ? 'bg-[#f59e0b] text-black shadow-xs'
-                  : 'bg-[#1b2330] text-slate-400 hover:text-white'
+                  : 'bg-slate-200 dark:bg-[#1b2330] text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
               }`}
             >
               {t('tab_login')}
             </button>
             <button
+              type="button"
               onClick={() => {
                 setMode('register');
                 setFeedback(null);
@@ -222,7 +266,7 @@ export default function AuthModal({ isOpen, onClose }) {
               className={`flex-1 py-1.5 text-xs font-mono font-bold rounded-sm transition uppercase tracking-wider ${
                 mode === 'register'
                   ? 'bg-[#f59e0b] text-black shadow-xs'
-                  : 'bg-[#1b2330] text-slate-400 hover:text-white'
+                  : 'bg-slate-200 dark:bg-[#1b2330] text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
               }`}
             >
               {t('tab_register')}
@@ -235,31 +279,28 @@ export default function AuthModal({ isOpen, onClose }) {
           <div
             className={`m-4 p-3 rounded-md text-xs font-mono flex items-start gap-2.5 ${
               feedback.type === 'success'
-                ? 'bg-emerald-950/60 text-emerald-300 border border-emerald-500/40'
-                : 'bg-rose-950/60 text-rose-300 border border-rose-500/40'
+                ? 'bg-emerald-50 dark:bg-emerald-950/60 text-emerald-700 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-500/40'
+                : 'bg-rose-50 dark:bg-rose-950/60 text-rose-700 dark:text-rose-300 border border-rose-200 dark:border-rose-500/40'
             }`}
           >
             {feedback.type === 'success' ? (
-              <CheckCircle className="w-4 h-4 text-emerald-400 shrink-0 mt-0.5" />
+              <CheckCircle className="w-4 h-4 text-emerald-500 shrink-0 mt-0.5" />
             ) : (
-              <AlertCircle className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
+              <AlertCircle className="w-4 h-4 text-rose-500 shrink-0 mt-0.5" />
             )}
             <span className="leading-relaxed">{feedback.text}</span>
           </div>
         )}
 
         <div className="p-5 space-y-4">
-          {/* Social Sign-In (Google & GitHub) */}
           {mode !== 'forgot' && (
             <div className="space-y-2.5">
-              {/* Google Sign-In Button */}
               <button
                 type="button"
                 onClick={handleGoogleLogin}
                 disabled={socialLoading !== null}
-                className="w-full bg-[#1c2432] hover:bg-[#232e40] text-slate-100 border border-slate-600/80 rounded-md py-2.5 px-4 text-xs font-bold transition flex items-center justify-center gap-3 shadow-xs disabled:opacity-50"
+                className="w-full bg-slate-50 dark:bg-[#1c2432] hover:bg-slate-100 dark:hover:bg-[#232e40] text-slate-800 dark:text-slate-100 border border-slate-300 dark:border-slate-600/80 rounded-md py-2.5 px-4 text-xs font-bold transition flex items-center justify-center gap-3 shadow-xs disabled:opacity-50"
               >
-                {/* Official Google SVG Logo */}
                 <svg className="w-4 h-4 shrink-0" viewBox="0 0 24 24">
                   <path
                     fill="#4285F4"
@@ -280,19 +321,19 @@ export default function AuthModal({ isOpen, onClose }) {
                 </svg>
                 <span>
                   {socialLoading === 'google'
-                    ? (language === 'en' ? 'Connecting to Google...' : 'Menghubungkan ke Google...')
+                    ? language === 'en'
+                      ? 'Connecting to Google...'
+                      : 'Menghubungkan ke Google...'
                     : t('google_login_btn')}
                 </span>
               </button>
 
-              {/* GitHub Sign-In Button */}
               <button
                 type="button"
                 onClick={handleGithubLogin}
                 disabled={socialLoading !== null}
-                className="w-full bg-[#1c2432] hover:bg-[#232e40] text-slate-100 border border-slate-600/80 rounded-md py-2.5 px-4 text-xs font-bold transition flex items-center justify-center gap-3 shadow-xs disabled:opacity-50"
+                className="w-full bg-slate-50 dark:bg-[#1c2432] hover:bg-slate-100 dark:hover:bg-[#232e40] text-slate-800 dark:text-slate-100 border border-slate-300 dark:border-slate-600/80 rounded-md py-2.5 px-4 text-xs font-bold transition flex items-center justify-center gap-3 shadow-xs disabled:opacity-50"
               >
-                {/* GitHub Cat Icon SVG */}
                 <svg className="w-4 h-4 fill-current shrink-0" viewBox="0 0 24 24">
                   <path
                     fillRule="evenodd"
@@ -302,92 +343,87 @@ export default function AuthModal({ isOpen, onClose }) {
                 </svg>
                 <span>
                   {socialLoading === 'github'
-                    ? (language === 'en' ? 'Connecting to GitHub...' : 'Menghubungkan ke GitHub...')
+                    ? language === 'en'
+                      ? 'Connecting to GitHub...'
+                      : 'Menghubungkan ke GitHub...'
                     : t('github_login_btn')}
                 </span>
               </button>
 
-              {/* Divider ATAU */}
               <div className="relative flex items-center justify-center my-3">
-                <div className="border-t border-slate-700/80 w-full" />
-                <span className="bg-[#12161f] px-3 text-[10px] font-mono text-slate-500 uppercase tracking-widest shrink-0">
+                <div className="border-t border-slate-200 dark:border-slate-700/80 w-full" />
+                <span className="bg-white dark:bg-[#12161f] px-3 text-[10px] font-mono text-slate-500 uppercase tracking-widest shrink-0">
                   {t('or_with_email')}
                 </span>
-                <div className="border-t border-slate-700/80 w-full" />
+                <div className="border-t border-slate-200 dark:border-slate-700/80 w-full" />
               </div>
             </div>
           )}
 
-          {/* Form Email & Password */}
           <form onSubmit={handleSubmit} className="space-y-3">
             {mode === 'register' && (
               <>
                 <div>
-                  <label className="block text-[11px] font-mono font-bold text-slate-300 mb-1">
+                  <label className="block text-[11px] font-mono font-bold text-slate-700 dark:text-slate-300 mb-1">
                     {t('full_name_label')}
                   </label>
                   <div className="relative">
-                    <User className="w-4 h-4 text-slate-500 absolute left-3 top-1/2 -translate-y-1/2" />
+                    <User className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
                     <input
                       type="text"
                       required
                       placeholder={t('full_name_placeholder')}
                       value={displayName}
                       onChange={(e) => setDisplayName(e.target.value)}
-                      className="w-full pl-9 pr-3 py-2 text-xs bg-[#0b0f17] border border-slate-700 rounded-md text-slate-100 placeholder-slate-600 focus:outline-none focus:border-[#f59e0b]"
+                      className="w-full pl-9 pr-3 py-2 text-xs bg-slate-50 dark:bg-[#0b0f17] border border-slate-300 dark:border-slate-700 rounded-md text-slate-900 dark:text-slate-100 placeholder-slate-400 dark:placeholder-slate-600 focus:outline-none focus:border-[#f59e0b]"
                     />
                   </div>
                 </div>
 
                 <div>
-                  <label className="block text-[11px] font-mono font-bold text-slate-300 mb-1">
+                  <label className="block text-[11px] font-mono font-bold text-slate-700 dark:text-slate-300 mb-1">
                     {t('role_label')}
                   </label>
-                  <select
-                    value={selectedRole}
-                    onChange={(e) => setSelectedRole(e.target.value)}
-                    className="w-full px-3 py-2 text-xs bg-[#0b0f17] border border-slate-700 rounded-md text-slate-100 focus:outline-none focus:border-[#f59e0b]"
-                  >
-                    <option value={ROLES.STUDENT}>{getRoleLabel(ROLES.STUDENT)}</option>
-                    <option value={ROLES.LECTURER}>{getRoleLabel(ROLES.LECTURER)}</option>
-                  </select>
+                  <div className="w-full px-3 py-2 text-xs bg-slate-50 dark:bg-[#0b0f17] border border-slate-300 dark:border-slate-700/80 rounded-md text-slate-700 dark:text-slate-300 flex items-center justify-between">
+                    <span>{getRoleLabel(ROLES.STUDENT)}</span>
+                    <span className="text-[10px] font-mono text-amber-600 dark:text-[#f59e0b]">DEFAULT</span>
+                  </div>
+                  <span className="text-[10px] text-slate-500 mt-1 block">
+                    {language === 'en'
+                      ? 'Self-registration creates a Student account. Lecturer roles are granted by Admin.'
+                      : 'Registrasi mandiri membuat akun Mahasiswa. Role Dosen diberikan oleh Admin.'}
+                  </span>
                 </div>
 
                 <div>
-                  <label className="block text-[11px] font-mono font-bold text-slate-300 mb-1">
+                  <label className="block text-[11px] font-mono font-bold text-slate-700 dark:text-slate-300 mb-1">
                     {t('institution_label')}
                   </label>
                   <div className="relative">
-                    <Building className="w-4 h-4 text-slate-500 absolute left-3 top-1/2 -translate-y-1/2" />
+                    <Building className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
                     <input
                       type="text"
                       placeholder={t('institution_placeholder')}
                       value={institution}
                       onChange={(e) => setInstitution(e.target.value)}
-                      className="w-full pl-9 pr-3 py-2 text-xs bg-[#0b0f17] border border-slate-700 rounded-md text-slate-100 placeholder-slate-600 focus:outline-none focus:border-[#f59e0b]"
+                      className="w-full pl-9 pr-3 py-2 text-xs bg-slate-50 dark:bg-[#0b0f17] border border-slate-300 dark:border-slate-700 rounded-md text-slate-900 dark:text-slate-100 placeholder-slate-400 dark:placeholder-slate-600 focus:outline-none focus:border-[#f59e0b]"
                     />
                   </div>
                 </div>
 
                 <div>
-                  <label className="block text-[11px] font-mono font-bold text-slate-300 mb-1">
-                    {selectedRole === ROLES.LECTURER
-                      ? 'NIDN / NOMOR INDUK DOSEN'
-                      : 'NIM / NOMOR INDUK MAHASISWA'}
+                  <label className="block text-[11px] font-mono font-bold text-slate-700 dark:text-slate-300 mb-1">
+                    NIM / NOMOR INDUK MAHASISWA
                   </label>
                   <div className="relative">
-                    <GraduationCap className="w-4 h-4 text-slate-500 absolute left-3 top-1/2 -translate-y-1/2" />
+                    <GraduationCap className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
                     <input
                       type="text"
                       required
-                      placeholder={
-                        selectedRole === ROLES.LECTURER
-                          ? 'Contoh: 0012058402'
-                          : 'Contoh: 25050974001'
-                      }
+                      placeholder="Contoh: 25050974001"
                       value={nim}
                       onChange={(e) => setNim(e.target.value)}
-                      className="w-full pl-9 pr-3 py-2 text-xs bg-[#0b0f17] border border-slate-700 rounded-md text-slate-100 placeholder-slate-600 focus:outline-none focus:border-[#f59e0b]"
+                      className="w-full pl-9 pr-3 py-2 text-xs bg-slate-50 dark:bg-[#0b0f17] border border-slate-300 dark:border-slate-700 rounded-md text-slate-900 dark:text-slate-100 placeholder-slate-400 dark:placeholder-slate-600 focus:outline-none focus:border-[#f59e0b]"
                     />
                   </div>
                 </div>
@@ -395,41 +431,42 @@ export default function AuthModal({ isOpen, onClose }) {
             )}
 
             <div>
-              <label className="block text-[11px] font-mono font-bold text-slate-300 mb-1">
+              <label className="block text-[11px] font-mono font-bold text-slate-700 dark:text-slate-300 mb-1">
                 {t('email_label')}
               </label>
               <div className="relative">
-                <Mail className="w-4 h-4 text-slate-500 absolute left-3 top-1/2 -translate-y-1/2" />
+                <Mail className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
                 <input
                   type="email"
                   required
                   placeholder="mahasiswa@smartsa.edu"
                   value={email}
                   onChange={(e) => setEmail(e.target.value)}
-                  className="w-full pl-9 pr-3 py-2 text-xs bg-[#0b0f17] border border-slate-700 rounded-md text-slate-100 placeholder-slate-600 focus:outline-none focus:border-[#f59e0b]"
+                  className="w-full pl-9 pr-3 py-2 text-xs bg-slate-50 dark:bg-[#0b0f17] border border-slate-300 dark:border-slate-700 rounded-md text-slate-900 dark:text-slate-100 placeholder-slate-400 dark:placeholder-slate-600 focus:outline-none focus:border-[#f59e0b]"
                 />
               </div>
             </div>
 
             {mode !== 'forgot' && (
               <div>
-                <label className="block text-[11px] font-mono font-bold text-slate-300 mb-1">
+                <label className="block text-[11px] font-mono font-bold text-slate-700 dark:text-slate-300 mb-1">
                   {t('password_label')}
                 </label>
                 <div className="relative">
-                  <Lock className="w-4 h-4 text-slate-500 absolute left-3 top-1/2 -translate-y-1/2" />
+                  <Lock className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
                   <input
                     type={showPassword ? 'text' : 'password'}
                     required
                     placeholder={t('password_placeholder')}
                     value={password}
                     onChange={(e) => setPassword(e.target.value)}
-                    className="w-full pl-9 pr-10 py-2 text-xs bg-[#0b0f17] border border-slate-700 rounded-md text-slate-100 placeholder-slate-600 focus:outline-none focus:border-[#f59e0b]"
+                    className="w-full pl-9 pr-10 py-2 text-xs bg-slate-50 dark:bg-[#0b0f17] border border-slate-300 dark:border-slate-700 rounded-md text-slate-900 dark:text-slate-100 placeholder-slate-400 dark:placeholder-slate-600 focus:outline-none focus:border-[#f59e0b]"
                   />
                   <button
                     type="button"
+                    aria-label={showPassword ? 'Sembunyikan sandi' : 'Tampilkan sandi'}
                     onClick={() => setShowPassword(!showPassword)}
-                    className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-white"
+                    className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-500 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white"
                   >
                     {showPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
                   </button>
@@ -445,7 +482,7 @@ export default function AuthModal({ isOpen, onClose }) {
                     setMode('forgot');
                     setFeedback(null);
                   }}
-                  className="text-[11px] text-[#f59e0b] hover:underline font-mono"
+                  className="text-[11px] text-amber-600 dark:text-[#f59e0b] hover:underline font-mono"
                 >
                   {t('forgot_password')}
                 </button>
@@ -458,7 +495,9 @@ export default function AuthModal({ isOpen, onClose }) {
               className="w-full bg-[#f59e0b] hover:bg-[#d97706] text-black font-black py-2.5 rounded-md text-xs transition disabled:opacity-50 uppercase font-mono tracking-wider shadow-md mt-2"
             >
               {loading
-                ? (language === 'en' ? 'PROCESSING AUTHENTICATION...' : 'MEMPROSES OTENTIKASI...')
+                ? language === 'en'
+                  ? 'PROCESSING AUTHENTICATION...'
+                  : 'MEMPROSES OTENTIKASI...'
                 : mode === 'login'
                 ? t('login_submit_btn')
                 : mode === 'register'
@@ -468,17 +507,17 @@ export default function AuthModal({ isOpen, onClose }) {
           </form>
         </div>
 
-        {/* Modal Footer / Switch Modes */}
-        <div className="p-3.5 bg-[#0e1219] border-t border-slate-800 text-center text-xs text-slate-400 font-sans">
+        <div className="p-3.5 bg-slate-50 dark:bg-[#0e1219] border-t border-slate-200 dark:border-slate-800 text-center text-xs text-slate-500 dark:text-slate-400 font-sans">
           {mode === 'login' ? (
             <span>
               {language === 'en' ? "Don't have an account yet?" : 'Belum memiliki akun?'}{' '}
               <button
+                type="button"
                 onClick={() => {
                   setMode('register');
                   setFeedback(null);
                 }}
-                className="font-bold text-[#f59e0b] hover:underline ml-1"
+                className="font-bold text-amber-600 dark:text-[#f59e0b] hover:underline ml-1"
               >
                 {language === 'en' ? 'Register Now' : 'Daftar Sekarang'}
               </button>
@@ -487,11 +526,12 @@ export default function AuthModal({ isOpen, onClose }) {
             <span>
               {language === 'en' ? 'Already have an account?' : 'Sudah memiliki akun?'}{' '}
               <button
+                type="button"
                 onClick={() => {
                   setMode('login');
                   setFeedback(null);
                 }}
-                className="font-bold text-[#f59e0b] hover:underline ml-1"
+                className="font-bold text-amber-600 dark:text-[#f59e0b] hover:underline ml-1"
               >
                 {language === 'en' ? 'Sign in here' : 'Masuk di Sini'}
               </button>

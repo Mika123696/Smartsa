@@ -1,136 +1,386 @@
 /**
- * Layanan Presensi Barcode & Perhitungan Progres Riwayat Kelas (+6% per Pertemuan)
- * Smartsa LMS / Endfield Academic Core Spec
+ * Layanan Presensi Dinamis 2 Arah Berbasis Cloud Firestore
+ * Koleksi: attendance/{classId}_m{meetingNo}_{uid} & classes/{classId}.activeAttendanceSession
  */
+import {
+  collection,
+  doc,
+  getDoc,
+  getDocs,
+  orderBy,
+  query,
+  serverTimestamp,
+  setDoc,
+  updateDoc,
+  where,
+} from 'firebase/firestore';
+import { auth, db } from '../firebase';
 
-const STORAGE_PREFIX = 'smartsa_attendance_';
+// Penyimpanan in-memory sementara khusus Mode Demo (tanpa localStorage)
+const demoAttendanceStore = new Map();
+const demoSessionStore = new Map();
 
-// Membaca data presensi & riwayat kelas dari penyimpanan lokal
-export const getClassAttendance = (classId) => {
-  if (!classId) return { attendedOrders: [], progress: 0, history: [] };
-  try {
-    const raw = localStorage.getItem(`${STORAGE_PREFIX}${classId}`);
-    if (raw) {
-      const parsed = JSON.parse(raw);
-      const orders = Array.isArray(parsed.attendedOrders) ? parsed.attendedOrders : [];
-      // Setiap 1 pertemuan bertambah 6%
-      const calculatedProgress = Math.min(100, orders.length === 16 ? 100 : orders.length * 6);
-      return {
-        classId,
-        attendedOrders: orders,
-        progress: calculatedProgress,
-        history: Array.isArray(parsed.history) ? parsed.history : [],
-      };
-    }
-  } catch (err) {
-    console.warn('Gagal membaca data presensi kelas:', err);
-  }
-
-  return {
-    classId,
-    attendedOrders: [],
-    progress: 0,
-    history: [],
-  };
-};
-
-// Mencatat presensi pertemuan via barcode scan (+6% progres riwayat)
-export const recordMeetingAttendance = (classId, meetingOrder, meetingTitle = '', barcodeCode = '') => {
-  if (!classId || !meetingOrder) {
-    return { success: false, message: 'Data kelas atau pertemuan tidak valid.' };
-  }
-
-  const current = getClassAttendance(classId);
-  const orderNum = Number(meetingOrder);
-
-  // Periksa apakah pertemuan ini sudah pernah dicatat sebelumnya
-  if (current.attendedOrders.includes(orderNum)) {
-    return {
-      success: false,
-      alreadyAttended: true,
-      progress: current.progress,
-      message: `Pertemuan 0${orderNum} sudah pernah dipresensi. Progres +6% telah aktif pada riwayat Anda.`,
-    };
-  }
-
-  // Tambahkan nomor pertemuan ke daftar hadir
-  const updatedOrders = [...current.attendedOrders, orderNum].sort((a, b) => a - b);
-  // Hitung progres: 6% per pertemuan (pertemuan ke-16 melengkapi menjadi 100%)
-  const newProgress = Math.min(100, updatedOrders.length >= 16 ? 100 : updatedOrders.length * 6);
-
-  // Buat entri riwayat presensi baru
-  const now = new Date();
-  const dateFormatted = now.toLocaleDateString('id-ID', {
+function formatTimestampLabel(date = new Date()) {
+  const dateFormatted = date.toLocaleDateString('id-ID', {
     day: 'numeric',
     month: 'short',
     year: 'numeric',
   });
-  const timeFormatted = now.toLocaleTimeString('id-ID', {
+  const timeFormatted = date.toLocaleTimeString('id-ID', {
     hour: '2-digit',
     minute: '2-digit',
   });
+  return `${dateFormatted}, ${timeFormatted} WIB`;
+}
 
-  const resolvedBarcode =
-    barcodeCode || `BARCODE-${classId.toUpperCase()}-M0${orderNum}-${Math.floor(1000 + Math.random() * 9000)}`;
+function parseTimestampLabel(data) {
+  if (data?.timestampLabel) return data.timestampLabel;
+  if (typeof data?.recordedAt?.toDate === 'function') {
+    return formatTimestampLabel(data.recordedAt.toDate());
+  }
+  return 'Tercatat di Firestore';
+}
 
-  const newHistoryEntry = {
-    id: `att_${classId}_m${orderNum}_${Date.now()}`,
-    meetingOrder: orderNum,
-    meetingTitle: meetingTitle || `Pertemuan 0${orderNum}`,
-    barcode: resolvedBarcode,
-    timestamp: `${dateFormatted}, ${timeFormatted} WIB`,
-    progressGained: 6,
-    status: 'TERVERIFIKASI',
-  };
+function parseMillis(value) {
+  if (!value) return 0;
+  if (typeof value === 'number') return value;
+  if (typeof value?.toMillis === 'function') return value.toMillis();
+  const parsed = Date.parse(value);
+  return Number.isNaN(parsed) ? 0 : parsed;
+}
 
-  const updatedHistory = [newHistoryEntry, ...current.history];
+function emitAttendanceUpdated(detail = {}) {
+  if (typeof window !== 'undefined') {
+    window.dispatchEvent(new CustomEvent('smartsa_attendance_updated', { detail }));
+  }
+}
 
-  const payload = {
-    classId,
-    attendedOrders: updatedOrders,
-    progress: newProgress,
-    history: updatedHistory,
-    lastUpdated: now.toISOString(),
-  };
+export async function getClassAttendanceSession(classId) {
+  if (!classId) return null;
+
+  if (!auth.currentUser) {
+    const demoSess = demoSessionStore.get(classId) || null;
+    if (demoSess && demoSess.expiresAt <= Date.now()) {
+      return { ...demoSess, isOpen: false, isExpired: true };
+    }
+    return demoSess;
+  }
 
   try {
-    localStorage.setItem(`${STORAGE_PREFIX}${classId}`, JSON.stringify(payload));
-    // Sebarkan event agar komponen lain (seperti StudentDashboard) dapat tersinkronisasi
-    if (typeof window !== 'undefined') {
-      window.dispatchEvent(
-        new CustomEvent('smartsa_attendance_updated', {
-          detail: { classId, meetingOrder: orderNum, progress: newProgress },
-        })
-      );
-    }
+    const snap = await getDoc(doc(db, 'classes', classId));
+    if (!snap.exists()) return null;
+    const sess = snap.data()?.activeAttendanceSession || null;
+    if (!sess) return null;
+    const expiresAtMs = parseMillis(sess.expiresAt);
+    const isExpired = Boolean(expiresAtMs && expiresAtMs <= Date.now());
+    return {
+      ...sess,
+      expiresAt: expiresAtMs,
+      isExpired,
+      isOpen: Boolean(sess.isOpen && !isExpired),
+    };
   } catch (err) {
-    console.warn('Gagal menyimpan presensi ke localStorage:', err);
+    console.warn('[attendanceService] Gagal membaca sesi presensi kelas:', err.message);
+    return null;
   }
+}
+
+export async function openAttendanceSession({
+  classId,
+  classCode = 'CLS',
+  meetingNo = 1,
+  durationMinutes = 15,
+  customCode = '',
+}) {
+  const parsedMeetingNo = Number.parseInt(meetingNo, 10);
+  if (!classId || Number.isNaN(parsedMeetingNo) || parsedMeetingNo < 1 || parsedMeetingNo > 16) {
+    throw new Error('Nomor pertemuan harus berada antara 1 sampai 16.');
+  }
+
+  const mins = Math.max(1, Math.min(180, Number.parseInt(durationMinutes, 10) || 15));
+  const padded = parsedMeetingNo < 10 ? `0${parsedMeetingNo}` : `${parsedMeetingNo}`;
+  const cleanCustom = String(customCode || '')
+    .trim()
+    .toUpperCase()
+    .replace(/[^A-Z0-9-]/g, '');
+  const randomSuffix = Math.floor(1000 + Math.random() * 9000);
+  const sessionCode = cleanCustom || `${String(classCode).toUpperCase()}-M${padded}-${randomSuffix}`;
+  const nowMs = Date.now();
+  const expiresAt = nowMs + mins * 60 * 1000;
+
+  const sessionPayload = {
+    meetingNo: parsedMeetingNo,
+    sessionCode,
+    openedAt: nowMs,
+    expiresAt,
+    openedBy: auth.currentUser?.uid || 'demo_lecturer',
+    isOpen: true,
+  };
+
+  if (!auth.currentUser) {
+    demoSessionStore.set(classId, sessionPayload);
+    emitAttendanceUpdated({ classId, meetingNo: parsedMeetingNo, sessionOpened: true });
+    return sessionPayload;
+  }
+
+  await updateDoc(doc(db, 'classes', classId), {
+    activeAttendanceSession: sessionPayload,
+    updatedAt: serverTimestamp(),
+  });
+
+  emitAttendanceUpdated({ classId, meetingNo: parsedMeetingNo, sessionOpened: true });
+  return sessionPayload;
+}
+
+export async function closeAttendanceSession(classId) {
+  if (!classId) return;
+
+  if (!auth.currentUser) {
+    demoSessionStore.delete(classId);
+    emitAttendanceUpdated({ classId, sessionClosed: true });
+    return;
+  }
+
+  await updateDoc(doc(db, 'classes', classId), {
+    activeAttendanceSession: null,
+    updatedAt: serverTimestamp(),
+  });
+  emitAttendanceUpdated({ classId, sessionClosed: true });
+}
+
+export async function getClassAttendance(classId, uidOverride = null) {
+  if (!classId) return { classId: '', attendedOrders: [], progress: 0, history: [] };
+
+  const uid = uidOverride || auth.currentUser?.uid;
+  if (!uid) {
+    const existing = demoAttendanceStore.get(classId);
+    return (
+      existing || {
+        classId,
+        attendedOrders: [],
+        progress: 0,
+        history: [],
+      }
+    );
+  }
+
+  try {
+    const q = query(
+      collection(db, 'attendance'),
+      where('classId', '==', classId),
+      where('uid', '==', uid),
+      orderBy('meetingNo', 'asc')
+    );
+    const snap = await getDocs(q);
+    const history = snap.docs.map((docSnap) => {
+      const data = docSnap.data();
+      return {
+        id: docSnap.id,
+        meetingOrder: Number(data.meetingNo),
+        meetingTitle: data.meetingTitle || `Pertemuan ${data.meetingNo}`,
+        barcode: data.sessionCode || '',
+        timestamp: parseTimestampLabel(data),
+        progressGained: data.progressGained || 6,
+        status: data.status || 'TERVERIFIKASI',
+      };
+    });
+    const attendedOrders = history.map((item) => item.meetingOrder).filter((n) => !Number.isNaN(n));
+    const progress = Math.min(100, attendedOrders.length >= 16 ? 100 : attendedOrders.length * 6);
+    return {
+      classId,
+      attendedOrders,
+      progress,
+      history: [...history].reverse(),
+    };
+  } catch (err) {
+    console.warn('[attendanceService] Gagal membaca riwayat presensi Firestore:', err.message);
+    return { classId, attendedOrders: [], progress: 0, history: [] };
+  }
+}
+
+export async function getSemesterAttendanceSummary(uidOverride = null) {
+  const uid = uidOverride || auth.currentUser?.uid;
+  if (!uid) {
+    let totalAttended = 0;
+    for (const record of demoAttendanceStore.values()) {
+      totalAttended += record.attendedOrders.length;
+    }
+    return {
+      attended: totalAttended,
+      progress: Math.min(100, totalAttended >= 16 ? 100 : totalAttended * 6),
+    };
+  }
+
+  try {
+    const q = query(collection(db, 'attendance'), where('uid', '==', uid));
+    const snap = await getDocs(q);
+    const attended = snap.size;
+    return {
+      attended,
+      progress: Math.min(100, attended >= 16 ? 100 : attended * 6),
+    };
+  } catch (err) {
+    console.warn('[attendanceService] Gagal membaca ringkasan presensi semester:', err.message);
+    return { attended: 0, progress: 0 };
+  }
+}
+
+export async function recordMeetingAttendance({
+  classId,
+  meetingNo = null,
+  meetingTitle = '',
+  sessionCode = '',
+}) {
+  if (!classId) {
+    return { success: false, message: 'Data kelas tidak valid.' };
+  }
+
+  const uid = auth.currentUser?.uid;
+
+  // Mode Demo (tanpa akun Firebase aktif) -> simpan in-memory agar UI tetap responsif
+  if (!uid) {
+    const demoSession = demoSessionStore.get(classId);
+    const resolvedOrder = Number.parseInt(meetingNo || demoSession?.meetingNo || 1, 10);
+    if (demoSession) {
+      if (demoSession.expiresAt <= Date.now()) {
+        return { success: false, expired: true, message: 'Sesi presensi demo telah kedaluwarsa.' };
+      }
+      if (
+        sessionCode &&
+        demoSession.sessionCode.toUpperCase() !== String(sessionCode).trim().toUpperCase()
+      ) {
+        return { success: false, invalidCode: true, message: 'Kode sesi presensi tidak cocok.' };
+      }
+    }
+
+    const current = demoAttendanceStore.get(classId) || {
+      classId,
+      attendedOrders: [],
+      progress: 0,
+      history: [],
+    };
+    if (current.attendedOrders.includes(resolvedOrder)) {
+      return {
+        success: false,
+        alreadyAttended: true,
+        progress: current.progress,
+        message: `Pertemuan ${resolvedOrder < 10 ? `0${resolvedOrder}` : resolvedOrder} sudah pernah dipresensi.`,
+      };
+    }
+
+    const updatedOrders = [...current.attendedOrders, resolvedOrder].sort((a, b) => a - b);
+    const newProgress = Math.min(100, updatedOrders.length >= 16 ? 100 : updatedOrders.length * 6);
+    const newItem = {
+      id: `${classId}_m${resolvedOrder}_demo`,
+      meetingOrder: resolvedOrder,
+      meetingTitle: meetingTitle || `Pertemuan 0${resolvedOrder}`,
+      barcode: sessionCode || demoSession?.sessionCode || `${classId.toUpperCase()}-DEMO`,
+      timestamp: formatTimestampLabel(new Date()),
+      progressGained: 6,
+      status: 'TERVERIFIKASI (DEMO)',
+    };
+    demoAttendanceStore.set(classId, {
+      classId,
+      attendedOrders: updatedOrders,
+      progress: newProgress,
+      history: [newItem, ...current.history],
+    });
+    emitAttendanceUpdated({ classId, meetingOrder: resolvedOrder, progress: newProgress });
+    return {
+      success: true,
+      progress: newProgress,
+      addedPercent: 6,
+      meetingOrder: resolvedOrder,
+      historyItem: newItem,
+      message: `Presensi Pertemuan 0${resolvedOrder} berhasil dicatat (Mode Demo)!`,
+    };
+  }
+
+  // Mode Terautentikasi -> Validasi sesi aktif dosen di classes/{classId}
+  const classSnap = await getDoc(doc(db, 'classes', classId));
+  if (!classSnap.exists()) {
+    return { success: false, message: 'Dokumen kelas tidak ditemukan di Firestore.' };
+  }
+
+  const classData = classSnap.data();
+  const activeSession = classData?.activeAttendanceSession;
+  if (!activeSession || activeSession.isOpen === false) {
+    return {
+      success: false,
+      noActiveSession: true,
+      message: 'Dosen belum membuka sesi presensi untuk mata kuliah ini.',
+    };
+  }
+
+  const expiresAtMs = parseMillis(activeSession.expiresAt);
+  if (expiresAtMs && Date.now() > expiresAtMs) {
+    return {
+      success: false,
+      expired: true,
+      message: 'Sesi presensi telah kedaluwarsa. Minta dosen membuka sesi baru.',
+    };
+  }
+
+  const cleanInputCode = String(sessionCode || '').trim().toUpperCase();
+  const expectedCode = String(activeSession.sessionCode || '').trim().toUpperCase();
+  if (!cleanInputCode || cleanInputCode !== expectedCode) {
+    return {
+      success: false,
+      invalidCode: true,
+      message: 'Kode sesi presensi tidak valid atau tidak sesuai dengan sesi yang dibuka dosen.',
+    };
+  }
+
+  const resolvedOrder = Number.parseInt(activeSession.meetingNo, 10);
+  if (Number.isNaN(resolvedOrder) || resolvedOrder < 1 || resolvedOrder > 32) {
+    return { success: false, message: 'Nomor pertemuan pada sesi presensi tidak valid.' };
+  }
+
+  // Validasi keanggotaan class_members/{classId}_{uid} sesuai firestore.rules
+  const memberRef = doc(db, 'class_members', `${classId}_${uid}`);
+  const memberSnap = await getDoc(memberRef);
+  if (!memberSnap.exists()) {
+    return {
+      success: false,
+      notMember: true,
+      message: `Anda belum tergabung di kelas ${classData.code || classId}. Silakan gabung kelas terlebih dahulu.`,
+    };
+  }
+
+  const attendanceId = `${classId}_m${resolvedOrder}_${uid}`;
+  const attRef = doc(db, 'attendance', attendanceId);
+  const existingSnap = await getDoc(attRef);
+  if (existingSnap.exists()) {
+    return {
+      success: false,
+      alreadyAttended: true,
+      message: `Pertemuan ${resolvedOrder < 10 ? `0${resolvedOrder}` : resolvedOrder} sudah pernah Anda presensi sebelumnya.`,
+    };
+  }
+
+  const nowLabel = formatTimestampLabel(new Date());
+  const padded = resolvedOrder < 10 ? `0${resolvedOrder}` : `${resolvedOrder}`;
+  await setDoc(attRef, {
+    attendanceId,
+    classId,
+    uid,
+    meetingNo: resolvedOrder,
+    meetingTitle: meetingTitle || `Pertemuan ${padded}: ${classData.title || classData.name || ''}`.trim(),
+    sessionCode: expectedCode,
+    status: 'TERVERIFIKASI',
+    progressGained: 6,
+    timestampLabel: nowLabel,
+    recordedAt: serverTimestamp(),
+  });
+
+  const updated = await getClassAttendance(classId, uid);
+  emitAttendanceUpdated({ classId, meetingOrder: resolvedOrder, progress: updated.progress });
 
   return {
     success: true,
-    progress: newProgress,
+    meetingOrder: resolvedOrder,
+    progress: updated.progress,
     addedPercent: 6,
-    historyItem: newHistoryEntry,
-    attendedCount: updatedOrders.length,
-    message: `Presensi Pertemuan 0${orderNum} berhasil diverifikasi! Progres riwayat kehadiran bertambah +6%.`,
+    message: `Presensi Pertemuan ${padded} berhasil diverifikasi di Firestore! Progres bertambah +6%.`,
   };
-};
-
-// Reset presensi kelas (opsional untuk simulasi audit)
-export const resetClassAttendance = (classId) => {
-  if (!classId) return;
-  try {
-    localStorage.removeItem(`${STORAGE_PREFIX}${classId}`);
-    if (typeof window !== 'undefined') {
-      window.dispatchEvent(
-        new CustomEvent('smartsa_attendance_updated', {
-          detail: { classId, progress: 0 },
-        })
-      );
-    }
-  } catch (err) {
-    console.warn('Gagal mereset data presensi:', err);
-  }
-};
-
+}

@@ -1,7 +1,17 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { useAuth } from '../../context/useAuth';
-import { useLanguage } from '../../context/LanguageContext';
-import { DEMO_CLASSES } from '../../services/mockData';
+import { useLanguage } from '../../context/useLanguage';
+import { ROLES } from '../../constants/roles';
+import {
+  fetchClasses,
+  fetchAllSubmissionsForGrading,
+  gradeSubmissionInFirestore,
+} from '../../services/lmsFirestoreService';
+import {
+  openAttendanceSession,
+  closeAttendanceSession,
+} from '../../services/attendanceService';
+import { isValidExternalUrl } from '../../services/cloudinaryService';
 import {
   BookOpen,
   Users,
@@ -11,58 +21,192 @@ import {
   CheckCircle,
   FileCheck,
   Send,
+  QrCode,
+  Clock,
+  XCircle,
+  AlertCircle,
+  X,
 } from 'lucide-react';
 
+const DEMO_SUBMISSIONS_FALLBACK = [
+  {
+    id: 'demo_sub_01',
+    studentName: 'Mahasiswa Demo (Kelompok 01)',
+    assignment: 'Laporan Desain Pola & Clean Architecture',
+    class: 'Pemrograman Berorientasi Objek',
+    submittedAt: 'Hari ini, 07:15 WIB (Demo)',
+    fileUrl: 'https://example.com/sample_report.pdf',
+    status: 'pending',
+  },
+];
+
 export default function TeacherDashboard({ onSelectClass, onNavigateView, onOpenCreateClass }) {
-  const { userProfile, role } = useAuth();
+  const { userProfile, currentUser, role } = useAuth();
   const { t, language } = useLanguage();
+
+  const [classes, setClasses] = useState([]);
+  const [submissionsQueue, setSubmissionsQueue] = useState([]);
+  const [loadingData, setLoadingData] = useState(true);
   const [selectedSubmission, setSelectedSubmission] = useState(null);
   const [gradeInput, setGradeInput] = useState('');
   const [feedbackInput, setFeedbackInput] = useState('');
+  const [grading, setGrading] = useState(false);
+  const [statusBanner, setStatusBanner] = useState(null);
 
-  // Daftar tugas yang menunggu dinilai oleh dosen/guru
-  const [submissionsQueue, setSubmissionsQueue] = useState([
-    {
-      id: 'sub_01',
-      studentName: 'Ahmad Faiz (Kelompok 01)',
-      assignment: 'Laporan Desain Pola & Clean Architecture',
-      class: 'Rekayasa Perangkat Lunak Lanjut',
-      submittedAt: 'Hari ini, 07:15 WIB',
-      fileUrl: 'https://cloudinary.com/sample_report.pdf',
-      status: 'pending',
-    },
-    {
-      id: 'sub_02',
-      studentName: 'Dewi Lestari (Kelompok 02)',
-      assignment: 'Laporan Desain Pola & Clean Architecture',
-      class: 'Rekayasa Perangkat Lunak Lanjut',
-      submittedAt: 'Kemarin, 21:30 WIB',
-      fileUrl: 'https://cloudinary.com/sample_report2.pdf',
-      status: 'pending',
-    },
-    {
-      id: 'sub_03',
-      studentName: 'Rian Pratama (Kelompok 04)',
-      assignment: 'Analisis Indexing Firestore NoSQL',
-      class: 'Pengembangan Basis Data Skala Besar',
-      submittedAt: '20 Okt 2026, 18:00 WIB',
-      fileUrl: 'https://cloudinary.com/sample_report3.pdf',
-      status: 'pending',
-    },
-  ]);
+  // State Pengelola Sesi Presensi Dinamis 2 Arah (Pertemuan 1–16)
+  const [attClassId, setAttClassId] = useState('');
+  const [attMeetingNo, setAttMeetingNo] = useState(1);
+  const [attDuration, setAttDuration] = useState(15);
+  const [attCustomCode, setAttCustomCode] = useState('');
+  const [attLoading, setAttLoading] = useState(false);
 
-  const handleGradeSubmit = (e) => {
-    e.preventDefault();
-    if (!selectedSubmission || !gradeInput) return;
+  const loadDashboardData = async () => {
+    setLoadingData(true);
+    try {
+      const classRes = await fetchClasses();
+      const loadedClasses = classRes.classes || [];
+      setClasses(loadedClasses);
+      setAttClassId((prev) =>
+        prev && loadedClasses.some((c) => c.id === prev) ? prev : loadedClasses[0]?.id || ''
+      );
 
-    setSubmissionsQueue((prev) =>
-      prev.filter((sub) => sub.id !== selectedSubmission.id)
-    );
-    setSelectedSubmission(null);
-    setGradeInput('');
-    setFeedbackInput('');
-    alert(`Nilai ${gradeInput} berhasil diterbitkan dan dicatat ke Gradebook!`);
+      if (currentUser) {
+        const subs = await fetchAllSubmissionsForGrading();
+        setSubmissionsQueue(subs);
+      } else {
+        setSubmissionsQueue(DEMO_SUBMISSIONS_FALLBACK);
+      }
+    } finally {
+      setLoadingData(false);
+    }
   };
+
+  useEffect(() => {
+    void loadDashboardData();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentUser?.uid]);
+
+  useEffect(() => {
+    if (!selectedSubmission) return;
+    const onKeyDown = (e) => {
+      if (e.key === 'Escape') setSelectedSubmission(null);
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [selectedSubmission]);
+
+  const selectedAttClass = classes.find((c) => c.id === attClassId) || null;
+  const activeAttSession = selectedAttClass?.activeAttendanceSession || null;
+  const isSessionActive = Boolean(
+    activeAttSession?.isOpen && (!activeAttSession.expiresAt || activeAttSession.expiresAt > Date.now())
+  );
+
+  const handleOpenAttendanceSession = async (e) => {
+    e.preventDefault();
+    if (!selectedAttClass || attLoading) return;
+    setAttLoading(true);
+    setStatusBanner(null);
+
+    try {
+      const session = await openAttendanceSession({
+        classId: selectedAttClass.id,
+        classCode: selectedAttClass.code,
+        meetingNo: attMeetingNo,
+        durationMinutes: attDuration,
+        customCode: attCustomCode,
+      });
+
+      setClasses((prev) =>
+        prev.map((c) =>
+          c.id === selectedAttClass.id ? { ...c, activeAttendanceSession: session } : c
+        )
+      );
+      setAttCustomCode('');
+      setStatusBanner({
+        type: 'success',
+        text:
+          language === 'en'
+            ? `Attendance session for Meeting ${session.meetingNo} opened for ${selectedAttClass.code}! Session Code: ${session.sessionCode}`
+            : `Sesi presensi Pertemuan ${session.meetingNo} dibuka untuk ${selectedAttClass.code}! Kode Sesi: ${session.sessionCode}`,
+      });
+    } catch (err) {
+      setStatusBanner({
+        type: 'error',
+        text: err.message || (language === 'en' ? 'Failed to open attendance session.' : 'Gagal membuka sesi presensi di Firestore.'),
+      });
+    } finally {
+      setAttLoading(false);
+    }
+  };
+
+  const handleCloseAttendanceSession = async () => {
+    if (!selectedAttClass || attLoading) return;
+    setAttLoading(true);
+    setStatusBanner(null);
+
+    try {
+      await closeAttendanceSession(selectedAttClass.id);
+      setClasses((prev) =>
+        prev.map((c) =>
+          c.id === selectedAttClass.id ? { ...c, activeAttendanceSession: null } : c
+        )
+      );
+      setStatusBanner({
+        type: 'success',
+        text:
+          language === 'en'
+            ? `Attendance session for class ${selectedAttClass.code} has been closed.`
+            : `Sesi presensi untuk kelas ${selectedAttClass.code} telah ditutup.`,
+      });
+    } catch (err) {
+      setStatusBanner({
+        type: 'error',
+        text: err.message || (language === 'en' ? 'Failed to close attendance session.' : 'Gagal menutup sesi presensi.'),
+      });
+    } finally {
+      setAttLoading(false);
+    }
+  };
+
+  const handleGradeSubmit = async (e) => {
+    e.preventDefault();
+    if (!selectedSubmission || !gradeInput || grading) return;
+    setGrading(true);
+    setStatusBanner(null);
+
+    try {
+      if (currentUser) {
+        await gradeSubmissionInFirestore({
+          submissionId: selectedSubmission.id,
+          grade: gradeInput,
+          feedback: feedbackInput,
+        });
+      }
+
+      setSubmissionsQueue((prev) =>
+        prev.filter((sub) => sub.id !== selectedSubmission.id)
+      );
+      setStatusBanner({
+        type: 'success',
+        text:
+          language === 'en'
+            ? `Score ${gradeInput} for ${selectedSubmission.studentName} published to Firestore!`
+            : `Nilai ${gradeInput} untuk ${selectedSubmission.studentName} berhasil diterbitkan ke Firestore!`,
+      });
+      setSelectedSubmission(null);
+      setGradeInput('');
+      setFeedbackInput('');
+    } catch (err) {
+      setStatusBanner({
+        type: 'error',
+        text: err.message || (language === 'en' ? 'Failed to save grade to Firestore.' : 'Gagal menyimpan nilai ke Firestore.'),
+      });
+    } finally {
+      setGrading(false);
+    }
+  };
+
+  const totalEnrolled = classes.reduce((acc, c) => acc + Number(c.enrolledCount || 0), 0);
 
   return (
     <div className="space-y-6">
@@ -72,21 +216,22 @@ export default function TeacherDashboard({ onSelectClass, onNavigateView, onOpen
           <span className="inline-flex items-center gap-1.5 bg-indigo-500/20 border border-indigo-400/30 text-indigo-300 text-xs px-3 py-1 rounded-full mb-3">
             <Sparkles className="w-3.5 h-3.5" />
             {language === 'en'
-              ? `Educator Management Hub (${role === 'lecturer' ? 'Lecturer' : 'Teacher'})`
-              : `Panel Manajemen Pengajar (${role === 'lecturer' ? 'Dosen' : 'Guru'})`}
+              ? `Educator Management Hub (${role === ROLES.LECTURER ? 'Lecturer' : 'Educator'})`
+              : `Panel Manajemen Pengajar (${role === ROLES.LECTURER ? 'Dosen' : 'Pendidik'})`}
           </span>
           <h2 className="text-2xl font-bold tracking-tight">
             {language === 'en'
-              ? `Welcome, ${userProfile?.displayName || 'Educator'}! 🎓`
-              : `Selamat Datang, ${userProfile?.displayName || 'Bapak/Ibu Pendidik'}! 🎓`}
+              ? `Welcome, ${userProfile?.displayName || 'Educator'}!`
+              : `Selamat Datang, ${userProfile?.displayName || 'Bapak/Ibu Pendidik'}!`}
           </h2>
           <p className="text-slate-300 text-xs sm:text-sm mt-1 leading-relaxed">
             {language === 'en'
-              ? 'Manage lecture courses, create syllabus and Delta JSON reading modules, organize study groups, and utilize AI Teaching Assistant.'
-              : 'Kelola kelas perkuliahan, buat silabus dan materi teks Delta JSON, atur pembagian kelompok belajar, serta gunakan Teaching Assistant AI untuk draf bank soal.'}
+              ? 'Manage lecture courses, open timed attendance sessions (Meetings 1–16), evaluate student submissions in Firestore, and utilize AI Teaching Assistant.'
+              : 'Kelola kelas perkuliahan, buka sesi presensi dinamis pertemuan 1–16, nilai tugas mahasiswa di Cloud Firestore, serta gunakan Teaching Assistant AI.'}
           </p>
           <div className="flex flex-wrap gap-3 mt-4">
             <button
+              type="button"
               onClick={onOpenCreateClass}
               className="bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold px-4 py-2 rounded-xl shadow-md transition flex items-center gap-1.5"
             >
@@ -94,6 +239,7 @@ export default function TeacherDashboard({ onSelectClass, onNavigateView, onOpen
               {language === 'en' ? 'Create New Class' : 'Buat Kelas Baru'}
             </button>
             <button
+              type="button"
               onClick={() => onNavigateView('ai-assistant')}
               className="bg-white/10 hover:bg-white/20 text-white border border-white/20 text-xs font-semibold px-4 py-2 rounded-xl transition flex items-center gap-1.5"
             >
@@ -104,143 +250,349 @@ export default function TeacherDashboard({ onSelectClass, onNavigateView, onOpen
         </div>
       </div>
 
+      {statusBanner && (
+        <div
+          className={`p-3.5 rounded-xl text-xs flex items-center gap-2 border ${
+            statusBanner.type === 'success'
+              ? 'bg-emerald-50 dark:bg-emerald-950/50 border-emerald-200 dark:border-emerald-500/40 text-emerald-900 dark:text-emerald-200'
+              : 'bg-rose-50 dark:bg-rose-950/50 border-rose-200 dark:border-rose-500/40 text-rose-900 dark:text-rose-200'
+          }`}
+        >
+          {statusBanner.type === 'success' ? (
+            <CheckCircle className="w-4 h-4 text-emerald-600 dark:text-emerald-400 shrink-0" />
+          ) : (
+            <AlertCircle className="w-4 h-4 text-rose-600 dark:text-rose-400 shrink-0" />
+          )}
+          <span>{statusBanner.text}</span>
+        </div>
+      )}
+
       {/* Metrics Stat Cards */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-        <div className="bg-white p-5 rounded-2xl border border-slate-200 shadow-xs">
-          <div className="flex items-center justify-between text-slate-500 mb-2">
-            <span className="text-xs font-medium">Kelas Aktif</span>
-            <div className="p-2 bg-indigo-50 text-indigo-600 rounded-xl">
+        <div className="bg-white dark:bg-[#121822] p-5 rounded-2xl border border-slate-200 dark:border-[#232f42] shadow-xs">
+          <div className="flex items-center justify-between text-slate-500 dark:text-slate-400 mb-2">
+            <span className="text-xs font-medium">{language === 'en' ? 'Active Classes' : 'Kelas Aktif'}</span>
+            <div className="p-2 bg-indigo-50 dark:bg-indigo-950/60 text-indigo-600 dark:text-indigo-400 rounded-xl">
               <BookOpen className="w-4 h-4" />
             </div>
           </div>
-          <div className="text-2xl font-bold text-slate-900">2 Kelas</div>
-          <span className="text-[11px] text-slate-500 mt-1 inline-block">2 Sesi Berjalan</span>
+          <div className="text-2xl font-bold text-slate-900 dark:text-slate-100">
+            {classes.length} {language === 'en' ? 'Classes' : 'Kelas'}
+          </div>
+          <span className="text-[11px] text-slate-500 dark:text-slate-400 mt-1 inline-block">
+            {currentUser ? (language === 'en' ? 'Firestore Synced' : 'Tersinkron Firestore') : (language === 'en' ? 'Demo Mode' : 'Mode Demo')}
+          </span>
         </div>
 
-        <div className="bg-white p-5 rounded-2xl border border-slate-200 shadow-xs">
-          <div className="flex items-center justify-between text-slate-500 mb-2">
-            <span className="text-xs font-medium">Total Mahasiswa</span>
-            <div className="p-2 bg-blue-50 text-blue-600 rounded-xl">
+        <div className="bg-white dark:bg-[#121822] p-5 rounded-2xl border border-slate-200 dark:border-[#232f42] shadow-xs">
+          <div className="flex items-center justify-between text-slate-500 dark:text-slate-400 mb-2">
+            <span className="text-xs font-medium">{language === 'en' ? 'Total Students' : 'Total Mahasiswa'}</span>
+            <div className="p-2 bg-blue-50 dark:bg-blue-950/60 text-blue-600 dark:text-blue-400 rounded-xl">
               <Users className="w-4 h-4" />
             </div>
           </div>
-          <div className="text-2xl font-bold text-slate-900">80 Mahasiswa</div>
-          <span className="text-[11px] text-emerald-600 font-semibold mt-1 inline-block">● 100% Terverifikasi</span>
+          <div className="text-2xl font-bold text-slate-900 dark:text-slate-100">
+            {totalEnrolled} {language === 'en' ? 'Students' : 'Mahasiswa'}
+          </div>
+          <span className="text-[11px] text-emerald-600 dark:text-emerald-400 font-semibold mt-1 inline-block">
+            ● {language === 'en' ? 'Enrolled in Classes' : 'Terdaftar di Kelas'}
+          </span>
         </div>
 
-        <div className="bg-white p-5 rounded-2xl border border-slate-200 shadow-xs">
-          <div className="flex items-center justify-between text-slate-500 mb-2">
-            <span className="text-xs font-medium">Tugas Perlu Dinilai</span>
-            <div className="p-2 bg-amber-50 text-amber-600 rounded-xl">
+        <div className="bg-white dark:bg-[#121822] p-5 rounded-2xl border border-slate-200 dark:border-[#232f42] shadow-xs">
+          <div className="flex items-center justify-between text-slate-500 dark:text-slate-400 mb-2">
+            <span className="text-xs font-medium">{language === 'en' ? 'Needs Grading' : 'Tugas Perlu Dinilai'}</span>
+            <div className="p-2 bg-amber-50 dark:bg-amber-950/60 text-amber-600 dark:text-amber-400 rounded-xl">
               <FileCheck className="w-4 h-4" />
             </div>
           </div>
-          <div className="text-2xl font-bold text-amber-600">{submissionsQueue.length} Pengumpulan</div>
-          <span className="text-[11px] text-slate-500 mt-1 inline-block">Menunggu Ulasan Rubrik</span>
+          <div className="text-2xl font-bold text-amber-600 dark:text-amber-400">
+            {submissionsQueue.length} {language === 'en' ? 'Submissions' : 'Pengumpulan'}
+          </div>
+          <span className="text-[11px] text-slate-500 dark:text-slate-400 mt-1 inline-block">
+            {language === 'en' ? 'Awaiting Rubric Review' : 'Menunggu Ulasan Rubrik'}
+          </span>
         </div>
 
-        <div className="bg-white p-5 rounded-2xl border border-slate-200 shadow-xs">
-          <div className="flex items-center justify-between text-slate-500 mb-2">
-            <span className="text-xs font-medium">Rata-rata Kelas</span>
-            <div className="p-2 bg-emerald-50 text-emerald-600 rounded-xl">
+        <div className="bg-white dark:bg-[#121822] p-5 rounded-2xl border border-slate-200 dark:border-[#232f42] shadow-xs">
+          <div className="flex items-center justify-between text-slate-500 dark:text-slate-400 mb-2">
+            <span className="text-xs font-medium">{language === 'en' ? 'Attendance Sessions' : 'Sesi Presensi'}</span>
+            <div className="p-2 bg-emerald-50 dark:bg-emerald-950/60 text-emerald-600 dark:text-emerald-400 rounded-xl">
               <Award className="w-4 h-4" />
             </div>
           </div>
-          <div className="text-2xl font-bold text-emerald-700">86.4 / 100</div>
-          <span className="text-[11px] text-emerald-600 font-semibold mt-1 inline-block">Performa Sangat Baik</span>
+          <div className="text-2xl font-bold text-emerald-700 dark:text-emerald-400">
+            {classes.filter((c) => c.activeAttendanceSession?.isOpen).length} {language === 'en' ? 'Open' : 'Terbuka'}
+          </div>
+          <span className="text-[11px] text-emerald-600 dark:text-emerald-400 font-semibold mt-1 inline-block">
+            {language === 'en' ? '2-Way Validation' : 'Validasi 2 Arah'}
+          </span>
         </div>
+      </div>
+
+      {/* KONTROL SESI PRESENSI DINAMIS 2 ARAH (PERTEMUAN 1–16) */}
+      <div className="bg-white dark:bg-[#121822] p-6 rounded-2xl border border-slate-200 dark:border-[#232f42] shadow-xs space-y-4">
+        <div className="flex items-center justify-between gap-2">
+          <div>
+            <h3 className="text-base font-bold text-slate-900 dark:text-slate-100 flex items-center gap-2">
+              <QrCode className="w-4 h-4 text-indigo-600 dark:text-indigo-400" />
+              {t('teacher_open_attendance')}
+            </h3>
+            <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
+              {language === 'en'
+                ? 'Open a timed attendance session on the Firestore class document so students can self-verify.'
+                : 'Buka sesi presensi berbatas waktu pada dokumen kelas Firestore agar mahasiswa dapat melakukan presensi mandiri.'}
+            </p>
+          </div>
+        </div>
+
+        {classes.length === 0 ? (
+          <div className="p-4 bg-slate-50 dark:bg-[#0e1522] rounded-xl border border-dashed border-slate-300 dark:border-slate-700 text-xs text-slate-500 dark:text-slate-400 text-center">
+            {language === 'en'
+              ? 'No classes available yet. Run seed-firestore.mjs or create a class first.'
+              : 'Belum ada kelas tersedia. Jalankan seed-firestore.mjs atau buat kelas terlebih dahulu.'}
+          </div>
+        ) : (
+          <form onSubmit={handleOpenAttendanceSession} className="space-y-4">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-slate-900 dark:text-slate-100">
+              <div>
+                <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1">
+                  {language === 'en' ? 'Select Class' : 'Pilih Kelas'}
+                </label>
+                <select
+                  value={attClassId}
+                  onChange={(e) => setAttClassId(e.target.value)}
+                  className="w-full px-3 py-2 text-xs border border-slate-300 dark:border-slate-700 rounded-lg bg-white dark:bg-[#0b0f17] text-slate-900 dark:text-slate-100 focus:outline-none focus:border-indigo-500"
+                >
+                  {classes.map((cls) => (
+                    <option key={cls.id} value={cls.id}>
+                      {cls.code} — {cls.name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div className="grid grid-cols-2 gap-2">
+                <div>
+                  <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1">
+                    {language === 'en' ? 'Meeting (1–16)' : 'Pertemuan (1–16)'}
+                  </label>
+                  <select
+                    value={attMeetingNo}
+                    onChange={(e) => setAttMeetingNo(Number(e.target.value))}
+                    className="w-full px-3 py-2 text-xs border border-slate-300 dark:border-slate-700 rounded-lg bg-white dark:bg-[#0b0f17] text-slate-900 dark:text-slate-100 focus:outline-none focus:border-indigo-500"
+                  >
+                    {Array.from({ length: 16 }, (_, idx) => idx + 1).map((num) => (
+                      <option key={num} value={num}>
+                        {language === 'en' ? 'Meeting' : 'Pertemuan'} {num < 10 ? `0${num}` : num}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <div>
+                  <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1">
+                    {language === 'en' ? 'Duration' : 'Durasi'}
+                  </label>
+                  <select
+                    value={attDuration}
+                    onChange={(e) => setAttDuration(Number(e.target.value))}
+                    className="w-full px-3 py-2 text-xs border border-slate-300 dark:border-slate-700 rounded-lg bg-white dark:bg-[#0b0f17] text-slate-900 dark:text-slate-100 focus:outline-none focus:border-indigo-500"
+                  >
+                    <option value={5}>{language === 'en' ? '5 Minutes' : '5 Menit'}</option>
+                    <option value={15}>{language === 'en' ? '15 Minutes' : '15 Menit'}</option>
+                    <option value={30}>{language === 'en' ? '30 Minutes' : '30 Menit'}</option>
+                    <option value={60}>{language === 'en' ? '60 Minutes' : '60 Menit'}</option>
+                  </select>
+                </div>
+              </div>
+            </div>
+
+            <div className="flex flex-col sm:flex-row gap-3 items-stretch sm:items-end">
+              <div className="flex-1">
+                <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1">
+                  {language === 'en'
+                    ? 'Optional Session Code (leave blank to auto-generate)'
+                    : 'Kode Sesi Opsional (kosongkan untuk acak otomatis)'}
+                </label>
+                <input
+                  type="text"
+                  maxLength={24}
+                  placeholder={`Contoh: ${selectedAttClass?.code || 'PBO101'}-M0${attMeetingNo}-8821`}
+                  value={attCustomCode}
+                  onChange={(e) => setAttCustomCode(e.target.value.toUpperCase())}
+                  className="w-full px-3 py-2 text-xs font-mono border border-slate-300 dark:border-slate-700 bg-white dark:bg-[#0b0f17] rounded-lg text-slate-900 dark:text-slate-100 focus:outline-none focus:border-indigo-500"
+                />
+              </div>
+              <button
+                type="submit"
+                disabled={attLoading || !selectedAttClass}
+                className="bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold px-4 py-2.5 rounded-lg transition disabled:opacity-50 shrink-0"
+              >
+                {attLoading
+                  ? language === 'en' ? 'Saving Session...' : 'Menyimpan Sesi...'
+                  : language === 'en' ? 'Open Attendance Session' : 'Buka Sesi Presensi'}
+              </button>
+            </div>
+
+            {isSessionActive && activeAttSession && (
+              <div className="p-4 rounded-xl bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-200 dark:border-emerald-500/40 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                <div className="space-y-1">
+                  <div className="flex items-center gap-2 text-xs font-bold text-emerald-900 dark:text-emerald-200">
+                    <Clock className="w-4 h-4 text-emerald-600 dark:text-emerald-400" />
+                    <span>
+                      {language === 'en' ? 'Active Session: Meeting' : 'Sesi Aktif: Pertemuan'}{' '}
+                      {activeAttSession.meetingNo < 10 ? `0${activeAttSession.meetingNo}` : activeAttSession.meetingNo}
+                    </span>
+                  </div>
+                  <div className="text-xs text-emerald-800 dark:text-emerald-300">
+                    {language === 'en' ? 'Session Code:' : 'Kode Sesi:'}{' '}
+                    <code className="font-mono font-black bg-white dark:bg-[#0b0f17] px-2 py-0.5 rounded border border-emerald-300 dark:border-emerald-500/40 text-emerald-900 dark:text-emerald-300">
+                      {activeAttSession.sessionCode}
+                    </code>
+                    {activeAttSession.expiresAt && (
+                      <span className="ml-2 text-[11px] text-emerald-700 dark:text-emerald-400">
+                        ({language === 'en' ? 'Valid until' : 'Berlaku hingga'}{' '}
+                        {new Date(activeAttSession.expiresAt).toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' })} WIB)
+                      </span>
+                    )}
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={handleCloseAttendanceSession}
+                  disabled={attLoading}
+                  className="inline-flex items-center gap-1.5 text-xs font-semibold text-rose-700 dark:text-rose-300 bg-white dark:bg-[#18212e] hover:bg-rose-50 dark:hover:bg-rose-950/60 border border-rose-200 dark:border-rose-500/40 px-3 py-1.5 rounded-lg transition self-start sm:self-center"
+                >
+                  <XCircle className="w-3.5 h-3.5" />
+                  {language === 'en' ? 'Close Session' : 'Tutup Sesi'}
+                </button>
+              </div>
+            )}
+          </form>
+        )}
       </div>
 
       {/* Classes Managed List */}
-      <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-xs">
+      <div className="bg-white dark:bg-[#121822] p-6 rounded-2xl border border-slate-200 dark:border-[#232f42] shadow-xs">
         <div className="flex items-center justify-between mb-4">
           <div>
-            <h3 className="text-base font-bold text-slate-900">Kelas yang Anda Kelola</h3>
-            <p className="text-xs text-slate-500">Klik kelas untuk mengelola silabus pertemuan, soal, dan kelompok tugas.</p>
+            <h3 className="text-base font-bold text-slate-900 dark:text-slate-100">{t('teacher_managed_classes')}</h3>
+            <p className="text-xs text-slate-500 dark:text-slate-400">
+              {language === 'en'
+                ? 'Click a class to manage meeting syllabi, quizzes, and task submissions.'
+                : 'Klik kelas untuk mengelola silabus pertemuan, soal, dan pengumpulan tugas.'}
+            </p>
           </div>
           <button
+            type="button"
             onClick={onOpenCreateClass}
-            className="text-xs font-semibold text-indigo-600 hover:text-indigo-700 flex items-center gap-1"
+            className="text-xs font-semibold text-indigo-600 dark:text-indigo-400 hover:text-indigo-700 dark:hover:text-indigo-300 flex items-center gap-1"
           >
-            + Buat Kelas
+            + {language === 'en' ? 'Create Class' : 'Buat Kelas'}
           </button>
         </div>
 
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-          {DEMO_CLASSES.slice(0, 2).map((cls) => (
-            <div
-              key={cls.id}
-              onClick={() => onSelectClass(cls)}
-              className="p-4 border border-slate-200 rounded-xl hover:border-indigo-400 hover:shadow-md transition cursor-pointer flex flex-col justify-between"
-            >
-              <div>
-                <div className="flex justify-between items-start">
-                  <span className="text-[10px] font-bold text-indigo-600 uppercase tracking-wider">{cls.category}</span>
-                  <span className="bg-indigo-50 border border-indigo-200 text-indigo-700 text-xs font-mono font-bold px-2 py-0.5 rounded-md">
-                    Kode: {cls.code}
+        {loadingData ? (
+          <div className="py-8 text-center text-xs text-slate-500 dark:text-slate-400 font-mono">
+            {language === 'en' ? 'Loading classes from Cloud Firestore...' : 'Memuat kelas dari Cloud Firestore...'}
+          </div>
+        ) : classes.length === 0 ? (
+          <div className="py-8 text-center bg-slate-50 dark:bg-[#0e1522] rounded-xl border border-dashed border-slate-200 dark:border-slate-700 text-xs text-slate-500 dark:text-slate-400">
+            {language === 'en'
+              ? 'The classes collection is empty. Click + Create Class or run the seed script.'
+              : 'Koleksi classes masih kosong. Klik + Buat Kelas atau jalankan skrip seed.'}
+          </div>
+        ) : (
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            {classes.slice(0, 4).map((cls) => (
+              <div
+                key={cls.id}
+                onClick={() => onSelectClass(cls)}
+                className="p-4 border border-slate-200 dark:border-[#232f42] bg-white dark:bg-[#161d2a] rounded-xl hover:border-indigo-400 dark:hover:border-indigo-500/60 hover:shadow-md transition cursor-pointer flex flex-col justify-between"
+              >
+                <div>
+                  <div className="flex justify-between items-start gap-2">
+                    <span className="text-[10px] font-bold text-indigo-600 dark:text-indigo-400 uppercase tracking-wider">{cls.category}</span>
+                    <span className="bg-indigo-50 dark:bg-indigo-950/60 border border-indigo-200 dark:border-indigo-500/40 text-indigo-700 dark:text-indigo-300 text-xs font-mono font-bold px-2 py-0.5 rounded-md">
+                      {language === 'en' ? 'Code' : 'Kode'}: {cls.code}
+                    </span>
+                  </div>
+                  <h4 className="text-sm font-bold text-slate-900 dark:text-slate-100 mt-2">{cls.name}</h4>
+                  <p className="text-xs text-slate-500 dark:text-slate-400 mt-1 line-clamp-2">{cls.description}</p>
+                </div>
+
+                <div className="mt-4 pt-3 border-t border-slate-100 dark:border-[#232f42] flex items-center justify-between text-xs text-slate-600 dark:text-slate-400">
+                  <span className="flex items-center gap-1.5">
+                    <Users className="w-3.5 h-3.5 text-slate-400" />
+                    {cls.enrolledCount} {language === 'en' ? 'Students' : 'Mahasiswa'}
+                  </span>
+                  <span className="flex items-center gap-1.5">
+                    <BookOpen className="w-3.5 h-3.5 text-slate-400" />
+                    {cls.meetingsCount} {language === 'en' ? 'Meetings' : 'Pertemuan'}
+                  </span>
+                  <span className="text-indigo-600 dark:text-indigo-400 font-semibold hover:underline">
+                    {language === 'en' ? 'Manage' : 'Kelola'} &rarr;
                   </span>
                 </div>
-                <h4 className="text-sm font-bold text-slate-900 mt-2">{cls.name}</h4>
-                <p className="text-xs text-slate-500 mt-1 line-clamp-2">{cls.description}</p>
               </div>
-
-              <div className="mt-4 pt-3 border-t border-slate-100 flex items-center justify-between text-xs text-slate-600">
-                <span className="flex items-center gap-1.5">
-                  <Users className="w-3.5 h-3.5 text-slate-400" />
-                  {cls.enrolledCount} Mahasiswa
-                </span>
-                <span className="flex items-center gap-1.5">
-                  <BookOpen className="w-3.5 h-3.5 text-slate-400" />
-                  {cls.meetingsCount} Pertemuan
-                </span>
-                <span className="text-indigo-600 font-semibold hover:underline">Kelola &rarr;</span>
-              </div>
-            </div>
-          ))}
-        </div>
+            ))}
+          </div>
+        )}
       </div>
 
       {/* Antrian Penilaian Tugas Mahasiswa */}
-      <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-xs">
+      <div className="bg-white dark:bg-[#121822] p-6 rounded-2xl border border-slate-200 dark:border-[#232f42] shadow-xs">
         <div className="flex items-center justify-between mb-4">
           <div>
-            <h3 className="text-base font-bold text-slate-900">Antrian Penilaian Tugas Kelompok</h3>
-            <p className="text-xs text-slate-500">Evaluasi pengumpulan tugas mahasiswa dengan rubrik nilai numerik dan catatan feedback.</p>
+            <h3 className="text-base font-bold text-slate-900 dark:text-slate-100">{t('teacher_grading_queue')}</h3>
+            <p className="text-xs text-slate-500 dark:text-slate-400">
+              {language === 'en'
+                ? 'Evaluate assignment submissions from Firestore submissions collection.'
+                : 'Evaluasi pengumpulan tugas dari koleksi Firestore submissions.'}
+            </p>
           </div>
         </div>
 
         {submissionsQueue.length === 0 ? (
-          <div className="text-center py-10 bg-slate-50 rounded-xl border border-dashed border-slate-200">
+          <div className="text-center py-10 bg-slate-50 dark:bg-[#0e1522] rounded-xl border border-dashed border-slate-200 dark:border-slate-700">
             <CheckCircle className="w-8 h-8 text-emerald-500 mx-auto mb-2" />
-            <p className="text-sm font-bold text-slate-700">Semua Tugas Telah Dinilai!</p>
-            <p className="text-xs text-slate-500 mt-0.5">Tidak ada penugasan yang menunggu ulasan saat ini.</p>
+            <p className="text-sm font-bold text-slate-700 dark:text-slate-200">
+              {language === 'en' ? 'All Submissions Graded!' : 'Semua Tugas Telah Dinilai!'}
+            </p>
+            <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
+              {language === 'en'
+                ? 'No pending assignment submissions awaiting review.'
+                : 'Tidak ada pengumpulan tugas yang menunggu ulasan saat ini.'}
+            </p>
           </div>
         ) : (
           <div className="overflow-x-auto">
             <table className="w-full text-left text-xs">
-              <thead className="bg-slate-50 text-slate-600 uppercase text-[10px] tracking-wider border-b border-slate-200">
+              <thead className="bg-slate-50 dark:bg-[#161d2a] text-slate-600 dark:text-slate-400 uppercase text-[10px] tracking-wider border-b border-slate-200 dark:border-[#232f42]">
                 <tr>
-                  <th className="py-3 px-4">Pengirim / Kelompok</th>
-                  <th className="py-3 px-4">Judul Penugasan</th>
-                  <th className="py-3 px-4">Waktu Submit</th>
-                  <th className="py-3 px-4 text-right">Aksi</th>
+                  <th className="py-3 px-4">{language === 'en' ? 'Student' : 'Pengirim / Mahasiswa'}</th>
+                  <th className="py-3 px-4">{language === 'en' ? 'Assignment' : 'Judul Penugasan'}</th>
+                  <th className="py-3 px-4">{language === 'en' ? 'Submitted At' : 'Waktu Submit'}</th>
+                  <th className="py-3 px-4 text-right">{language === 'en' ? 'Action' : 'Aksi'}</th>
                 </tr>
               </thead>
-              <tbody className="divide-y divide-slate-100">
+              <tbody className="divide-y divide-slate-100 dark:divide-[#232f42]">
                 {submissionsQueue.map((sub) => (
-                  <tr key={sub.id} className="hover:bg-slate-50 transition">
-                    <td className="py-3 px-4 font-semibold text-slate-900">{sub.studentName}</td>
-                    <td className="py-3 px-4 text-slate-700">
+                  <tr key={sub.id} className="hover:bg-slate-50 dark:hover:bg-[#161d2a] transition">
+                    <td className="py-3 px-4 font-semibold text-slate-900 dark:text-slate-100">{sub.studentName}</td>
+                    <td className="py-3 px-4 text-slate-700 dark:text-slate-300">
                       <div>{sub.assignment}</div>
-                      <span className="text-[10px] text-indigo-600">{sub.class}</span>
+                      <span className="text-[10px] text-indigo-600 dark:text-indigo-400">{sub.class}</span>
                     </td>
-                    <td className="py-3 px-4 text-slate-500">{sub.submittedAt}</td>
+                    <td className="py-3 px-4 text-slate-500 dark:text-slate-400">{sub.submittedAt}</td>
                     <td className="py-3 px-4 text-right">
                       <button
+                        type="button"
                         onClick={() => setSelectedSubmission(sub)}
                         className="bg-indigo-600 hover:bg-indigo-500 text-white text-xs px-3 py-1.5 rounded-lg font-semibold transition"
                       >
-                        Beri Nilai
+                        {language === 'en' ? 'Grade' : 'Beri Nilai'}
                       </button>
                     </td>
                   </tr>
@@ -253,35 +605,80 @@ export default function TeacherDashboard({ onSelectClass, onNavigateView, onOpen
 
       {/* Modal Beri Nilai */}
       {selectedSubmission && (
-        <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4 z-50">
-          <div className="bg-white w-full max-w-lg rounded-2xl shadow-2xl border border-slate-200 overflow-hidden">
-            <div className="bg-indigo-900 text-white p-5">
-              <h3 className="text-base font-bold">Evaluasi Nilai Tugas</h3>
-              <p className="text-xs text-indigo-200 mt-0.5">{selectedSubmission.studentName} — {selectedSubmission.assignment}</p>
+        <div className="fixed inset-0 bg-slate-900/60 dark:bg-black/80 backdrop-blur-xs flex items-center justify-center p-4 z-50">
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="grading-modal-title"
+            className="bg-white dark:bg-[#121822] w-full max-w-lg rounded-2xl shadow-2xl border border-slate-200 dark:border-[#232f42] overflow-hidden text-slate-900 dark:text-slate-100"
+          >
+            <div className="bg-indigo-900 dark:bg-[#161d2a] text-white p-5 flex items-start justify-between border-b border-indigo-800 dark:border-[#232f42]">
+              <div>
+                <h3 id="grading-modal-title" className="text-base font-bold">
+                  {language === 'en' ? 'Evaluate Assignment Score' : 'Evaluasi Nilai Tugas'}
+                </h3>
+                <p className="text-xs text-indigo-200 dark:text-slate-400 mt-0.5">
+                  {selectedSubmission.studentName} — {selectedSubmission.assignment}
+                </p>
+              </div>
+              <button
+                type="button"
+                aria-label={t('dialog_cancel')}
+                onClick={() => setSelectedSubmission(null)}
+                className="text-indigo-200 hover:text-white p-1"
+              >
+                <X className="w-4 h-4" />
+              </button>
             </div>
             <form onSubmit={handleGradeSubmit} className="p-6 space-y-4">
+              {selectedSubmission.fileUrl && (
+                <div className="p-3 bg-slate-50 dark:bg-[#0e1522] rounded-lg border border-slate-200 dark:border-[#232f42] text-xs">
+                  <span className="font-semibold text-slate-700 dark:text-slate-300 block mb-1">
+                    {language === 'en' ? 'Submitted File / Link:' : 'Berkas / Tautan Pengumpulan:'}
+                  </span>
+                  {isValidExternalUrl(selectedSubmission.fileUrl) ? (
+                    <a
+                      href={selectedSubmission.fileUrl}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="text-indigo-600 dark:text-indigo-400 hover:underline break-all font-mono"
+                    >
+                      {selectedSubmission.fileName || selectedSubmission.fileUrl}
+                    </a>
+                  ) : (
+                    <span className="text-rose-600 dark:text-rose-400 font-mono">
+                      {language === 'en' ? 'Invalid / unsafe URL blocked' : 'Tautan tidak valid / diblokir'}
+                    </span>
+                  )}
+                </div>
+              )}
+
               <div>
-                <label className="block text-xs font-semibold text-slate-700 mb-1">Nilai Numerik (0 - 100)</label>
+                <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1">
+                  {language === 'en' ? 'Numeric Score (0 - 100)' : 'Nilai Numerik (0 - 100)'}
+                </label>
                 <input
                   type="number"
                   min="0"
                   max="100"
                   required
-                  placeholder="Contoh: 88"
+                  placeholder={language === 'en' ? 'Example: 88' : 'Contoh: 88'}
                   value={gradeInput}
                   onChange={(e) => setGradeInput(e.target.value)}
-                  className="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg focus:outline-none focus:border-indigo-500"
+                  className="w-full px-3 py-2 text-sm border border-slate-300 dark:border-slate-700 bg-white dark:bg-[#0b0f17] rounded-lg focus:outline-none focus:border-indigo-500 text-slate-900 dark:text-slate-100"
                 />
               </div>
 
               <div>
-                <label className="block text-xs font-semibold text-slate-700 mb-1">Catatan Umpan Balik Pendidik</label>
+                <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1">
+                  {language === 'en' ? 'Educator Feedback Notes' : 'Catatan Umpan Balik Pendidik'}
+                </label>
                 <textarea
                   rows="3"
-                  placeholder="Ketik catatan evaluasi atau revisi untuk kelompok..."
+                  placeholder={language === 'en' ? 'Write evaluation notes or revision feedback...' : 'Ketik catatan evaluasi atau revisi untuk mahasiswa...'}
                   value={feedbackInput}
                   onChange={(e) => setFeedbackInput(e.target.value)}
-                  className="w-full px-3 py-2 text-xs border border-slate-300 rounded-lg focus:outline-none focus:border-indigo-500"
+                  className="w-full px-3 py-2 text-xs border border-slate-300 dark:border-slate-700 bg-white dark:bg-[#0b0f17] rounded-lg focus:outline-none focus:border-indigo-500 text-slate-900 dark:text-slate-100"
                 ></textarea>
               </div>
 
@@ -289,16 +686,19 @@ export default function TeacherDashboard({ onSelectClass, onNavigateView, onOpen
                 <button
                   type="button"
                   onClick={() => setSelectedSubmission(null)}
-                  className="px-4 py-2 text-xs font-semibold text-slate-600 hover:bg-slate-100 rounded-lg transition"
+                  className="px-4 py-2 text-xs font-semibold text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 rounded-lg transition"
                 >
-                  Batal
+                  {t('dialog_cancel')}
                 </button>
                 <button
                   type="submit"
-                  className="bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold px-4 py-2 rounded-lg transition flex items-center gap-1.5"
+                  disabled={grading}
+                  className="bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold px-4 py-2 rounded-lg transition flex items-center gap-1.5 disabled:opacity-50"
                 >
                   <Send className="w-3.5 h-3.5" />
-                  Simpan & Terbitkan Nilai
+                  {grading
+                    ? language === 'en' ? 'Saving...' : 'Menyimpan...'
+                    : language === 'en' ? 'Save & Publish Score' : 'Simpan & Terbitkan Nilai'}
                 </button>
               </div>
             </form>
