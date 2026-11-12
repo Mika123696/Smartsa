@@ -1,28 +1,27 @@
 import { useState } from 'react';
 import { useAuth } from '../../context/useAuth';
 import { useLanguage } from '../../context/LanguageContext';
+import { useTheme } from '../../context/ThemeContext';
 import { ROLES } from '../../constants/roles';
 import {
   Bell,
   CheckCircle2,
   AlertCircle,
-  Shield,
-  ChevronDown,
-  LogIn,
   GraduationCap,
   ShieldCheck,
-  User,
-  Lock,
+  Sun,
+  Moon,
 } from 'lucide-react';
 
-export default function MobileHeader({ onOpenAuth }) {
+export default function MobileHeader() {
   const { role, userProfile } = useAuth();
   const { t } = useLanguage();
+  const { isLight, toggleTheme } = useTheme();
   const [notifOpen, setNotifOpen] = useState(false);
 
   return (
     <header className="relative z-40 bg-[#161c24] text-white border-b border-[#232b38]">
-      {/* Background industrial silhouette with dark vignette (clipped separately so dropdowns don't get cut off) */}
+      {/* Background industrial silhouette with dark vignette */}
       <div className="absolute inset-0 overflow-hidden pointer-events-none">
         <div
           className="absolute inset-0 opacity-20 bg-cover bg-center mix-blend-luminosity"
@@ -44,14 +43,8 @@ export default function MobileHeader({ onOpenAuth }) {
           {/* Stylized Endfield Geometric Double-Chevron Glyph */}
           <div className="w-7 h-8 pt-0.5 shrink-0">
             <svg viewBox="0 0 32 36" fill="none" className="w-full h-full drop-shadow-[0_0_6px_rgba(245,158,11,0.4)]">
-              <path
-                d="M4 4L22 4L14 16L4 16Z"
-                fill="#f59e0b"
-              />
-              <path
-                d="M10 18L28 18L18 32L8 32Z"
-                fill="#fbbf24"
-              />
+              <path d="M4 4L22 4L14 16L4 16Z" fill="#f59e0b" />
+              <path d="M10 18L28 18L18 32L8 32Z" fill="#fbbf24" />
             </svg>
           </div>
 
@@ -71,9 +64,24 @@ export default function MobileHeader({ onOpenAuth }) {
           </div>
         </div>
 
-        {/* Right Actions: Authenticated Role Badge & Hexagonal Notification Bell */}
+        {/* Right Actions: Theme Switch, Role Badge & Notification Bell */}
         <div className="flex items-center gap-2">
-          {/* Static Authenticated Role Badge (Tidak Ada Switch Akun) */}
+          {/* Quick Theme Toggle (Light / Dark Mode) */}
+          <button
+            type="button"
+            onClick={toggleTheme}
+            className="w-8 h-8 rounded-lg bg-[#1c232f] hover:bg-[#242c3a] border border-slate-700/70 flex items-center justify-center transition cursor-pointer"
+            title={isLight ? 'Beralih ke Mode Gelap' : 'Beralih ke Mode Terang'}
+            aria-label={isLight ? 'Beralih ke Mode Gelap' : 'Beralih ke Mode Terang'}
+          >
+            {isLight ? (
+              <Moon className="w-4 h-4 text-slate-700" />
+            ) : (
+              <Sun className="w-4 h-4 text-[#f59e0b]" />
+            )}
+          </button>
+
+          {/* Static Authenticated Role Badge */}
           <div
             className={`flex items-center gap-1.5 text-xs font-mono font-bold px-2.5 py-1.5 rounded-sm border shadow-xs select-none ${
               role === ROLES.LECTURER
@@ -95,11 +103,9 @@ export default function MobileHeader({ onOpenAuth }) {
           {/* Hexagonal / Faceted Notification Bell Button */}
           <div className="relative">
             <button
-              onClick={() => {
-                setNotifOpen(!notifOpen);
-                setRoleDropdownOpen(false);
-              }}
-              className="w-9 h-9 bg-[#1c232f] hover:bg-[#242c3a] border border-slate-700/70 rounded-xl flex items-center justify-center text-slate-200 transition shadow-inner relative group"
+              type="button"
+              onClick={() => setNotifOpen(!notifOpen)}
+              className="w-9 h-9 bg-[#1c232f] hover:bg-[#242c3a] border border-slate-700/70 rounded-xl flex items-center justify-center text-slate-200 transition shadow-inner relative group cursor-pointer"
               style={{
                 clipPath: 'polygon(20% 0%, 80% 0%, 100% 20%, 100% 80%, 80% 100%, 20% 100%, 0% 80%, 0% 20%)',
               }}
@@ -114,7 +120,12 @@ export default function MobileHeader({ onOpenAuth }) {
               <div className="absolute right-0 mt-2 w-72 bg-[#18202c] rounded-md shadow-2xl border border-slate-700 py-2.5 z-50 text-slate-200 font-mono text-xs">
                 <div className="px-3 pb-2 border-b border-slate-800 flex items-center justify-between">
                   <span className="font-bold text-[#f59e0b] uppercase text-[10px] tracking-wider">{t('notif_title')}</span>
-                  <span className="text-[9px] text-slate-400 hover:text-white cursor-pointer">{t('notif_clear')}</span>
+                  <span
+                    onClick={() => setNotifOpen(false)}
+                    className="text-[9px] text-slate-400 hover:text-white cursor-pointer"
+                  >
+                    {t('notif_clear')}
+                  </span>
                 </div>
                 <div className="divide-y divide-slate-800/80 max-h-56 overflow-y-auto">
                   <div className="p-2.5 hover:bg-slate-800/50 transition flex items-start gap-2">

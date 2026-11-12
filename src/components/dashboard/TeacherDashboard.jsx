@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { useAuth } from '../../context/useAuth';
 import { useLanguage } from '../../context/LanguageContext';
-import { DEMO_CLASSES } from '../../services/mockData';
+import { DEMO_CLASSES, DEMO_SUBJECTS, DEMO_COURSE_STUDENTS } from '../../services/mockData';
 import {
   BookOpen,
   Users,
@@ -11,45 +11,75 @@ import {
   CheckCircle,
   FileCheck,
   Send,
+  Bell,
+  ChevronRight,
+  Clock,
+  GraduationCap,
 } from 'lucide-react';
 
 export default function TeacherDashboard({ onSelectClass, onNavigateView, onOpenCreateClass }) {
   const { userProfile, role } = useAuth();
-  const { t, language } = useLanguage();
+  const { language } = useLanguage();
   const [selectedSubmission, setSelectedSubmission] = useState(null);
   const [gradeInput, setGradeInput] = useState('');
   const [feedbackInput, setFeedbackInput] = useState('');
 
-  // Daftar tugas yang menunggu dinilai oleh dosen/guru
+  // Notifikasi ringkas perkuliahan untuk Dosen
+  const [notifications, setNotifications] = useState([
+    {
+      id: 'notif_dsn_1',
+      title: '3 Pengumpulan Tugas Baru Menunggu Penilaian',
+      detail: 'Mata Kuliah Pemrograman Berorientasi Objek & Basis Data.',
+      time: '10 menit lalu',
+      unread: true,
+    },
+    {
+      id: 'notif_dsn_2',
+      title: 'Sesi Perkuliahan Hari Ini: PBO101 (08.00–10.30)',
+      detail: 'Klik kartu mata kuliah di bawah untuk membuka QR Presensi & Materi.',
+      time: '1 jam lalu',
+      unread: true,
+    },
+    {
+      id: 'notif_dsn_3',
+      title: 'Sinkronisasi 20 Mahasiswa Kelas TI-2025A/B Selesai',
+      detail: 'Daftar hadir dan buku nilai siap dikelola per mata kuliah.',
+      time: 'Kemarin',
+      unread: false,
+    },
+  ]);
+
+  // Daftar tugas yang menunggu dinilai oleh dosen
   const [submissionsQueue, setSubmissionsQueue] = useState([
     {
       id: 'sub_01',
-      studentName: 'Ahmad Faiz (Kelompok 01)',
+      studentName: 'Ahmad Fauzi (Kelompok 01)',
       assignment: 'Laporan Desain Pola & Clean Architecture',
-      class: 'Rekayasa Perangkat Lunak Lanjut',
+      class: 'Pemrograman Berorientasi Objek',
       submittedAt: 'Hari ini, 07:15 WIB',
-      fileUrl: 'https://cloudinary.com/sample_report.pdf',
       status: 'pending',
     },
     {
       id: 'sub_02',
       studentName: 'Dewi Lestari (Kelompok 02)',
       assignment: 'Laporan Desain Pola & Clean Architecture',
-      class: 'Rekayasa Perangkat Lunak Lanjut',
+      class: 'Pemrograman Berorientasi Objek',
       submittedAt: 'Kemarin, 21:30 WIB',
-      fileUrl: 'https://cloudinary.com/sample_report2.pdf',
       status: 'pending',
     },
     {
       id: 'sub_03',
       studentName: 'Rian Pratama (Kelompok 04)',
       assignment: 'Analisis Indexing Firestore NoSQL',
-      class: 'Pengembangan Basis Data Skala Besar',
+      class: 'Basis Data',
       submittedAt: '20 Okt 2026, 18:00 WIB',
-      fileUrl: 'https://cloudinary.com/sample_report3.pdf',
       status: 'pending',
     },
   ]);
+
+  const handleMarkAllRead = () => {
+    setNotifications((prev) => prev.map((n) => ({ ...n, unread: false })));
+  };
 
   const handleGradeSubmit = (e) => {
     e.preventDefault();
@@ -64,204 +94,292 @@ export default function TeacherDashboard({ onSelectClass, onNavigateView, onOpen
     alert(`Nilai ${gradeInput} berhasil diterbitkan dan dicatat ke Gradebook!`);
   };
 
+  // Hitung jumlah materi tersimpan di localStorage per matkul untuk ringkasan cepat
+  const getSavedMaterialCount = (matkulId) => {
+    try {
+      const raw = localStorage.getItem(`smartsa_course_materials_${matkulId}`);
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed)) return parsed.length;
+      }
+    } catch {
+      // ignore
+    }
+    return 2;
+  };
+
+  const unreadCount = notifications.filter((n) => n.unread).length;
+
   return (
-    <div className="space-y-6">
-      {/* Welcome Banner */}
-      <div className="bg-gradient-to-r from-slate-900 via-indigo-950 to-slate-900 text-white rounded-2xl p-6 shadow-xl relative overflow-hidden">
-        <div className="relative z-10 max-w-2xl">
-          <span className="inline-flex items-center gap-1.5 bg-indigo-500/20 border border-indigo-400/30 text-indigo-300 text-xs px-3 py-1 rounded-full mb-3">
-            <Sparkles className="w-3.5 h-3.5" />
-            {language === 'en'
-              ? `Educator Management Hub (${role === 'lecturer' ? 'Lecturer' : 'Teacher'})`
-              : `Panel Manajemen Pengajar (${role === 'lecturer' ? 'Dosen' : 'Guru'})`}
-          </span>
-          <h2 className="text-2xl font-bold tracking-tight">
-            {language === 'en'
-              ? `Welcome, ${userProfile?.displayName || 'Educator'}! 🎓`
-              : `Selamat Datang, ${userProfile?.displayName || 'Bapak/Ibu Pendidik'}! 🎓`}
+    <div className="space-y-5 font-sans">
+      {/* Banner Ringkasan Dosen (Tanpa Form Input Materi Langsung) */}
+      <div className="bg-[#121822] text-white p-5 rounded-xl border border-[#232f42] shadow-xl relative overflow-hidden">
+        <div className="absolute top-0 left-0 right-0 h-1 bg-gradient-to-r from-[#f59e0b] via-[#fbbf24] to-[#00e5ff]" />
+
+        <div className="relative z-10">
+          <div className="flex flex-wrap items-center gap-2 text-[10px] font-mono text-[#f59e0b] uppercase tracking-wider">
+            <GraduationCap className="w-3.5 h-3.5" />
+            <span>
+              // PORTAL DOSEN • {role === 'admin' ? 'ADMINISTRATOR' : 'INSTRUKTUR PENGAMPU'}
+            </span>
+          </div>
+
+          <h2 className="text-lg sm:text-xl font-black text-slate-100 mt-1.5">
+            {language === 'en' ? 'Welcome,' : 'Selamat Datang,'}{' '}
+            <span className="text-[#f59e0b]">{userProfile?.displayName || 'Dr. Andi Saputra'}</span>
           </h2>
-          <p className="text-slate-300 text-xs sm:text-sm mt-1 leading-relaxed">
+
+          <p className="text-slate-400 text-xs mt-1 leading-relaxed">
             {language === 'en'
-              ? 'Manage lecture courses, create syllabus and Delta JSON reading modules, organize study groups, and utilize AI Teaching Assistant.'
-              : 'Kelola kelas perkuliahan, buat silabus dan materi teks Delta JSON, atur pembagian kelompok belajar, serta gunakan Teaching Assistant AI untuk draf bank soal.'}
+              ? 'Overview of your active courses, statistics, notifications, and grading queue. Click a course to publish materials, or open Classes for manual attendance & student rosters.'
+              : 'Ringkasan perkuliahan semester aktif. Klik mata kuliah untuk mengelola materi & QR cepat, atau buka menu Kelas untuk presensi manual & daftar 20 mahasiswa.'}
           </p>
-          <div className="flex flex-wrap gap-3 mt-4">
+
+          <div className="flex flex-wrap gap-2 mt-4">
             <button
+              type="button"
               onClick={onOpenCreateClass}
-              className="bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold px-4 py-2 rounded-xl shadow-md transition flex items-center gap-1.5"
+              className="bg-[#f59e0b] hover:bg-[#d97706] text-black text-xs font-mono font-bold px-3.5 py-2 rounded-lg shadow-md transition flex items-center gap-1.5 cursor-pointer"
             >
-              <Plus className="w-4 h-4" />
-              {language === 'en' ? 'Create New Class' : 'Buat Kelas Baru'}
+              <Plus className="w-3.5 h-3.5" />
+              <span>{language === 'en' ? 'Manage All Classes' : 'Semua Kelas'}</span>
             </button>
             <button
+              type="button"
               onClick={() => onNavigateView('ai-assistant')}
-              className="bg-white/10 hover:bg-white/20 text-white border border-white/20 text-xs font-semibold px-4 py-2 rounded-xl transition flex items-center gap-1.5"
+              className="bg-[#182334] hover:bg-[#22324a] text-[#00e5ff] border border-[#00e5ff]/30 text-xs font-mono font-bold px-3.5 py-2 rounded-lg transition flex items-center gap-1.5 cursor-pointer"
             >
-              <Sparkles className="w-3.5 h-3.5 text-indigo-300" />
-              {language === 'en' ? 'Teaching Assistant AI (Generate Questions)' : 'Teaching Assistant AI (Generate Soal)'}
+              <Sparkles className="w-3.5 h-3.5" />
+              <span>{language === 'en' ? 'Teaching Assistant AI' : 'Teaching Assistant AI'}</span>
             </button>
           </div>
         </div>
       </div>
 
-      {/* Metrics Stat Cards */}
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-        <div className="bg-white p-5 rounded-2xl border border-slate-200 shadow-xs">
-          <div className="flex items-center justify-between text-slate-500 mb-2">
-            <span className="text-xs font-medium">Kelas Aktif</span>
-            <div className="p-2 bg-indigo-50 text-indigo-600 rounded-xl">
-              <BookOpen className="w-4 h-4" />
+      {/* Statistik Singkat Perkuliahan */}
+      <div className="grid grid-cols-2 gap-3">
+        <div className="bg-[#121822] p-4 rounded-xl border border-[#232f42] shadow-md">
+          <div className="flex items-center justify-between text-slate-400 mb-1.5">
+            <span className="text-[11px] font-mono uppercase">Matkul Diampu</span>
+            <div className="p-1.5 bg-[#0f2433] text-[#00e5ff] rounded-lg border border-[#00e5ff]/25">
+              <BookOpen className="w-3.5 h-3.5" />
             </div>
           </div>
-          <div className="text-2xl font-bold text-slate-900">2 Kelas</div>
-          <span className="text-[11px] text-slate-500 mt-1 inline-block">2 Sesi Berjalan</span>
+          <div className="text-xl font-black text-slate-100 font-mono">
+            {DEMO_CLASSES.length} Matkul
+          </div>
+          <span className="text-[10px] text-slate-400 mt-0.5 block">Semester Ganjil 2026</span>
         </div>
 
-        <div className="bg-white p-5 rounded-2xl border border-slate-200 shadow-xs">
-          <div className="flex items-center justify-between text-slate-500 mb-2">
-            <span className="text-xs font-medium">Total Mahasiswa</span>
-            <div className="p-2 bg-blue-50 text-blue-600 rounded-xl">
-              <Users className="w-4 h-4" />
+        <div className="bg-[#121822] p-4 rounded-xl border border-[#232f42] shadow-md">
+          <div className="flex items-center justify-between text-slate-400 mb-1.5">
+            <span className="text-[11px] font-mono uppercase">Peserta / Kelas</span>
+            <div className="p-1.5 bg-[#1e1a0e] text-[#f59e0b] rounded-lg border border-[#f59e0b]/25">
+              <Users className="w-3.5 h-3.5" />
             </div>
           </div>
-          <div className="text-2xl font-bold text-slate-900">80 Mahasiswa</div>
-          <span className="text-[11px] text-emerald-600 font-semibold mt-1 inline-block">● 100% Terverifikasi</span>
+          <div className="text-xl font-black text-slate-100 font-mono">
+            {DEMO_COURSE_STUDENTS.length} Siswa
+          </div>
+          <span className="text-[10px] text-emerald-400 font-semibold mt-0.5 block">
+            ● 100% Terverifikasi
+          </span>
         </div>
 
-        <div className="bg-white p-5 rounded-2xl border border-slate-200 shadow-xs">
-          <div className="flex items-center justify-between text-slate-500 mb-2">
-            <span className="text-xs font-medium">Tugas Perlu Dinilai</span>
-            <div className="p-2 bg-amber-50 text-amber-600 rounded-xl">
-              <FileCheck className="w-4 h-4" />
+        <div className="bg-[#121822] p-4 rounded-xl border border-[#232f42] shadow-md">
+          <div className="flex items-center justify-between text-slate-400 mb-1.5">
+            <span className="text-[11px] font-mono uppercase">Perlu Dinilai</span>
+            <div className="p-1.5 bg-amber-950/50 text-[#f59e0b] rounded-lg border border-[#f59e0b]/25">
+              <FileCheck className="w-3.5 h-3.5" />
             </div>
           </div>
-          <div className="text-2xl font-bold text-amber-600">{submissionsQueue.length} Pengumpulan</div>
-          <span className="text-[11px] text-slate-500 mt-1 inline-block">Menunggu Ulasan Rubrik</span>
+          <div className="text-xl font-black text-[#f59e0b] font-mono">
+            {submissionsQueue.length} Tugas
+          </div>
+          <span className="text-[10px] text-slate-400 mt-0.5 block">Antrian Evaluasi</span>
         </div>
 
-        <div className="bg-white p-5 rounded-2xl border border-slate-200 shadow-xs">
-          <div className="flex items-center justify-between text-slate-500 mb-2">
-            <span className="text-xs font-medium">Rata-rata Kelas</span>
-            <div className="p-2 bg-emerald-50 text-emerald-600 rounded-xl">
-              <Award className="w-4 h-4" />
+        <div className="bg-[#121822] p-4 rounded-xl border border-[#232f42] shadow-md">
+          <div className="flex items-center justify-between text-slate-400 mb-1.5">
+            <span className="text-[11px] font-mono uppercase">Rata-Rata</span>
+            <div className="p-1.5 bg-emerald-950/50 text-emerald-400 rounded-lg border border-emerald-500/25">
+              <Award className="w-3.5 h-3.5" />
             </div>
           </div>
-          <div className="text-2xl font-bold text-emerald-700">86.4 / 100</div>
-          <span className="text-[11px] text-emerald-600 font-semibold mt-1 inline-block">Performa Sangat Baik</span>
+          <div className="text-xl font-black text-emerald-400 font-mono">86.4</div>
+          <span className="text-[10px] text-slate-400 mt-0.5 block">Performa Kelas Baik</span>
         </div>
       </div>
 
-      {/* Classes Managed List */}
-      <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-xs">
-        <div className="flex items-center justify-between mb-4">
+      {/* Daftar Mata Kuliah yang Diampu (Navigasi ke /dosen/mata-kuliah/:matkulId) */}
+      <div className="bg-[#121822] p-4 sm:p-5 rounded-xl border border-[#232f42] space-y-3.5">
+        <div className="flex items-center justify-between border-b border-[#1c2738] pb-2.5">
           <div>
-            <h3 className="text-base font-bold text-slate-900">Kelas yang Anda Kelola</h3>
-            <p className="text-xs text-slate-500">Klik kelas untuk mengelola silabus pertemuan, soal, dan kelompok tugas.</p>
+            <span className="text-[10px] font-mono font-bold text-[#f59e0b] uppercase block">
+              // DAFTAR MATA KULIAH DIAMPU
+            </span>
+            <h3 className="text-sm sm:text-base font-bold text-slate-100">
+              Pilih Mata Kuliah untuk Mengelola Perkuliahan
+            </h3>
           </div>
-          <button
-            onClick={onOpenCreateClass}
-            className="text-xs font-semibold text-indigo-600 hover:text-indigo-700 flex items-center gap-1"
-          >
-            + Buat Kelas
-          </button>
         </div>
 
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-          {DEMO_CLASSES.slice(0, 2).map((cls) => (
-            <div
-              key={cls.id}
-              onClick={() => onSelectClass(cls)}
-              className="p-4 border border-slate-200 rounded-xl hover:border-indigo-400 hover:shadow-md transition cursor-pointer flex flex-col justify-between"
-            >
-              <div>
-                <div className="flex justify-between items-start">
-                  <span className="text-[10px] font-bold text-indigo-600 uppercase tracking-wider">{cls.category}</span>
-                  <span className="bg-indigo-50 border border-indigo-200 text-indigo-700 text-xs font-mono font-bold px-2 py-0.5 rounded-md">
-                    Kode: {cls.code}
-                  </span>
-                </div>
-                <h4 className="text-sm font-bold text-slate-900 mt-2">{cls.name}</h4>
-                <p className="text-xs text-slate-500 mt-1 line-clamp-2">{cls.description}</p>
-              </div>
+        <div className="space-y-2.5">
+          {DEMO_CLASSES.map((cls) => {
+            const subjMeta = DEMO_SUBJECTS.find((s) => s.id === cls.id);
+            const matCount = getSavedMaterialCount(cls.id);
 
-              <div className="mt-4 pt-3 border-t border-slate-100 flex items-center justify-between text-xs text-slate-600">
-                <span className="flex items-center gap-1.5">
-                  <Users className="w-3.5 h-3.5 text-slate-400" />
-                  {cls.enrolledCount} Mahasiswa
-                </span>
-                <span className="flex items-center gap-1.5">
-                  <BookOpen className="w-3.5 h-3.5 text-slate-400" />
-                  {cls.meetingsCount} Pertemuan
-                </span>
-                <span className="text-indigo-600 font-semibold hover:underline">Kelola &rarr;</span>
+            return (
+              <div
+                key={cls.id}
+                onClick={() => onSelectClass(cls)}
+                className="p-3.5 rounded-xl bg-[#0b1019] border border-[#1f2c40] hover:border-[#f59e0b] transition-all cursor-pointer flex items-center justify-between gap-3 group"
+              >
+                <div className="min-w-0 flex-1 space-y-1">
+                  <div className="flex flex-wrap items-center gap-1.5 font-mono">
+                    <span className="text-[9px] font-bold px-1.5 py-0.5 rounded bg-[#00e5ff]/10 text-[#00e5ff] border border-[#00e5ff]/30">
+                      {cls.code}
+                    </span>
+                    {subjMeta && (
+                      <span className="text-[10px] text-slate-400 flex items-center gap-1">
+                        <Clock className="w-3 h-3 text-slate-500" />
+                        {subjMeta.day}, {subjMeta.time}
+                      </span>
+                    )}
+                  </div>
+
+                  <h4 className="text-xs sm:text-sm font-bold text-slate-100 group-hover:text-[#f59e0b] transition truncate">
+                    {cls.name}
+                  </h4>
+
+                  <div className="flex flex-wrap items-center gap-3 text-[10px] font-mono text-slate-400">
+                    <span className="flex items-center gap-1">
+                      <Users className="w-3 h-3 text-slate-500" />
+                      {DEMO_COURSE_STUDENTS.length} Mahasiswa
+                    </span>
+                    <span className="flex items-center gap-1">
+                      <BookOpen className="w-3 h-3 text-slate-500" />
+                      {matCount} Materi • 16 Pertemuan
+                    </span>
+                  </div>
+                </div>
+
+                <div className="flex items-center gap-1 text-[11px] font-mono font-bold text-[#f59e0b] shrink-0">
+                  <span className="hidden sm:inline">Kelola</span>
+                  <ChevronRight className="w-4 h-4 group-hover:translate-x-0.5 transition-transform" />
+                </div>
               </div>
+            );
+          })}
+        </div>
+      </div>
+
+      {/* Ringkasan Notifikasi Perkuliahan */}
+      <div className="bg-[#121822] p-4 sm:p-5 rounded-xl border border-[#232f42] space-y-3">
+        <div className="flex items-center justify-between border-b border-[#1c2738] pb-2.5">
+          <div className="flex items-center gap-2">
+            <Bell className="w-4 h-4 text-[#00e5ff]" />
+            <h3 className="text-xs font-mono font-bold text-slate-100 uppercase">
+              Notifikasi Perkuliahan {unreadCount > 0 ? `(${unreadCount} Baru)` : ''}
+            </h3>
+          </div>
+          {unreadCount > 0 && (
+            <button
+              type="button"
+              onClick={handleMarkAllRead}
+              className="text-[10px] font-mono text-[#00e5ff] hover:underline cursor-pointer"
+            >
+              Tandai Dibaca
+            </button>
+          )}
+        </div>
+
+        <div className="space-y-2">
+          {notifications.map((n) => (
+            <div
+              key={n.id}
+              className={`p-3 rounded-lg border text-xs ${
+                n.unread
+                  ? 'bg-[#111c2b] border-[#00e5ff]/35'
+                  : 'bg-[#0b1019] border-[#1c2738]'
+              }`}
+            >
+              <div className="flex items-center justify-between gap-2">
+                <p className="font-bold text-slate-100 text-xs">{n.title}</p>
+                <span className="text-[10px] font-mono text-slate-500 shrink-0">{n.time}</span>
+              </div>
+              <p className="text-[11px] text-slate-400 mt-0.5">{n.detail}</p>
             </div>
           ))}
         </div>
       </div>
 
-      {/* Antrian Penilaian Tugas Mahasiswa */}
-      <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-xs">
-        <div className="flex items-center justify-between mb-4">
-          <div>
-            <h3 className="text-base font-bold text-slate-900">Antrian Penilaian Tugas Kelompok</h3>
-            <p className="text-xs text-slate-500">Evaluasi pengumpulan tugas mahasiswa dengan rubrik nilai numerik dan catatan feedback.</p>
-          </div>
+      {/* Antrian Penilaian Tugas Ringkas */}
+      <div className="bg-[#121822] p-4 sm:p-5 rounded-xl border border-[#232f42] space-y-3">
+        <div className="border-b border-[#1c2738] pb-2.5">
+          <span className="text-[10px] font-mono font-bold text-[#f59e0b] uppercase block">
+            // ANTRIAN PENILAIAN CEPAT
+          </span>
+          <h3 className="text-sm font-bold text-slate-100">
+            Pengumpulan Tugas Mahasiswa
+          </h3>
         </div>
 
         {submissionsQueue.length === 0 ? (
-          <div className="text-center py-10 bg-slate-50 rounded-xl border border-dashed border-slate-200">
-            <CheckCircle className="w-8 h-8 text-emerald-500 mx-auto mb-2" />
-            <p className="text-sm font-bold text-slate-700">Semua Tugas Telah Dinilai!</p>
-            <p className="text-xs text-slate-500 mt-0.5">Tidak ada penugasan yang menunggu ulasan saat ini.</p>
+          <div className="text-center py-8 bg-[#0b1019] rounded-xl border border-dashed border-[#243247]">
+            <CheckCircle className="w-7 h-7 text-emerald-400 mx-auto mb-2" />
+            <p className="text-xs font-bold text-slate-200">Semua Tugas Telah Dinilai!</p>
+            <p className="text-[11px] text-slate-500 mt-0.5">
+              Tidak ada pengumpulan tugas yang menunggu ulasan saat ini.
+            </p>
           </div>
         ) : (
-          <div className="overflow-x-auto">
-            <table className="w-full text-left text-xs">
-              <thead className="bg-slate-50 text-slate-600 uppercase text-[10px] tracking-wider border-b border-slate-200">
-                <tr>
-                  <th className="py-3 px-4">Pengirim / Kelompok</th>
-                  <th className="py-3 px-4">Judul Penugasan</th>
-                  <th className="py-3 px-4">Waktu Submit</th>
-                  <th className="py-3 px-4 text-right">Aksi</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-slate-100">
-                {submissionsQueue.map((sub) => (
-                  <tr key={sub.id} className="hover:bg-slate-50 transition">
-                    <td className="py-3 px-4 font-semibold text-slate-900">{sub.studentName}</td>
-                    <td className="py-3 px-4 text-slate-700">
-                      <div>{sub.assignment}</div>
-                      <span className="text-[10px] text-indigo-600">{sub.class}</span>
-                    </td>
-                    <td className="py-3 px-4 text-slate-500">{sub.submittedAt}</td>
-                    <td className="py-3 px-4 text-right">
-                      <button
-                        onClick={() => setSelectedSubmission(sub)}
-                        className="bg-indigo-600 hover:bg-indigo-500 text-white text-xs px-3 py-1.5 rounded-lg font-semibold transition"
-                      >
-                        Beri Nilai
-                      </button>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+          <div className="space-y-2">
+            {submissionsQueue.map((sub) => (
+              <div
+                key={sub.id}
+                className="p-3 rounded-lg bg-[#0b1019] border border-[#1f2c40] flex items-center justify-between gap-3"
+              >
+                <div className="min-w-0">
+                  <p className="text-xs font-bold text-slate-100 truncate">{sub.studentName}</p>
+                  <p className="text-[11px] text-slate-300 truncate">{sub.assignment}</p>
+                  <p className="text-[10px] font-mono text-[#00e5ff] mt-0.5">
+                    {sub.class} • {sub.submittedAt}
+                  </p>
+                </div>
+
+                <button
+                  type="button"
+                  onClick={() => setSelectedSubmission(sub)}
+                  className="px-3 py-1.5 rounded-lg bg-[#f59e0b] hover:bg-[#d97706] text-black text-[11px] font-mono font-bold shrink-0 cursor-pointer transition"
+                >
+                  Nilai
+                </button>
+              </div>
+            ))}
           </div>
         )}
       </div>
 
       {/* Modal Beri Nilai */}
       {selectedSubmission && (
-        <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4 z-50">
-          <div className="bg-white w-full max-w-lg rounded-2xl shadow-2xl border border-slate-200 overflow-hidden">
-            <div className="bg-indigo-900 text-white p-5">
-              <h3 className="text-base font-bold">Evaluasi Nilai Tugas</h3>
-              <p className="text-xs text-indigo-200 mt-0.5">{selectedSubmission.studentName} — {selectedSubmission.assignment}</p>
+        <div className="fixed inset-0 bg-black/80 backdrop-blur-xs flex items-center justify-center p-4 z-50">
+          <div className="bg-[#121822] w-full max-w-md rounded-xl shadow-2xl border border-[#232f42] overflow-hidden text-slate-100">
+            <div className="bg-[#161e2b] border-b border-[#1c2738] p-4">
+              <span className="text-[9px] font-mono font-bold text-[#f59e0b] uppercase block">
+                // EVALUASI RUBRIK TUGAS
+              </span>
+              <h3 className="text-sm font-bold text-slate-100 mt-0.5">
+                {selectedSubmission.studentName}
+              </h3>
+              <p className="text-[11px] text-slate-400">{selectedSubmission.assignment}</p>
             </div>
-            <form onSubmit={handleGradeSubmit} className="p-6 space-y-4">
+
+            <form onSubmit={handleGradeSubmit} className="p-4 space-y-3.5">
               <div>
-                <label className="block text-xs font-semibold text-slate-700 mb-1">Nilai Numerik (0 - 100)</label>
+                <label className="block text-[10px] font-mono font-bold text-slate-300 mb-1 uppercase">
+                  Nilai Numerik (0 - 100)
+                </label>
                 <input
                   type="number"
                   min="0"
@@ -270,35 +388,37 @@ export default function TeacherDashboard({ onSelectClass, onNavigateView, onOpen
                   placeholder="Contoh: 88"
                   value={gradeInput}
                   onChange={(e) => setGradeInput(e.target.value)}
-                  className="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg focus:outline-none focus:border-indigo-500"
+                  className="w-full px-3 py-2 text-xs bg-[#0a0f18] border border-slate-700 rounded-lg text-slate-100 focus:outline-none focus:border-[#f59e0b]"
                 />
               </div>
 
               <div>
-                <label className="block text-xs font-semibold text-slate-700 mb-1">Catatan Umpan Balik Pendidik</label>
+                <label className="block text-[10px] font-mono font-bold text-slate-300 mb-1 uppercase">
+                  Catatan Umpan Balik
+                </label>
                 <textarea
                   rows="3"
-                  placeholder="Ketik catatan evaluasi atau revisi untuk kelompok..."
+                  placeholder="Ketik catatan evaluasi atau revisi untuk mahasiswa..."
                   value={feedbackInput}
                   onChange={(e) => setFeedbackInput(e.target.value)}
-                  className="w-full px-3 py-2 text-xs border border-slate-300 rounded-lg focus:outline-none focus:border-indigo-500"
-                ></textarea>
+                  className="w-full px-3 py-2 text-xs bg-[#0a0f18] border border-slate-700 rounded-lg text-slate-100 focus:outline-none focus:border-[#f59e0b]"
+                />
               </div>
 
-              <div className="flex justify-end gap-2 pt-2">
+              <div className="flex justify-end gap-2 pt-2 border-t border-[#1c2738]">
                 <button
                   type="button"
                   onClick={() => setSelectedSubmission(null)}
-                  className="px-4 py-2 text-xs font-semibold text-slate-600 hover:bg-slate-100 rounded-lg transition"
+                  className="px-3.5 py-2 text-xs font-mono text-slate-400 hover:text-white bg-[#162030] rounded-lg transition cursor-pointer"
                 >
                   Batal
                 </button>
                 <button
                   type="submit"
-                  className="bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold px-4 py-2 rounded-lg transition flex items-center gap-1.5"
+                  className="bg-[#f59e0b] hover:bg-[#d97706] text-black text-xs font-mono font-bold px-4 py-2 rounded-lg transition flex items-center gap-1.5 cursor-pointer"
                 >
                   <Send className="w-3.5 h-3.5" />
-                  Simpan & Terbitkan Nilai
+                  <span>Simpan Nilai</span>
                 </button>
               </div>
             </form>
