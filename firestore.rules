@@ -127,7 +127,7 @@ service cloud.firestore {
       allow delete: if isSignedIn() && (resource.data.uid == request.auth.uid || isAdmin());
     }
 
-    // 7. exam_attempts/{classId}_{uid} (dikelola server-side via /api/grade Admin SDK)
+    // 7. exam_attempts/{classId}_m{meetingNo}_{examType}_{uid} (dikelola server-side via /api/grade Admin SDK)
     match /exam_attempts/{attemptId} {
       allow read: if isSignedIn()
         && (resource.data.uid == request.auth.uid || isLecturerOrAdmin());
@@ -143,15 +143,41 @@ service cloud.firestore {
     match /discussions/{discussionId} {
       allow read: if isSignedIn();
       allow create: if isSignedIn()
-        && request.resource.data.authorUid == request.auth.uid;
+        && request.resource.data.authorUid == request.auth.uid
+        && request.resource.data.get('isVerifiedAnswer', false) == false;
       allow update: if isSignedIn()
         && (
-          resource.data.authorUid == request.auth.uid
-          || isLecturerOrAdmin()
-          || request.resource.data.diff(resource.data).affectedKeys().hasOnly(['likes', 'likedBy', 'replies', 'updatedAt'])
+          isLecturerOrAdmin()
+          || (
+            !request.resource.data.diff(resource.data).affectedKeys().hasAny(['isVerifiedAnswer', 'verifiedBy'])
+            && (
+              resource.data.authorUid == request.auth.uid
+              || request.resource.data.diff(resource.data).affectedKeys().hasOnly(['likes', 'likedBy', 'replies', 'updatedAt'])
+            )
+          )
         );
       allow delete: if isSignedIn()
         && (resource.data.authorUid == request.auth.uid || isLecturerOrAdmin());
+    }
+
+    // 10. learning_progress/{classId}_m{meetingNo}_{uid}
+    match /learning_progress/{progressId} {
+      allow read: if isSignedIn()
+        && (resource.data.uid == request.auth.uid || isLecturerOrAdmin());
+      allow create: if isSignedIn()
+        && request.resource.data.uid == request.auth.uid
+        && request.resource.data.classId is string
+        && request.resource.data.meetingNo is int
+        && request.resource.data.meetingNo >= 1
+        && request.resource.data.meetingNo <= 32
+        && progressId == (request.resource.data.classId + '_m' + string(request.resource.data.meetingNo) + '_' + request.auth.uid);
+      allow update: if isSignedIn()
+        && resource.data.uid == request.auth.uid
+        && request.resource.data.uid == request.auth.uid
+        && request.resource.data.classId == resource.data.classId
+        && request.resource.data.meetingNo == resource.data.meetingNo
+        && progressId == (resource.data.classId + '_m' + string(resource.data.meetingNo) + '_' + request.auth.uid);
+      allow delete: if isAdmin();
     }
   }
 }

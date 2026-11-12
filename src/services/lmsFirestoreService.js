@@ -1,6 +1,6 @@
 /**
  * Layanan Modular Cloud Firestore untuk Smartsa LMS
- * Koleksi: classes, class_members, assignments, submissions, discussions, exam_attempts
+ * Koleksi: classes, class_members, assignments, submissions, discussions, exam_attempts, learning_progress
  */
 import {
   addDoc,
@@ -320,14 +320,15 @@ function isDeadlineOverdue(deadline) {
   return Date.now() > parsed;
 }
 
-export async function fetchAssignmentsWithUserSubmissions({ classId = null } = {}) {
+export async function fetchAssignmentsWithUserSubmissions({ classId = null, meetingNo = null } = {}) {
   if (!auth?.currentUser || !db) {
     return { assignments: [], isEmpty: true, source: 'demo' };
   }
 
   try {
+    // Query filter tunggal classId agar bebas kebutuhan composite index
     const asgQuery = classId
-      ? query(collection(db, 'assignments'), where('classId', '==', classId), orderBy('deadline', 'asc'))
+      ? query(collection(db, 'assignments'), where('classId', '==', classId))
       : collection(db, 'assignments');
     const asgSnap = await getDocs(asgQuery);
 
@@ -341,38 +342,49 @@ export async function fetchAssignmentsWithUserSubmissions({ classId = null } = {
       }
     });
 
-    const assignments = asgSnap.docs.map((docSnap) => {
-      const data = docSnap.data();
-      const sub = subByAssignmentId.get(docSnap.id) || null;
-      return {
-        id: docSnap.id,
-        classId: data.classId || '',
-        title: data.title || 'Tugas Perkuliahan',
-        subject: data.subject || 'Mata Kuliah',
-        subjectCode: data.subjectCode || 'CLS',
-        deadline: formatDeadlineLabel(data),
-        rawDeadline: data.deadline || '',
-        isOverdue: isDeadlineOverdue(data.deadline),
-        status: sub ? 'submitted' : 'pending',
-        submittedFile: sub
-          ? {
-              name: sub.fileName || sub.externalUrl || 'Dokumen Tugas',
-              size: sub.fileSize || (sub.externalUrl ? 'Tautan URL' : '-'),
-              url: sub.fileUrl || sub.externalUrl || '',
-              storageType: sub.storageType || 'external_url',
-              uploadedAt: sub.submittedAtLabel || 'Tercatat di Firestore',
-            }
-          : null,
-        submittedAt: sub?.submittedAtLabel || null,
-        notes: sub?.notes || '',
-        externalUrl: sub?.externalUrl || '',
-        grade: typeof sub?.grade === 'number' ? sub.grade : typeof sub?.score === 'number' ? sub.score : null,
-        feedback: sub?.feedback || '',
-        note: data.note || '',
-        maxSize: data.maxSize || '15 MB',
-        allowedFormats: data.allowedFormats || '.pdf, .zip, .docx',
-      };
-    });
+    const parsedMeetingFilter =
+      meetingNo !== null && meetingNo !== undefined && meetingNo !== '' ? Number(meetingNo) : null;
+
+    const assignments = asgSnap.docs
+      .map((docSnap) => {
+        const data = docSnap.data();
+        const sub = subByAssignmentId.get(docSnap.id) || null;
+        return {
+          id: docSnap.id,
+          classId: data.classId || '',
+          meetingNo: Number(data.meetingNo || 1),
+          title: data.title || 'Tugas Perkuliahan',
+          subject: data.subject || 'Mata Kuliah',
+          subjectCode: data.subjectCode || 'CLS',
+          deadline: formatDeadlineLabel(data),
+          rawDeadline: data.deadline || '',
+          isOverdue: isDeadlineOverdue(data.deadline),
+          status: sub ? 'submitted' : 'pending',
+          submittedFile: sub
+            ? {
+                name: sub.fileName || sub.externalUrl || 'Dokumen Tugas',
+                size: sub.fileSize || (sub.externalUrl ? 'Tautan URL' : '-'),
+                url: sub.fileUrl || sub.externalUrl || '',
+                storageType: sub.storageType || 'external_url',
+                uploadedAt: sub.submittedAtLabel || 'Tercatat di Firestore',
+              }
+            : null,
+          submittedAt: sub?.submittedAtLabel || null,
+          notes: sub?.notes || '',
+          externalUrl: sub?.externalUrl || '',
+          grade: typeof sub?.grade === 'number' ? sub.grade : typeof sub?.score === 'number' ? sub.score : null,
+          feedback: sub?.feedback || '',
+          note: data.note || '',
+          maxSize: data.maxSize || '15 MB',
+          allowedFormats: data.allowedFormats || '.pdf, .zip, .docx',
+        };
+      })
+      .filter((item) => (parsedMeetingFilter ? item.meetingNo === parsedMeetingFilter : true))
+      .sort((a, b) => {
+        const aMs = Date.parse(a.rawDeadline || '') || Number.MAX_SAFE_INTEGER;
+        const bMs = Date.parse(b.rawDeadline || '') || Number.MAX_SAFE_INTEGER;
+        return aMs - bMs;
+      });
 
     return {
       assignments,
@@ -385,9 +397,77 @@ export async function fetchAssignmentsWithUserSubmissions({ classId = null } = {
   }
 }
 
+export async function createAssignmentInFirestore({
+  classId,
+  meetingNo = 1,
+  title,
+  subject = '',
+  subjectCode = '',
+  deadline = '',
+  note = '',
+  maxSize = '15 MB',
+  allowedFormats = '.pdf, .zip, .docx',
+}) {
+  const cleanClassId = String(classId || '').trim();
+  const cleanTitle = String(title || '').trim();
+  const safeMeetingNo = Math.min(32, Math.max(1, Number(meetingNo) || 1));
+
+  if (!cleanClassId) throw new Error('Kelas wajib dipilih.');
+  if (!cleanTitle) throw new Error('Judul tugas wajib diisi.');
+
+  const rawDeadline = String(deadline || '').trim() || '2026-12-15T23:59:00+07:00';
+  const deadlineLabel = formatDeadlineLabel({ deadline: rawDeadline });
+  const basePayload = {
+    classId: cleanClassId,
+    meetingNo: safeMeetingNo,
+    title: cleanTitle,
+    subject: subject || 'Mata Kuliah Smartsa',
+    subjectCode: subjectCode || 'CLS',
+    deadline: rawDeadline,
+    deadlineLabel,
+    note: String(note || '').trim() || 'Kumpulkan berkas tugas sesuai instruksi pertemuan.',
+    maxSize,
+    allowedFormats,
+  };
+
+  if (!auth?.currentUser || !db) {
+    return {
+      id: `demo_asg_${Date.now()}`,
+      ...basePayload,
+      deadline: deadlineLabel,
+      rawDeadline,
+      isOverdue: false,
+      status: 'pending',
+      submittedFile: null,
+      grade: null,
+      source: 'demo',
+    };
+  }
+
+  const docRef = await addDoc(collection(db, 'assignments'), {
+    ...basePayload,
+    createdBy: auth.currentUser.uid,
+    createdAt: serverTimestamp(),
+    updatedAt: serverTimestamp(),
+  });
+
+  return {
+    id: docRef.id,
+    ...basePayload,
+    deadline: deadlineLabel,
+    rawDeadline,
+    isOverdue: false,
+    status: 'pending',
+    submittedFile: null,
+    grade: null,
+    source: 'firestore',
+  };
+}
+
 export async function submitAssignmentToFirestore({
   assignmentId,
   classId = '',
+  meetingNo = null,
   assignmentTitle = '',
   className = '',
   studentName = 'Mahasiswa',
@@ -425,11 +505,17 @@ export async function submitAssignmentToFirestore({
     minute: '2-digit',
   });
 
+  const meetingPayload =
+    meetingNo !== null && meetingNo !== undefined && Number(meetingNo) >= 1
+      ? { meetingNo: Number(meetingNo) }
+      : {};
+
   if (!existingSnap.exists()) {
     await setDoc(subRef, {
       submissionId,
       assignmentId,
       classId,
+      ...meetingPayload,
       uid: user.uid,
       studentName,
       assignmentTitle,
@@ -449,6 +535,7 @@ export async function submitAssignmentToFirestore({
     // Update sesuai firestore.rules (tidak menyentuh grade, score, feedback, gradedBy, uid, assignmentId)
     await updateDoc(subRef, {
       classId,
+      ...meetingPayload,
       studentName,
       assignmentTitle,
       className,
@@ -657,37 +744,49 @@ export async function fetchInstructorAnswerKey({ classId = 'subj_pbo', examType 
 // DISCUSSIONS
 // =========================================================================
 
-export function subscribeDiscussions(callback, classIdFilter = null) {
+export function subscribeDiscussions(callback, classIdFilter = null, meetingNoFilter = null) {
   if (!auth?.currentUser || !db) {
     callback({ discussions: [], source: 'demo' });
     return () => {};
   }
 
+  // Query filter tunggal classId agar bebas kebutuhan composite index
   const q = classIdFilter
-    ? query(collection(db, 'discussions'), where('classId', '==', classIdFilter), orderBy('createdAt', 'desc'))
-    : query(collection(db, 'discussions'), orderBy('createdAt', 'desc'));
+    ? query(collection(db, 'discussions'), where('classId', '==', classIdFilter))
+    : collection(db, 'discussions');
+
+  const parsedMeetingFilter =
+    meetingNoFilter !== null && meetingNoFilter !== undefined && meetingNoFilter !== ''
+      ? Number(meetingNoFilter)
+      : null;
 
   return onSnapshot(
     q,
     (snap) => {
-      const discussions = snap.docs.map((docSnap) => {
-        const d = docSnap.data();
-        return {
-          id: docSnap.id,
-          classId: d.classId || 'subj_pbo',
-          subject: d.subject || 'Pemrograman Berorientasi Objek',
-          authorUid: d.authorUid || '',
-          author: d.author || 'Pengguna Smartsa',
-          avatar:
-            d.avatar ||
-            'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?auto=format&fit=crop&w=120&q=80',
-          time: d.timeLabel || 'Baru saja',
-          content: d.content || '',
-          likes: Number(d.likes || 0),
-          likedBy: Array.isArray(d.likedBy) ? d.likedBy : [],
-          replies: Array.isArray(d.replies) ? d.replies : [],
-        };
-      });
+      const discussions = snap.docs
+        .map((docSnap) => {
+          const d = docSnap.data();
+          return {
+            id: docSnap.id,
+            classId: d.classId || 'subj_pbo',
+            meetingNo: Number(d.meetingNo || 1),
+            subject: d.subject || 'Pemrograman Berorientasi Objek',
+            authorUid: d.authorUid || '',
+            author: d.author || 'Pengguna Smartsa',
+            avatar: d.avatar || '',
+            time: d.timeLabel || 'Baru saja',
+            content: d.content || '',
+            likes: Number(d.likes || 0),
+            likedBy: Array.isArray(d.likedBy) ? d.likedBy : [],
+            replies: Array.isArray(d.replies) ? d.replies : [],
+            isVerifiedAnswer: Boolean(d.isVerifiedAnswer),
+            verifiedBy: d.verifiedBy || '',
+            verifiedReplyId: d.verifiedReplyId || '',
+            _sortMs: toTimestampMillis(d.createdAt || d.updatedAt),
+          };
+        })
+        .filter((item) => (parsedMeetingFilter ? item.meetingNo === parsedMeetingFilter : true))
+        .sort((a, b) => b._sortMs - a._sortMs);
       callback({ discussions, source: 'firestore' });
     },
     (err) => {
@@ -697,7 +796,14 @@ export function subscribeDiscussions(callback, classIdFilter = null) {
   );
 }
 
-export async function createDiscussionTopic({ classId, subject, content, authorName, avatar }) {
+export async function createDiscussionTopic({
+  classId,
+  meetingNo = 1,
+  subject,
+  content,
+  authorName,
+  avatar = '',
+}) {
   const user = auth?.currentUser;
   if (!user || !db) {
     throw new Error('Masuk dengan akun Firebase untuk mengirim topik diskusi ke Firestore.');
@@ -710,22 +816,52 @@ export async function createDiscussionTopic({ classId, subject, content, authorN
 
   const docRef = await addDoc(collection(db, 'discussions'), {
     classId: classId || 'subj_pbo',
+    meetingNo: Math.min(32, Math.max(1, Number(meetingNo) || 1)),
     subject: subject || 'Pemrograman Berorientasi Objek',
     authorUid: user.uid,
     author: authorName || user.displayName || 'Pengguna Smartsa',
-    avatar:
-      avatar ||
-      'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?auto=format&fit=crop&w=120&q=80',
+    avatar: avatar || '',
     content: String(content || '').trim(),
     likes: 0,
     likedBy: [],
     replies: [],
+    isVerifiedAnswer: false,
+    verifiedBy: '',
+    verifiedReplyId: '',
     timeLabel: `Hari ini, ${timeFormatted}`,
     createdAt: serverTimestamp(),
     updatedAt: serverTimestamp(),
   });
 
   return docRef.id;
+}
+
+export async function toggleVerifyDiscussionReply(discussion, replyId = null) {
+  const user = auth?.currentUser;
+  if (!user || !db || !discussion?.id) return null;
+
+  const isAlreadyVerifiedForTarget =
+    Boolean(discussion.isVerifiedAnswer) &&
+    (replyId ? discussion.verifiedReplyId === replyId : !discussion.verifiedReplyId);
+
+  const nextState = isAlreadyVerifiedForTarget
+    ? {
+        isVerifiedAnswer: false,
+        verifiedBy: '',
+        verifiedReplyId: '',
+      }
+    : {
+        isVerifiedAnswer: true,
+        verifiedBy: user.uid,
+        verifiedReplyId: replyId || '',
+      };
+
+  await updateDoc(doc(db, 'discussions', discussion.id), {
+    ...nextState,
+    updatedAt: serverTimestamp(),
+  });
+
+  return nextState;
 }
 
 export async function toggleLikeDiscussion(discussion) {
@@ -787,8 +923,75 @@ export async function deleteDiscussionTopic(discussionId) {
 }
 
 // =========================================================================
-// EXAM ATTEMPTS
+// LEARNING PROGRESS & EXAM ATTEMPTS
 // =========================================================================
+
+export async function fetchUserLearningProgress(uidOverride = null) {
+  const uid = uidOverride || auth?.currentUser?.uid;
+  if (!uid || !db) return [];
+
+  try {
+    const q = query(collection(db, 'learning_progress'), where('uid', '==', uid));
+    const snap = await getDocs(q);
+    return snap.docs.map((docSnap) => {
+      const d = docSnap.data();
+      return {
+        id: docSnap.id,
+        ...d,
+        meetingNo: Number(d.meetingNo || 1),
+        materialCompleted: Boolean(d.materialCompleted),
+        videoCompleted: Boolean(d.videoCompleted),
+      };
+    });
+  } catch (err) {
+    console.warn('[lmsFirestoreService] Gagal memuat learning_progress:', err.message);
+    return [];
+  }
+}
+
+export async function fetchLearningProgressByClass(classId, uidOverride = null) {
+  const uid = uidOverride || auth?.currentUser?.uid;
+  if (!uid || !db || !classId) return [];
+
+  const allProgress = await fetchUserLearningProgress(uid);
+  return allProgress.filter((item) => item.classId === classId);
+}
+
+export async function upsertLearningProgress({
+  classId,
+  meetingNo = 1,
+  materialCompleted,
+  videoCompleted,
+}) {
+  const user = auth?.currentUser;
+  if (!user || !db || !classId) {
+    throw new Error('Masuk dengan akun Firebase untuk menyimpan progres belajar ke Firestore.');
+  }
+
+  const parsedMeetingNo = Number(meetingNo);
+  if (!Number.isInteger(parsedMeetingNo) || parsedMeetingNo < 1 || parsedMeetingNo > 32) {
+    throw new Error('Nomor pertemuan tidak valid (1–32).');
+  }
+
+  const progressId = `${classId}_m${parsedMeetingNo}_${user.uid}`;
+  const payload = {
+    progressId,
+    classId,
+    meetingNo: parsedMeetingNo,
+    uid: user.uid,
+    updatedAt: serverTimestamp(),
+  };
+
+  if (typeof materialCompleted === 'boolean') {
+    payload.materialCompleted = materialCompleted;
+  }
+  if (typeof videoCompleted === 'boolean') {
+    payload.videoCompleted = videoCompleted;
+  }
+
+  await setDoc(doc(db, 'learning_progress', progressId), payload, { merge: true });
+  return payload;
+}
 
 export async function fetchUserExamAttempts(uidOverride = null) {
   const uid = uidOverride || auth?.currentUser?.uid;
@@ -797,11 +1000,29 @@ export async function fetchUserExamAttempts(uidOverride = null) {
   try {
     const q = query(collection(db, 'exam_attempts'), where('uid', '==', uid));
     const snap = await getDocs(q);
-    return snap.docs.map((docSnap) => ({ id: docSnap.id, ...docSnap.data() }));
+    return snap.docs
+      .map((docSnap) => {
+        const d = docSnap.data();
+        return {
+          id: docSnap.id,
+          ...d,
+          meetingNo: Number(d.meetingNo || 1),
+          _sortMs: toTimestampMillis(d.submittedAt || d.updatedAt || d.examStartedAt),
+        };
+      })
+      .sort((a, b) => b._sortMs - a._sortMs);
   } catch (err) {
     console.warn('[lmsFirestoreService] Gagal memuat exam_attempts:', err.message);
     return [];
   }
+}
+
+export async function fetchUserClassExamAttempts(classId, uidOverride = null) {
+  const uid = uidOverride || auth?.currentUser?.uid;
+  if (!uid || !db || !classId) return [];
+
+  const allAttempts = await fetchUserExamAttempts(uid);
+  return allAttempts.filter((a) => a.classId === classId);
 }
 
 export async function fetchClassExamAttempt(classId, uidOverride = null) {
@@ -809,6 +1030,8 @@ export async function fetchClassExamAttempt(classId, uidOverride = null) {
   if (!uid || !db || !classId) return null;
 
   try {
+    const attempts = await fetchUserClassExamAttempts(classId, uid);
+    if (attempts.length > 0) return attempts[0];
     const snap = await getDoc(doc(db, 'exam_attempts', `${classId}_${uid}`));
     return snap.exists() ? { id: snap.id, ...snap.data() } : null;
   } catch {

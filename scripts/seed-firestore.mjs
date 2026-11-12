@@ -172,6 +172,7 @@ const SEED_ASSIGNMENTS = [
   {
     id: 'asg_01',
     classId: 'subj_pbo',
+    meetingNo: 1,
     title: 'Tugas Praktikum 01: Implementasi OOP & Inheritance',
     subject: 'Pemrograman Berorientasi Objek',
     subjectCode: 'PBO101',
@@ -184,6 +185,7 @@ const SEED_ASSIGNMENTS = [
   {
     id: 'asg_02',
     classId: 'subj_bd',
+    meetingNo: 1,
     title: 'Tugas 02: Normalisasi Basis Data & Skema NoSQL',
     subject: 'Basis Data',
     subjectCode: 'BD202',
@@ -196,6 +198,7 @@ const SEED_ASSIGNMENTS = [
   {
     id: 'asg_03',
     classId: 'subj_uiux',
+    meetingNo: 2,
     title: 'Proyek Sesi 03: Desain UI/UX & Wireframing Mobile LMS',
     subject: 'Desain Industri & UI/UX',
     subjectCode: 'UIUX505',
@@ -208,6 +211,7 @@ const SEED_ASSIGNMENTS = [
   {
     id: 'asg_04',
     classId: 'subj_pwmb',
+    meetingNo: 1,
     title: 'Tugas 04: Pembuatan Modul REST API & Vercel Serverless',
     subject: 'Pemrograman Web dan Perangkat Bergerak',
     subjectCode: 'PWPB303',

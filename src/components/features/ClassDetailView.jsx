@@ -6,15 +6,18 @@ import { auth } from '../../firebase';
 import { setLocalExamSession } from '../../services/aiService';
 import {
   fetchAssignmentsWithUserSubmissions,
-  fetchClassExamAttempt,
   fetchClassExamAttempts,
   fetchClassSubmissionsForGrading,
   fetchInstructorAnswerKey,
+  fetchLearningProgressByClass,
+  fetchUserClassExamAttempts,
+  createAssignmentInFirestore,
   gradeSubmissionInFirestore,
   joinClassWithToken,
   submitAssignmentToFirestore,
   cancelSubmissionInFirestore,
   updateClassMeetingsInFirestore,
+  upsertLearningProgress,
 } from '../../services/lmsFirestoreService';
 import {
   closeAttendanceSession,
@@ -25,6 +28,7 @@ import {
 import { uploadMediaFile, isValidExternalUrl } from '../../services/cloudinaryService';
 import DeltaContentRenderer from '../common/DeltaContentRenderer';
 import { AccessibleDialog } from '../common/AccessibleDialog';
+import DiscussionTab from './DiscussionTab';
 import {
   ArrowLeft,
   BookOpen,
@@ -53,6 +57,9 @@ import {
   Save,
   RefreshCw,
   BarChart3,
+  MessageSquare,
+  Plus,
+  TrendingUp,
 } from 'lucide-react';
 
 const EXAM_QUESTIONS = [
@@ -223,6 +230,14 @@ export default function ClassDetailView({
   const [gradingId, setGradingId] = useState(null);
   const [gradingNotice, setGradingNotice] = useState(null);
 
+  // Instructor Task Creation State
+  const [newTaskMeetingNo, setNewTaskMeetingNo] = useState(1);
+  const [newTaskTitle, setNewTaskTitle] = useState('');
+  const [newTaskDeadline, setNewTaskDeadline] = useState('2026-12-15T23:59');
+  const [newTaskNote, setNewTaskNote] = useState('');
+  const [creatingTask, setCreatingTask] = useState(false);
+  const [createTaskNotice, setCreateTaskNotice] = useState(null);
+
   // Instructor Exam Keys & Analytics State
   const [evalKeyType, setEvalKeyType] = useState('pretest');
   const [instructorKeyMap, setInstructorKeyMap] = useState(null);
@@ -231,7 +246,11 @@ export default function ClassDetailView({
   const [evalAnalyticsLoading, setEvalAnalyticsLoading] = useState(false);
   const [evalAnalyticsError, setEvalAnalyticsError] = useState('');
 
-  // Exam State
+  // Learning Progress & Exam State (Per-Meeting)
+  const [learningProgressMap, setLearningProgressMap] = useState({});
+  const [progressSaving, setProgressSaving] = useState(false);
+  const [progressFeedback, setProgressFeedback] = useState(null);
+  const [userExamAttempts, setUserExamAttempts] = useState([]);
   const [examActive, setExamActive] = useState(false);
   const [examType, setExamType] = useState('pretest');
   const [examTimer, setExamTimer] = useState(900);
@@ -241,7 +260,6 @@ export default function ClassDetailView({
   const [examSubmitting, setExamSubmitting] = useState(false);
   const [examError, setExamError] = useState(null);
   const [examNote, setExamNote] = useState('');
-  const [lastAttempt, setLastAttempt] = useState(null);
   const [downloadSuccess, setDownloadSuccess] = useState(false);
   const [videoActivated, setVideoActivated] = useState(false);
 
@@ -249,10 +267,12 @@ export default function ClassDetailView({
   const selectedAnswersRef = useRef({});
   const examTypeRef = useRef('pretest');
   const classIdRef = useRef(classData?.id || 'subj_pbo');
+  const meetingNoRef = useRef(1);
 
   // Task Submission State
   const [taskSubmissions, setTaskSubmissions] = useState([]);
   const [tasksLoading, setTasksLoading] = useState(true);
+  const [taskMeetingFilter, setTaskMeetingFilter] = useState('all');
   const [activeTaskModal, setActiveTaskModal] = useState(null);
   const [uploadedFile, setUploadedFile] = useState(null);
   const [externalUrlInput, setExternalUrlInput] = useState('');
@@ -260,6 +280,12 @@ export default function ClassDetailView({
   const [isUploading, setIsUploading] = useState(false);
   const [taskFeedback, setTaskFeedback] = useState(null);
   const [withdrawConfirmTaskId, setWithdrawConfirmTaskId] = useState(null);
+
+  const currentMeetingNo = Number(selectedMeeting?.order || 1);
+
+  useEffect(() => {
+    meetingNoRef.current = currentMeetingNo;
+  }, [currentMeetingNo]);
 
   useEffect(() => {
     classIdRef.current = classData?.id || 'subj_pbo';
@@ -285,19 +311,30 @@ export default function ClassDetailView({
       setTasksLoading(true);
       try {
         if (currentUser && classData?.id) {
-          const [taskRes, attempt] = await Promise.all([
+          const [taskRes, attempts, progressList] = await Promise.all([
             fetchAssignmentsWithUserSubmissions({ classId: classData.id }),
-            fetchClassExamAttempt(classData.id, currentUser.uid),
+            fetchUserClassExamAttempts(classData.id, currentUser.uid),
+            fetchLearningProgressByClass(classData.id, currentUser.uid),
           ]);
           if (!mounted) return;
           setTaskSubmissions(taskRes.assignments || []);
-          setLastAttempt(attempt);
+          setUserExamAttempts(attempts || []);
+          const nextMap = {};
+          (progressList || []).forEach((item) => {
+            const mNo = Number(item.meetingNo || 1);
+            nextMap[mNo] = {
+              materialCompleted: Boolean(item.materialCompleted),
+              videoCompleted: Boolean(item.videoCompleted),
+            };
+          });
+          setLearningProgressMap(nextMap);
         } else {
           if (!mounted) return;
           setTaskSubmissions([
             {
               id: `demo_${classData?.id || 'subj_pbo'}_task01`,
               classId: classData?.id || 'subj_pbo',
+              meetingNo: 1,
               title: `Tugas Praktikum 01: ${classData?.name || 'Modul Kelas'}`,
               deadline: '20 Nov 2026, 23:59 WIB',
               isOverdue: false,
@@ -308,7 +345,8 @@ export default function ClassDetailView({
               allowedFormats: '.pdf, .zip, .docx',
             },
           ]);
-          setLastAttempt(null);
+          setUserExamAttempts([]);
+          setLearningProgressMap({});
         }
       } finally {
         if (mounted) setTasksLoading(false);
@@ -400,13 +438,147 @@ export default function ClassDetailView({
 
   const examQuestions = EXAM_QUESTIONS;
 
+  const getMeetingCycleStatus = useCallback(
+    (mNo) => {
+      const targetNo = Number(mNo || 1);
+      const progress = learningProgressMap[targetNo] || {
+        materialCompleted: false,
+        videoCompleted: false,
+      };
+      const pretestAttempt =
+        userExamAttempts.find(
+          (a) =>
+            Number(a.meetingNo || 1) === targetNo &&
+            a.examType === 'pretest' &&
+            (a.status === 'submitted' || typeof a.score === 'number')
+        ) || null;
+      const posttestAttempt =
+        userExamAttempts.find(
+          (a) =>
+            Number(a.meetingNo || 1) === targetNo &&
+            a.examType === 'posttest' &&
+            (a.status === 'submitted' || typeof a.score === 'number')
+        ) || null;
+      const meetingTasks = taskSubmissions.filter(
+        (task) => Number(task.meetingNo || 1) === targetNo
+      );
+      const hasTasks = meetingTasks.length > 0;
+      const tasksCompletedCount = meetingTasks.filter((t) => t.status === 'submitted').length;
+      const tasksAllDone = hasTasks && tasksCompletedCount === meetingTasks.length;
+
+      const pretestDone = Boolean(pretestAttempt);
+      const posttestDone = Boolean(posttestAttempt);
+      const materialDone = Boolean(progress.materialCompleted);
+      const videoDone = Boolean(progress.videoCompleted);
+      const canStartPosttest = pretestDone && materialDone && videoDone;
+      const gainDelta =
+        pretestDone &&
+        posttestDone &&
+        typeof pretestAttempt?.score === 'number' &&
+        typeof posttestAttempt?.score === 'number'
+          ? posttestAttempt.score - pretestAttempt.score
+          : null;
+
+      return {
+        meetingNo: targetNo,
+        materialDone,
+        videoDone,
+        pretestDone,
+        posttestDone,
+        pretestAttempt,
+        posttestAttempt,
+        hasTasks,
+        meetingTasks,
+        tasksCompletedCount,
+        tasksAllDone,
+        canStartPosttest,
+        gainDelta,
+      };
+    },
+    [learningProgressMap, taskSubmissions, userExamAttempts]
+  );
+
+  const activeCycle = getMeetingCycleStatus(currentMeetingNo);
+
+  const upsertLocalAttempt = (attemptObj) => {
+    setUserExamAttempts((prev) => {
+      const filtered = prev.filter(
+        (a) =>
+          !(
+            Number(a.meetingNo || 1) === Number(attemptObj.meetingNo || 1) &&
+            a.examType === attemptObj.examType
+          )
+      );
+      return [attemptObj, ...filtered];
+    });
+  };
+
+  const handleMarkProgress = async (field) => {
+    if (isEducatorOrAdmin || progressSaving) return;
+    const targetNo = currentMeetingNo;
+    const targetClassId = classData?.id || 'subj_pbo';
+    setProgressSaving(true);
+    setProgressFeedback(null);
+
+    setLearningProgressMap((prev) => ({
+      ...prev,
+      [targetNo]: {
+        materialCompleted: Boolean(prev[targetNo]?.materialCompleted),
+        videoCompleted: Boolean(prev[targetNo]?.videoCompleted),
+        [field]: true,
+      },
+    }));
+
+    try {
+      if (currentUser) {
+        await upsertLearningProgress({
+          classId: targetClassId,
+          meetingNo: targetNo,
+          [field]: true,
+        });
+      }
+      setProgressFeedback({
+        type: 'success',
+        text:
+          field === 'materialCompleted'
+            ? language === 'en'
+              ? `Meeting ${targetNo} reading material marked completed.`
+              : `Materi Pertemuan ${targetNo} berhasil ditandai selesai.`
+            : language === 'en'
+            ? `Meeting ${targetNo} video marked completed.`
+            : `Video Pertemuan ${targetNo} berhasil ditandai selesai.`,
+      });
+    } catch (err) {
+      setProgressFeedback({
+        type: 'error',
+        text: err.message || 'Gagal menyimpan progres belajar ke Firestore.',
+      });
+    } finally {
+      setProgressSaving(false);
+    }
+  };
+
   const submitExamToServer = async (answersToGrade, typeToGrade) => {
     examEndTimeRef.current = null;
     const targetClassId = classIdRef.current;
+    const targetMeetingNo = meetingNoRef.current || 1;
 
     if (!auth?.currentUser) {
       const demoScore = computeLocalDevScore(answersToGrade);
-      setLocalExamSession({ classId: targetClassId, examType: typeToGrade, active: false });
+      setLocalExamSession({
+        classId: targetClassId,
+        meetingNo: targetMeetingNo,
+        examType: typeToGrade,
+        active: false,
+      });
+      upsertLocalAttempt({
+        id: `${targetClassId}_m${targetMeetingNo}_${typeToGrade}_demo`,
+        classId: targetClassId,
+        meetingNo: targetMeetingNo,
+        examType: typeToGrade,
+        score: demoScore,
+        status: 'submitted',
+      });
       setExamScore(demoScore);
       setExamNote(
         language === 'en'
@@ -433,6 +605,7 @@ export default function ClassDetailView({
         body: JSON.stringify({
           action: 'submit',
           classId: targetClassId,
+          meetingNo: targetMeetingNo,
           examType: typeToGrade,
           answers: answersToGrade,
         }),
@@ -444,16 +617,38 @@ export default function ClassDetailView({
         if (!res.ok) {
           throw new Error(data.error || 'Gagal menilai lembar evaluasi di server.');
         }
-        setLocalExamSession({ classId: targetClassId, examType: typeToGrade, active: false });
+        setLocalExamSession({
+          classId: targetClassId,
+          meetingNo: targetMeetingNo,
+          examType: typeToGrade,
+          active: false,
+        });
         setExamScore(data.score);
-        setLastAttempt(data);
+        upsertLocalAttempt({
+          ...data,
+          meetingNo: data.meetingNo || targetMeetingNo,
+          examType: data.examType || typeToGrade,
+        });
         setExamFinished(true);
         setExamActive(false);
         return;
       }
 
       const devScore = computeLocalDevScore(answersToGrade);
-      setLocalExamSession({ classId: targetClassId, examType: typeToGrade, active: false });
+      setLocalExamSession({
+        classId: targetClassId,
+        meetingNo: targetMeetingNo,
+        examType: typeToGrade,
+        active: false,
+      });
+      upsertLocalAttempt({
+        id: `${targetClassId}_m${targetMeetingNo}_${typeToGrade}_local`,
+        classId: targetClassId,
+        meetingNo: targetMeetingNo,
+        examType: typeToGrade,
+        score: devScore,
+        status: 'submitted',
+      });
       setExamScore(devScore);
       setExamNote(
         language === 'en'
@@ -505,7 +700,27 @@ export default function ClassDetailView({
   }, [examActive, examFinished]);
 
   const handleStartExam = async (type) => {
+    const cycle = getMeetingCycleStatus(currentMeetingNo);
+    if (type === 'pretest' && cycle.pretestDone) {
+      setExamError(
+        language === 'en'
+          ? 'Pretest for this meeting is already completed and locked as your diagnostic baseline.'
+          : 'Pretest pertemuan ini sudah selesai dan dikunci sebagai skor baseline.'
+      );
+      return;
+    }
+    if (type === 'posttest' && !cycle.canStartPosttest) {
+      setExamError(
+        language === 'en'
+          ? 'Complete Pretest, Reading Material, and Video for this meeting to unlock Posttest.'
+          : 'Selesaikan Pretest, Materi, dan Video pertemuan ini untuk membuka Post-test.'
+      );
+      return;
+    }
+
     const targetClassId = classData?.id || 'subj_pbo';
+    const targetMeetingNo = currentMeetingNo;
+    meetingNoRef.current = targetMeetingNo;
     examEndTimeRef.current = Date.now() + 900 * 1000;
     selectedAnswersRef.current = {};
     examTypeRef.current = type;
@@ -522,6 +737,7 @@ export default function ClassDetailView({
 
     setLocalExamSession({
       classId: targetClassId,
+      meetingNo: targetMeetingNo,
       examType: type,
       active: true,
       durationMs: 900 * 1000,
@@ -539,6 +755,7 @@ export default function ClassDetailView({
           body: JSON.stringify({
             action: 'start',
             classId: targetClassId,
+            meetingNo: targetMeetingNo,
             examType: type,
           }),
         });
@@ -664,6 +881,7 @@ export default function ClassDetailView({
         const saved = await submitAssignmentToFirestore({
           assignmentId: activeTaskModal.id,
           classId: classData?.id || activeTaskModal.classId || '',
+          meetingNo: Number(activeTaskModal.meetingNo || currentMeetingNo || 1),
           assignmentTitle: activeTaskModal.title,
           className: classData?.name || classData?.title || '',
           studentName: userProfile?.displayName || currentUser.displayName || 'Mahasiswa',
@@ -741,6 +959,49 @@ export default function ClassDetailView({
       });
     } finally {
       setWithdrawConfirmTaskId(null);
+    }
+  };
+
+  const handleCreateMeetingTask = async (e) => {
+    e.preventDefault();
+    if (!isEducatorOrAdmin || creatingTask) return;
+    if (!newTaskTitle.trim()) {
+      setCreateTaskNotice({
+        type: 'error',
+        text: language === 'en' ? 'Task title is required.' : 'Judul tugas wajib diisi.',
+      });
+      return;
+    }
+
+    setCreatingTask(true);
+    setCreateTaskNotice(null);
+    try {
+      const created = await createAssignmentInFirestore({
+        classId: classData?.id || 'subj_pbo',
+        meetingNo: Number(newTaskMeetingNo || 1),
+        title: newTaskTitle.trim(),
+        subject: classData?.name || classData?.title || 'Mata Kuliah Smartsa',
+        subjectCode: classData?.code || 'CLS',
+        deadline: newTaskDeadline,
+        note: newTaskNote.trim(),
+      });
+      setTaskSubmissions((prev) => [created, ...prev]);
+      setNewTaskTitle('');
+      setNewTaskNote('');
+      setCreateTaskNotice({
+        type: 'success',
+        text:
+          language === 'en'
+            ? `Task "${created.title}" published for Meeting ${created.meetingNo}.`
+            : `Tugas "${created.title}" berhasil diterbitkan untuk Pertemuan ${created.meetingNo}.`,
+      });
+    } catch (err) {
+      setCreateTaskNotice({
+        type: 'error',
+        text: err.message || 'Gagal menerbitkan tugas pertemuan.',
+      });
+    } finally {
+      setCreatingTask(false);
     }
   };
 
@@ -944,6 +1205,11 @@ export default function ClassDetailView({
           icon: KeyRound,
           label: language === 'en' ? 'EVAL KEYS & STATS' : 'KUNCI & STATISTIK',
         },
+        {
+          id: 'discussion',
+          icon: MessageSquare,
+          label: language === 'en' ? 'DISCUSSION' : 'DISKUSI',
+        },
       ]
     : [
         { id: 'meetings', icon: BookOpen, label: language === 'en' ? 'SYLLABUS' : 'SILABUS' },
@@ -960,6 +1226,11 @@ export default function ClassDetailView({
           id: 'tasks',
           icon: Upload,
           label: language === 'en' ? 'TASKS SUBMISSION' : 'PENGUMPULAN TUGAS FILE',
+        },
+        {
+          id: 'discussion',
+          icon: MessageSquare,
+          label: language === 'en' ? 'DISCUSSION' : 'DISKUSI',
         },
       ];
 
@@ -1061,6 +1332,110 @@ export default function ClassDetailView({
           </div>
         )}
       </div>
+
+      {/* PER-MEETING LEARNING CYCLE STEPPER (Active Student View) */}
+      {!isPreviewMode && !isEducatorOrAdmin && (
+        <div className="bg-white dark:bg-[#121822] p-4 rounded-xl border border-slate-200 dark:border-[#232f42] space-y-3 shadow-xs">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="min-w-0">
+              <span className="text-[10px] font-mono font-bold text-sky-700 dark:text-[#00e5ff] uppercase tracking-wider block">
+                // {language === 'en' ? 'LEARNING CYCLE' : 'SIKLUS BELAJAR PERTEMUAN'} {currentMeetingNo < 10 ? `0${currentMeetingNo}` : currentMeetingNo}
+              </span>
+              <p className="text-xs font-bold text-slate-900 dark:text-slate-100 truncate">
+                {selectedMeeting?.title || `Pertemuan ${currentMeetingNo}`}
+              </p>
+            </div>
+            <div className="flex items-center gap-2 font-mono">
+              <select
+                aria-label={language === 'en' ? 'Select active meeting' : 'Pilih pertemuan aktif'}
+                value={currentMeetingNo}
+                onChange={(e) => {
+                  const target = meetingsList.find((m) => Number(m.order) === Number(e.target.value));
+                  if (target) setSelectedMeeting(target);
+                }}
+                className="px-2.5 py-1 text-[11px] rounded border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-[#0a0f18] text-slate-800 dark:text-slate-200"
+              >
+                {meetingsList.map((m) => (
+                  <option key={m.id} value={m.order} disabled={!isEducatorOrAdmin && m.status === 'locked'}>
+                    P{m.order < 10 ? `0${m.order}` : m.order}: {m.title}
+                  </option>
+                ))}
+              </select>
+              {activeCycle.gainDelta !== null && (
+                <span className="text-[10px] font-bold px-2 py-1 rounded bg-emerald-50 dark:bg-emerald-950/60 text-emerald-700 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-500/40 flex items-center gap-1">
+                  <TrendingUp className="w-3 h-3" />
+                  Δ {activeCycle.gainDelta >= 0 ? `+${activeCycle.gainDelta}` : activeCycle.gainDelta}
+                </span>
+              )}
+            </div>
+          </div>
+
+          <div className="grid grid-cols-2 sm:grid-cols-5 gap-2 font-mono text-[10px]">
+            {[
+              {
+                key: 'pretest',
+                step: '1. PRETEST',
+                done: activeCycle.pretestDone,
+                sub: activeCycle.pretestDone ? `Skor ${activeCycle.pretestAttempt?.score}` : 'Diagnostik Awal',
+                tab: 'exam',
+              },
+              {
+                key: 'material',
+                step: '2. MATERI',
+                done: activeCycle.materialDone,
+                sub: activeCycle.materialDone ? 'Selesai Dibaca' : 'Baca Modul',
+                tab: 'material',
+              },
+              {
+                key: 'video',
+                step: '3. VIDEO',
+                done: activeCycle.videoDone,
+                sub: activeCycle.videoDone ? 'Selesai Ditonton' : 'Tonton Video',
+                tab: 'video',
+              },
+              {
+                key: 'tasks',
+                step: '4. TUGAS',
+                done: activeCycle.tasksAllDone,
+                sub: activeCycle.hasTasks
+                  ? `${activeCycle.tasksCompletedCount}/${activeCycle.meetingTasks.length} Selesai`
+                  : 'Opsional / Praktik',
+                tab: 'tasks',
+              },
+              {
+                key: 'posttest',
+                step: '5. POST-TEST + DISKUSI',
+                done: activeCycle.posttestDone,
+                sub: activeCycle.posttestDone
+                  ? `Skor ${activeCycle.posttestAttempt?.score}`
+                  : activeCycle.canStartPosttest
+                    ? 'Siap Dikerjakan'
+                    : 'Terkunci',
+                tab: activeCycle.posttestDone ? 'discussion' : 'exam',
+              },
+            ].map((item) => (
+              <button
+                key={item.key}
+                type="button"
+                onClick={() => setActiveTab(item.tab)}
+                className={`p-2.5 rounded-lg border text-left transition ${
+                  item.done
+                    ? 'bg-emerald-50/80 dark:bg-emerald-950/30 border-emerald-300 dark:border-emerald-500/40 text-emerald-800 dark:text-emerald-300'
+                    : activeTab === item.tab
+                      ? 'bg-amber-50 dark:bg-[#172133] border-amber-400 dark:border-[#f59e0b]/60 text-amber-800 dark:text-[#f59e0b]'
+                      : 'bg-slate-50 dark:bg-[#0a0f18] border-slate-200 dark:border-[#1e2a3f] text-slate-700 dark:text-slate-300 hover:border-slate-300'
+                }`}
+              >
+                <div className="flex items-center justify-between gap-1 font-bold">
+                  <span>{item.step}</span>
+                  <span>{item.done ? '✓' : '○'}</span>
+                </div>
+                <span className="text-[9px] opacity-80 block mt-0.5 truncate">{item.sub}</span>
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
 
       {/* SYLLABUS PREVIEW MODE (Signed-in Student NOT Enrolled) */}
       {isPreviewMode && (
@@ -1267,19 +1642,41 @@ export default function ClassDetailView({
                       )}
 
                       {!isEducatorOrAdmin ? (
-                        <div className="flex flex-wrap items-center gap-1.5 mt-2 font-mono">
-                          <span className="text-[9px] bg-white dark:bg-[#0d1421] border border-slate-200 dark:border-[#212f45] px-1.5 py-0.5 rounded-xs text-slate-700 dark:text-slate-300">
-                            {meet.pretestDone ? '✓ PRETEST SELESAI' : '✕ PRETEST BELUM'}
-                          </span>
-                          <span className="text-[9px] bg-white dark:bg-[#0d1421] border border-slate-200 dark:border-[#212f45] px-1.5 py-0.5 rounded-xs text-slate-700 dark:text-slate-300">
-                            {meet.posttestDone ? '✓ POST-TEST SELESAI' : '✕ POST-TEST BELUM'}
-                          </span>
-                          {meet.score && (
-                            <span className="text-[9px] bg-emerald-50 dark:bg-emerald-950/60 border border-emerald-200 dark:border-emerald-500/40 text-emerald-700 dark:text-emerald-300 font-bold px-1.5 py-0.5 rounded-xs">
-                              SKOR: {meet.score}
-                            </span>
-                          )}
-                        </div>
+                        (() => {
+                          const cycle = getMeetingCycleStatus(meet.order);
+                          return (
+                            <div className="flex flex-wrap items-center gap-1.5 mt-2 font-mono">
+                              <span className="text-[9px] bg-white dark:bg-[#0d1421] border border-slate-200 dark:border-[#212f45] px-1.5 py-0.5 rounded-xs text-slate-700 dark:text-slate-300">
+                                {cycle.pretestDone
+                                  ? `✓ PRETEST (${cycle.pretestAttempt?.score ?? '-'})`
+                                  : '✕ PRETEST'}
+                              </span>
+                              <span className="text-[9px] bg-white dark:bg-[#0d1421] border border-slate-200 dark:border-[#212f45] px-1.5 py-0.5 rounded-xs text-slate-700 dark:text-slate-300">
+                                {cycle.materialDone ? '✓ MATERI' : '○ MATERI'}
+                              </span>
+                              <span className="text-[9px] bg-white dark:bg-[#0d1421] border border-slate-200 dark:border-[#212f45] px-1.5 py-0.5 rounded-xs text-slate-700 dark:text-slate-300">
+                                {cycle.videoDone ? '✓ VIDEO' : '○ VIDEO'}
+                              </span>
+                              {cycle.hasTasks && (
+                                <span className="text-[9px] bg-white dark:bg-[#0d1421] border border-slate-200 dark:border-[#212f45] px-1.5 py-0.5 rounded-xs text-slate-700 dark:text-slate-300">
+                                  {cycle.tasksAllDone
+                                    ? '✓ TUGAS'
+                                    : `○ TUGAS (${cycle.tasksCompletedCount}/${cycle.meetingTasks.length})`}
+                                </span>
+                              )}
+                              <span className="text-[9px] bg-white dark:bg-[#0d1421] border border-slate-200 dark:border-[#212f45] px-1.5 py-0.5 rounded-xs text-slate-700 dark:text-slate-300">
+                                {cycle.posttestDone
+                                  ? `✓ POST-TEST (${cycle.posttestAttempt?.score ?? '-'})`
+                                  : '✕ POST-TEST'}
+                              </span>
+                              {cycle.gainDelta !== null && (
+                                <span className="text-[9px] bg-emerald-50 dark:bg-emerald-950/60 border border-emerald-200 dark:border-emerald-500/40 text-emerald-700 dark:text-emerald-300 font-bold px-1.5 py-0.5 rounded-xs">
+                                  GAIN Δ: {cycle.gainDelta >= 0 ? `+${cycle.gainDelta}` : cycle.gainDelta}
+                                </span>
+                              )}
+                            </div>
+                          );
+                        })()
                       ) : (
                         <div className="flex flex-wrap items-center gap-1.5 mt-2 font-mono">
                           <span
@@ -1388,6 +1785,52 @@ export default function ClassDetailView({
             delta={selectedMeeting?.deltaContent || classData?.deltaContent}
             fallbackText={classData?.description || ''}
           />
+
+          {!isEducatorOrAdmin && (
+            <div className="pt-4 border-t border-slate-200 dark:border-[#1b263b] flex flex-wrap items-center justify-between gap-3 font-mono">
+              <div className="text-[11px] text-slate-600 dark:text-slate-400">
+                {activeCycle.materialDone
+                  ? language === 'en'
+                    ? `Reading material for Meeting ${currentMeetingNo} is completed.`
+                    : `Materi Pertemuan ${currentMeetingNo} telah selesai dipelajari.`
+                  : language === 'en'
+                    ? `Mark this reading material completed to progress toward Post-test.`
+                    : `Tandai materi selesai setelah membaca untuk membuka syarat Post-test.`}
+              </div>
+              <button
+                type="button"
+                onClick={() => void handleMarkProgress('materialCompleted')}
+                disabled={progressSaving || activeCycle.materialDone}
+                className={`text-xs font-bold px-4 py-2 rounded-xs transition flex items-center gap-1.5 ${
+                  activeCycle.materialDone
+                    ? 'bg-emerald-50 dark:bg-emerald-950/50 text-emerald-700 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-500/40 cursor-default'
+                    : 'bg-[#f59e0b] hover:bg-[#d97706] text-black shadow-md disabled:opacity-50'
+                }`}
+              >
+                <CheckCircle2 className="w-4 h-4" />
+                {activeCycle.materialDone
+                  ? language === 'en'
+                    ? 'Material Completed'
+                    : 'Materi Selesai ✓'
+                  : language === 'en'
+                    ? 'Mark Material Completed'
+                    : 'Tandai Materi Selesai'}
+              </button>
+            </div>
+          )}
+
+          {progressFeedback && (
+            <div
+              className={`p-3 rounded-lg text-xs font-mono flex items-center gap-2 border ${
+                progressFeedback.type === 'success'
+                  ? 'bg-emerald-50 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-300 border-emerald-200 dark:border-emerald-500/40'
+                  : 'bg-rose-50 dark:bg-rose-950/40 text-rose-700 dark:text-rose-300 border-rose-200 dark:border-rose-500/40'
+              }`}
+            >
+              <CheckCircle2 className="w-4 h-4 shrink-0" />
+              <span>{progressFeedback.text}</span>
+            </div>
+          )}
         </div>
       )}
 
@@ -1396,7 +1839,7 @@ export default function ClassDetailView({
         <div className="bg-white dark:bg-[#121822] p-5 rounded-xl border border-slate-200 dark:border-[#232f42] space-y-4">
           <div className="flex items-center justify-between border-b border-slate-200 dark:border-[#1b263b] pb-3">
             <h3 className="text-xs font-mono font-bold text-amber-700 dark:text-[#f59e0b] uppercase tracking-wider">
-              // VIDEO STREAM PLAYER
+              // VIDEO STREAM PLAYER — PERTEMUAN {currentMeetingNo < 10 ? `0${currentMeetingNo}` : currentMeetingNo}
             </h3>
             <span className="text-[10px] font-mono text-sky-700 dark:text-[#00e5ff]">
               {videoSource?.kind === 'iframe' ? 'EMBEDDED STREAM' : 'HTML5 MEDIA PLAYER'}
@@ -1420,6 +1863,11 @@ export default function ClassDetailView({
                   controls
                   poster={classData?.coverImage}
                   src={videoSource.src}
+                  onEnded={() => {
+                    if (!isEducatorOrAdmin && !activeCycle.videoDone) {
+                      void handleMarkProgress('videoCompleted');
+                    }
+                  }}
                   className="w-full h-full object-contain"
                 />
               </div>
@@ -1431,6 +1879,11 @@ export default function ClassDetailView({
                 autoPlay
                 poster={classData?.coverImage}
                 src="https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerBlazes.mp4"
+                onEnded={() => {
+                  if (!isEducatorOrAdmin && !activeCycle.videoDone) {
+                    void handleMarkProgress('videoCompleted');
+                  }
+                }}
                 className="w-full h-full object-contain"
               />
             </div>
@@ -1454,6 +1907,39 @@ export default function ClassDetailView({
                     : 'Klik tombol putar untuk memuat pemutar video HTML5'}
                 </p>
               </div>
+            </div>
+          )}
+
+          {!isEducatorOrAdmin && (
+            <div className="pt-3 border-t border-slate-200 dark:border-[#1b263b] flex flex-wrap items-center justify-between gap-3 font-mono">
+              <div className="text-[11px] text-slate-600 dark:text-slate-400">
+                {activeCycle.videoDone
+                  ? language === 'en'
+                    ? `Video for Meeting ${currentMeetingNo} is completed.`
+                    : `Video Pertemuan ${currentMeetingNo} telah ditandai selesai.`
+                  : language === 'en'
+                    ? 'Watch the video until the end or click the button to mark it completed.'
+                    : 'Tonton video hingga selesai atau klik tombol di kanan untuk menandai selesai.'}
+              </div>
+              <button
+                type="button"
+                onClick={() => void handleMarkProgress('videoCompleted')}
+                disabled={progressSaving || activeCycle.videoDone}
+                className={`text-xs font-bold px-4 py-2 rounded-xs transition flex items-center gap-1.5 ${
+                  activeCycle.videoDone
+                    ? 'bg-emerald-50 dark:bg-emerald-950/50 text-emerald-700 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-500/40 cursor-default'
+                    : 'bg-[#f59e0b] hover:bg-[#d97706] text-black shadow-md disabled:opacity-50'
+                }`}
+              >
+                <CheckCircle2 className="w-4 h-4" />
+                {activeCycle.videoDone
+                  ? language === 'en'
+                    ? 'Video Completed'
+                    : 'Video Selesai ✓'
+                  : language === 'en'
+                    ? 'Mark Video Completed'
+                    : 'Tandai Video Selesai'}
+              </button>
             </div>
           )}
         </div>
@@ -1535,6 +2021,9 @@ export default function ClassDetailView({
               <div className="w-12 h-12 rounded-xs bg-rose-50 dark:bg-rose-950/40 border border-rose-200 dark:border-rose-500/40 text-rose-600 dark:text-rose-400 flex items-center justify-center mx-auto">
                 <HelpCircle className="w-6 h-6" />
               </div>
+              <span className="text-[10px] font-bold text-sky-700 dark:text-[#00e5ff] bg-sky-50 dark:bg-[#00e5ff]/10 border border-sky-200 dark:border-[#00e5ff]/30 px-2.5 py-0.5 rounded-xs inline-block">
+                PERTEMUAN {currentMeetingNo < 10 ? `0${currentMeetingNo}` : currentMeetingNo}
+              </span>
               <h3 className="text-base font-bold text-slate-900 dark:text-slate-100">
                 // {language === 'en' ? 'COMPETENCY EVALUATION SESSION' : 'SESI EVALUASI KOMPETENSI'}
               </h3>
@@ -1550,27 +2039,99 @@ export default function ClassDetailView({
                 </strong>
               </p>
 
-              {lastAttempt && typeof lastAttempt.score === 'number' && (
-                <div className="p-3 rounded-lg bg-emerald-50 dark:bg-[#090d16] border border-emerald-200 dark:border-emerald-500/30 text-xs text-emerald-700 dark:text-emerald-300">
-                  {language === 'en' ? 'Last Attempt' : 'Riwayat Terakhir'} (
-                  {lastAttempt.examType?.toUpperCase() || 'UJIAN'}):{' '}
-                  <strong>{lastAttempt.score} / 100</strong>
+              {/* Pretest vs Posttest Learning Gain Card */}
+              <div className="p-3.5 rounded-xl bg-slate-50 dark:bg-[#090d16] border border-slate-200 dark:border-[#1e2a3f] text-left space-y-2.5">
+                <div className="flex items-center justify-between text-[10px] font-bold text-slate-500 dark:text-slate-400 uppercase">
+                  <span>// PRETEST VS POSTTEST GAIN (PERTEMUAN {currentMeetingNo})</span>
+                  <TrendingUp className="w-3.5 h-3.5 text-emerald-500" />
+                </div>
+                <div className="grid grid-cols-3 gap-2 text-center">
+                  <div className="p-2 rounded bg-white dark:bg-[#121822] border border-slate-200 dark:border-[#212f45]">
+                    <span className="text-[9px] text-slate-500 block">PRETEST BASELINE</span>
+                    <span className="text-sm font-black text-amber-600 dark:text-[#f59e0b]">
+                      {activeCycle.pretestDone ? `${activeCycle.pretestAttempt?.score ?? '-'}` : '—'}
+                    </span>
+                  </div>
+                  <div className="p-2 rounded bg-white dark:bg-[#121822] border border-slate-200 dark:border-[#212f45]">
+                    <span className="text-[9px] text-slate-500 block">POST-TEST</span>
+                    <span className="text-sm font-black text-sky-600 dark:text-[#00e5ff]">
+                      {activeCycle.posttestDone ? `${activeCycle.posttestAttempt?.score ?? '-'}` : '—'}
+                    </span>
+                  </div>
+                  <div className="p-2 rounded bg-white dark:bg-[#121822] border border-slate-200 dark:border-[#212f45]">
+                    <span className="text-[9px] text-slate-500 block">GAIN (Δ)</span>
+                    <span
+                      className={`text-sm font-black ${
+                        activeCycle.gainDelta !== null && activeCycle.gainDelta >= 0
+                          ? 'text-emerald-600 dark:text-emerald-400'
+                          : 'text-rose-600 dark:text-rose-400'
+                      }`}
+                    >
+                      {activeCycle.gainDelta !== null
+                        ? activeCycle.gainDelta >= 0
+                          ? `+${activeCycle.gainDelta}`
+                          : activeCycle.gainDelta
+                        : '—'}
+                    </span>
+                  </div>
+                </div>
+
+                {!activeCycle.canStartPosttest && (
+                  <div className="pt-2 border-t border-slate-200 dark:border-[#1b263b] text-[10px] text-slate-600 dark:text-slate-400 space-y-1">
+                    <span className="font-bold block text-amber-700 dark:text-[#f59e0b]">
+                      SYARAT MEMBUKA POST-TEST:
+                    </span>
+                    <div className="flex flex-wrap gap-2">
+                      <span>{activeCycle.pretestDone ? '✓' : '○'} Pretest</span>
+                      <span>{activeCycle.materialDone ? '✓' : '○'} Materi</span>
+                      <span>{activeCycle.videoDone ? '✓' : '○'} Video</span>
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              {examError && (
+                <div className="p-3 bg-rose-50 dark:bg-rose-950/50 border border-rose-200 dark:border-rose-500/40 text-rose-700 dark:text-rose-300 rounded-xs text-xs flex items-center gap-2 text-left">
+                  <AlertTriangle className="w-4 h-4 text-rose-500 shrink-0" />
+                  <span>{examError}</span>
                 </div>
               )}
 
-              <div className="flex justify-center gap-2.5 pt-2">
+              <div className="flex flex-wrap justify-center gap-2.5 pt-2">
                 <button
                   type="button"
                   onClick={() => handleStartExam('pretest')}
-                  className="bg-[#f59e0b] hover:bg-[#d97706] text-black text-xs font-bold px-4 py-2 rounded-xs shadow-md transition"
+                  disabled={activeCycle.pretestDone}
+                  className={`text-xs font-bold px-4 py-2 rounded-xs shadow-md transition flex items-center gap-1.5 ${
+                    activeCycle.pretestDone
+                      ? 'bg-slate-200 dark:bg-slate-800 text-slate-500 dark:text-slate-400 cursor-not-allowed'
+                      : 'bg-[#f59e0b] hover:bg-[#d97706] text-black'
+                  }`}
                 >
-                  {language === 'en' ? 'START PRETEST' : 'MULAI PRETEST'}
+                  {activeCycle.pretestDone ? (
+                    <>
+                      <Lock className="w-3.5 h-3.5" />
+                      {language === 'en'
+                        ? `PRETEST LOCKED (${activeCycle.pretestAttempt?.score})`
+                        : `PRETEST SELESAI (BASELINE: ${activeCycle.pretestAttempt?.score})`}
+                    </>
+                  ) : language === 'en' ? (
+                    'START PRETEST'
+                  ) : (
+                    'MULAI PRETEST'
+                  )}
                 </button>
                 <button
                   type="button"
                   onClick={() => handleStartExam('posttest')}
-                  className="bg-sky-600 dark:bg-[#00e5ff] hover:bg-sky-500 dark:hover:bg-[#33ebff] text-white dark:text-black text-xs font-bold px-4 py-2 rounded-xs shadow-md transition"
+                  disabled={!activeCycle.canStartPosttest}
+                  className={`text-xs font-bold px-4 py-2 rounded-xs shadow-md transition flex items-center gap-1.5 ${
+                    activeCycle.canStartPosttest
+                      ? 'bg-sky-600 dark:bg-[#00e5ff] hover:bg-sky-500 dark:hover:bg-[#33ebff] text-white dark:text-black'
+                      : 'bg-slate-200 dark:bg-slate-800 text-slate-500 dark:text-slate-400 cursor-not-allowed'
+                  }`}
                 >
+                  {!activeCycle.canStartPosttest && <Lock className="w-3.5 h-3.5" />}
                   {language === 'en' ? 'START POST-TEST' : 'MULAI POST-TEST'}
                 </button>
               </div>
@@ -1714,7 +2275,7 @@ export default function ClassDetailView({
       {/* TAB: Task Submissions (Student) */}
       {!isPreviewMode && !isEducatorOrAdmin && activeTab === 'tasks' && (
         <div className="bg-white dark:bg-[#121822] p-5 rounded-xl border border-slate-200 dark:border-[#232f42] space-y-4">
-          <div className="flex items-center justify-between border-b border-slate-200 dark:border-[#1b263b] pb-3">
+          <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-200 dark:border-[#1b263b] pb-3">
             <div>
               <h3 className="text-xs font-mono font-bold text-amber-700 dark:text-[#f59e0b] uppercase tracking-wider">
                 // PENGUMPULAN TUGAS FILE MODUL
@@ -1725,44 +2286,75 @@ export default function ClassDetailView({
                   : 'Kumpulkan laporan praktikum via Cloudinary CDN atau tautan URL eksternal ke Firestore.'}
               </p>
             </div>
-            <span className="text-[10px] font-mono font-bold text-sky-700 dark:text-[#00e5ff] bg-sky-50 dark:bg-[#00e5ff]/10 border border-sky-200 dark:border-[#00e5ff]/30 px-2 py-0.5 rounded-xs">
-              PORTAL TUGAS
-            </span>
+            <div className="flex items-center gap-2 font-mono">
+              <select
+                aria-label={language === 'en' ? 'Filter tasks by meeting' : 'Filter tugas per pertemuan'}
+                value={taskMeetingFilter}
+                onChange={(e) => setTaskMeetingFilter(e.target.value)}
+                className="px-2.5 py-1 text-[10px] rounded border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-[#0a0f18] text-slate-800 dark:text-slate-200"
+              >
+                <option value="all">Semua Pertemuan</option>
+                <option value={String(currentMeetingNo)}>
+                  Pertemuan Aktif (P{currentMeetingNo})
+                </option>
+                {meetingsList.map((m) => (
+                  <option key={m.id} value={String(m.order)}>
+                    Pertemuan {m.order}
+                  </option>
+                ))}
+              </select>
+              <span className="text-[10px] font-bold text-sky-700 dark:text-[#00e5ff] bg-sky-50 dark:bg-[#00e5ff]/10 border border-sky-200 dark:border-[#00e5ff]/30 px-2 py-0.5 rounded-xs">
+                PORTAL TUGAS
+              </span>
+            </div>
           </div>
 
           {tasksLoading ? (
             <div className="py-8 text-center text-xs font-mono text-slate-400">
               Memuat tugas kelas dari Cloud Firestore...
             </div>
-          ) : taskSubmissions.length === 0 ? (
-            <div className="py-8 text-center bg-slate-50 dark:bg-[#0a0f18] rounded-xl border border-dashed border-slate-200 dark:border-[#232f42] text-xs text-slate-500 dark:text-slate-400">
-              Belum ada tugas yang diterbitkan untuk kelas ini di Firestore.
-            </div>
-          ) : (
-            <div className="space-y-3">
-              {taskSubmissions.map((task) => {
-                const isDone = task.status === 'submitted';
-                return (
-                  <div
-                    key={task.id}
-                    className={`p-4 rounded-xl border transition-all ${
-                      isDone
-                        ? 'bg-emerald-50/70 dark:bg-emerald-950/20 border-emerald-200 dark:border-emerald-500/40'
-                        : 'bg-slate-50 dark:bg-[#0a0f18] border-slate-200 dark:border-[#1e2a3f]'
-                    }`}
-                  >
-                    <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5">
-                      <div>
-                        <div className="flex flex-wrap items-center gap-2">
-                          <span
-                            className={`text-[9px] font-mono font-bold px-2 py-0.5 rounded-xs uppercase ${
-                              isDone
-                                ? 'bg-emerald-100 dark:bg-emerald-950 text-emerald-700 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-500/40'
-                                : 'bg-amber-100 dark:bg-amber-950 text-amber-800 dark:text-amber-300 border border-amber-200 dark:border-amber-500/40'
-                            }`}
-                          >
-                            {isDone ? 'TELAH DIKUMPULKAN ✓' : 'BELUM MENGUMPULKAN'}
-                          </span>
+          ) : (() => {
+            const visibleTasks =
+              taskMeetingFilter === 'all'
+                ? taskSubmissions
+                : taskSubmissions.filter(
+                    (tItem) => Number(tItem.meetingNo || 1) === Number(taskMeetingFilter)
+                  );
+            if (visibleTasks.length === 0) {
+              return (
+                <div className="py-8 text-center bg-slate-50 dark:bg-[#0a0f18] rounded-xl border border-dashed border-slate-200 dark:border-[#232f42] text-xs text-slate-500 dark:text-slate-400">
+                  Belum ada tugas yang diterbitkan untuk filter pertemuan ini di Firestore.
+                </div>
+              );
+            }
+            return (
+              <div className="space-y-3">
+                {visibleTasks.map((task) => {
+                  const isDone = task.status === 'submitted';
+                  return (
+                    <div
+                      key={task.id}
+                      className={`p-4 rounded-xl border transition-all ${
+                        isDone
+                          ? 'bg-emerald-50/70 dark:bg-emerald-950/20 border-emerald-200 dark:border-emerald-500/40'
+                          : 'bg-slate-50 dark:bg-[#0a0f18] border-slate-200 dark:border-[#1e2a3f]'
+                      }`}
+                    >
+                      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5">
+                        <div>
+                          <div className="flex flex-wrap items-center gap-2">
+                            <span className="text-[9px] font-mono font-bold px-2 py-0.5 rounded-xs bg-sky-50 dark:bg-[#00e5ff]/10 text-sky-700 dark:text-[#00e5ff] border border-sky-200 dark:border-[#00e5ff]/30">
+                              PERTEMUAN {Number(task.meetingNo || 1)}
+                            </span>
+                            <span
+                              className={`text-[9px] font-mono font-bold px-2 py-0.5 rounded-xs uppercase ${
+                                isDone
+                                  ? 'bg-emerald-100 dark:bg-emerald-950 text-emerald-700 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-500/40'
+                                  : 'bg-amber-100 dark:bg-amber-950 text-amber-800 dark:text-amber-300 border border-amber-200 dark:border-amber-500/40'
+                              }`}
+                            >
+                              {isDone ? 'TELAH DIKUMPULKAN ✓' : 'BELUM MENGUMPULKAN'}
+                            </span>
                           {typeof task.grade === 'number' && (
                             <span className="text-[9px] font-mono font-bold px-2 py-0.5 rounded-xs bg-indigo-50 dark:bg-indigo-950 text-indigo-700 dark:text-indigo-300 border border-indigo-200 dark:border-indigo-500/40">
                               NILAI: {task.grade}/100
@@ -1848,7 +2440,8 @@ export default function ClassDetailView({
                 );
               })}
             </div>
-          )}
+          );
+          })()}
         </div>
       )}
 
@@ -2062,9 +2655,101 @@ export default function ClassDetailView({
         </div>
       )}
 
-      {/* INSTRUCTOR / ADMIN TAB: Submissions Grading */}
+      {/* INSTRUCTOR / ADMIN TAB: Submissions Grading & Task Creation */}
       {!isPreviewMode && isEducatorOrAdmin && activeTab === 'grading' && (
-        <div className="bg-white dark:bg-[#121822] p-5 rounded-xl border border-slate-200 dark:border-[#232f42] space-y-4">
+        <div className="bg-white dark:bg-[#121822] p-5 rounded-xl border border-slate-200 dark:border-[#232f42] space-y-5">
+          {/* Create Meeting Task Form */}
+          <form
+            onSubmit={handleCreateMeetingTask}
+            className="p-4 rounded-xl bg-slate-50 dark:bg-[#0a0f18] border border-slate-200 dark:border-[#1e2a3f] space-y-3 font-mono"
+          >
+            <div className="flex items-center justify-between">
+              <h4 className="text-xs font-bold text-amber-700 dark:text-[#f59e0b] uppercase flex items-center gap-1.5">
+                <Plus className="w-4 h-4" />
+                {language === 'en' ? 'Publish New Meeting Task' : 'Terbitkan Tugas Pertemuan Baru'}
+              </h4>
+              <span className="text-[10px] text-slate-500">assignments (Firestore)</span>
+            </div>
+
+            {createTaskNotice && (
+              <div
+                className={`p-2.5 rounded text-xs flex items-center gap-2 border ${
+                  createTaskNotice.type === 'success'
+                    ? 'bg-emerald-50 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-300 border-emerald-200 dark:border-emerald-500/40'
+                    : 'bg-rose-50 dark:bg-rose-950/40 text-rose-700 dark:text-rose-300 border-rose-200 dark:border-rose-500/40'
+                }`}
+              >
+                <span>{createTaskNotice.text}</span>
+              </div>
+            )}
+
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
+              <div>
+                <label className="block text-[10px] font-bold text-slate-600 dark:text-slate-400 mb-1 uppercase">
+                  Pertemuan
+                </label>
+                <select
+                  value={newTaskMeetingNo}
+                  onChange={(e) => setNewTaskMeetingNo(Number(e.target.value))}
+                  className="w-full px-2.5 py-2 text-xs rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-[#121822] text-slate-900 dark:text-slate-100"
+                >
+                  {meetingsList.map((m) => (
+                    <option key={m.id} value={m.order}>
+                      Pertemuan {m.order < 10 ? `0${m.order}` : m.order}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div className="sm:col-span-2">
+                <label className="block text-[10px] font-bold text-slate-600 dark:text-slate-400 mb-1 uppercase">
+                  Judul Tugas
+                </label>
+                <input
+                  type="text"
+                  required
+                  value={newTaskTitle}
+                  onChange={(e) => setNewTaskTitle(e.target.value)}
+                  placeholder="Contoh: Tugas Praktikum 03 — Enkapsulasi State"
+                  className="w-full px-2.5 py-2 text-xs rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-[#121822] text-slate-900 dark:text-slate-100"
+                />
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5 items-end">
+              <div>
+                <label className="block text-[10px] font-bold text-slate-600 dark:text-slate-400 mb-1 uppercase">
+                  Tenggat Pengumpulan
+                </label>
+                <input
+                  type="datetime-local"
+                  value={newTaskDeadline}
+                  onChange={(e) => setNewTaskDeadline(e.target.value)}
+                  className="w-full px-2.5 py-2 text-xs rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-[#121822] text-slate-900 dark:text-slate-100"
+                />
+              </div>
+              <div>
+                <label className="block text-[10px] font-bold text-slate-600 dark:text-slate-400 mb-1 uppercase">
+                  Instruksi Singkat
+                </label>
+                <input
+                  type="text"
+                  value={newTaskNote}
+                  onChange={(e) => setNewTaskNote(e.target.value)}
+                  placeholder="Format PDF/ZIP atau link GitHub..."
+                  className="w-full px-2.5 py-2 text-xs rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-[#121822] text-slate-900 dark:text-slate-100"
+                />
+              </div>
+              <button
+                type="submit"
+                disabled={creatingTask}
+                className="bg-[#f59e0b] hover:bg-[#d97706] text-black text-xs font-bold px-4 py-2 rounded-lg transition flex items-center justify-center gap-1.5 disabled:opacity-50"
+              >
+                <Plus className="w-4 h-4" />
+                {creatingTask ? 'Menerbitkan...' : 'Terbitkan Tugas'}
+              </button>
+            </div>
+          </form>
+
           <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-200 dark:border-[#1b263b] pb-3">
             <div>
               <h3 className="text-xs font-mono font-bold text-amber-700 dark:text-[#f59e0b] uppercase tracking-wider flex items-center gap-1.5">
@@ -2369,6 +3054,7 @@ export default function ClassDetailView({
                   <thead className="bg-slate-50 dark:bg-[#0a0f18] text-slate-500 dark:text-slate-400 uppercase text-[10px] border-b border-slate-200 dark:border-[#232f42]">
                     <tr>
                       <th className="py-2 px-3">UID / Mahasiswa</th>
+                      <th className="py-2 px-3">Pertemuan</th>
                       <th className="py-2 px-3">Tipe</th>
                       <th className="py-2 px-3">Skor</th>
                       <th className="py-2 px-3">Status</th>
@@ -2379,6 +3065,9 @@ export default function ClassDetailView({
                       <tr key={att.id}>
                         <td className="py-2 px-3 text-slate-800 dark:text-slate-200">
                           {att.uid || att.id}
+                        </td>
+                        <td className="py-2 px-3 text-sky-700 dark:text-[#00e5ff] font-bold">
+                          P{att.meetingNo || 1}
                         </td>
                         <td className="py-2 px-3 uppercase text-slate-600 dark:text-slate-400">
                           {att.examType || 'pretest'}
@@ -2399,6 +3088,17 @@ export default function ClassDetailView({
             </div>
           )}
         </div>
+      )}
+
+      {/* TAB: Contextual Discussion per Class & Meeting */}
+      {!isPreviewMode && activeTab === 'discussion' && (
+        <DiscussionTab
+          embedded
+          classId={classData?.id || 'subj_pbo'}
+          classNameTitle={classData?.name || classData?.title || ''}
+          meetingNo={currentMeetingNo}
+          meetingTitle={selectedMeeting?.title || ''}
+        />
       )}
 
       {/* Task Upload Modal */}

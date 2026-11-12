@@ -6,6 +6,7 @@ import {
   fetchClasses,
   fetchAllSubmissionsForGrading,
   gradeSubmissionInFirestore,
+  createAssignmentInFirestore,
 } from '../../services/lmsFirestoreService';
 import {
   openAttendanceSession,
@@ -60,6 +61,14 @@ export default function TeacherDashboard({ onSelectClass, onNavigateView, onOpen
   const [attCustomCode, setAttCustomCode] = useState('');
   const [attLoading, setAttLoading] = useState(false);
 
+  // State Pembuatan Tugas Pertemuan Baru
+  const [taskClassId, setTaskClassId] = useState('');
+  const [taskMeetingNo, setTaskMeetingNo] = useState(1);
+  const [taskTitle, setTaskTitle] = useState('');
+  const [taskDeadline, setTaskDeadline] = useState('2026-12-15T23:59');
+  const [taskNote, setTaskNote] = useState('');
+  const [creatingTask, setCreatingTask] = useState(false);
+
   const loadDashboardData = async () => {
     setLoadingData(true);
     try {
@@ -67,6 +76,9 @@ export default function TeacherDashboard({ onSelectClass, onNavigateView, onOpen
       const loadedClasses = classRes.classes || [];
       setClasses(loadedClasses);
       setAttClassId((prev) =>
+        prev && loadedClasses.some((c) => c.id === prev) ? prev : loadedClasses[0]?.id || ''
+      );
+      setTaskClassId((prev) =>
         prev && loadedClasses.some((c) => c.id === prev) ? prev : loadedClasses[0]?.id || ''
       );
 
@@ -203,6 +215,42 @@ export default function TeacherDashboard({ onSelectClass, onNavigateView, onOpen
       });
     } finally {
       setGrading(false);
+    }
+  };
+
+  const handleCreateAssignment = async (e) => {
+    e.preventDefault();
+    if (!taskClassId || !taskTitle.trim() || creatingTask) return;
+    setCreatingTask(true);
+    setStatusBanner(null);
+
+    try {
+      const targetClass = classes.find((c) => c.id === taskClassId);
+      const created = await createAssignmentInFirestore({
+        classId: taskClassId,
+        meetingNo: Number(taskMeetingNo || 1),
+        title: taskTitle.trim(),
+        subject: targetClass?.name || 'Mata Kuliah Smartsa',
+        subjectCode: targetClass?.code || 'CLS',
+        deadline: taskDeadline,
+        note: taskNote.trim(),
+      });
+      setTaskTitle('');
+      setTaskNote('');
+      setStatusBanner({
+        type: 'success',
+        text:
+          language === 'en'
+            ? `Assignment "${created.title}" published for Meeting ${created.meetingNo} (${created.subjectCode}).`
+            : `Tugas "${created.title}" berhasil diterbitkan untuk Pertemuan ${created.meetingNo} (${created.subjectCode}).`,
+      });
+    } catch (err) {
+      setStatusBanner({
+        type: 'error',
+        text: err.message || 'Gagal menerbitkan tugas pertemuan.',
+      });
+    } finally {
+      setCreatingTask(false);
     }
   };
 
@@ -472,6 +520,110 @@ export default function TeacherDashboard({ onSelectClass, onNavigateView, onOpen
           </form>
         )}
       </div>
+
+      {/* TERBITKAN TUGAS PERTEMUAN BARU */}
+      {classes.length > 0 && (
+        <div className="bg-white dark:bg-[#121822] p-6 rounded-2xl border border-slate-200 dark:border-[#232f42] shadow-xs space-y-4">
+          <div>
+            <h3 className="text-base font-bold text-slate-900 dark:text-slate-100 flex items-center gap-2">
+              <Plus className="w-4 h-4 text-indigo-600 dark:text-indigo-400" />
+              {language === 'en' ? 'Publish Meeting Assignment' : 'Terbitkan Tugas Pertemuan Baru'}
+            </h3>
+            <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
+              {language === 'en'
+                ? 'Create a meeting-scoped assignment directly in Firestore assignments collection.'
+                : 'Buat penugasan terikat ke pertemuan tertentu langsung ke koleksi Firestore assignments.'}
+            </p>
+          </div>
+
+          <form onSubmit={handleCreateAssignment} className="space-y-3">
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+              <div>
+                <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1">
+                  {language === 'en' ? 'Class' : 'Kelas'}
+                </label>
+                <select
+                  value={taskClassId}
+                  onChange={(e) => setTaskClassId(e.target.value)}
+                  className="w-full px-3 py-2 text-xs border border-slate-300 dark:border-slate-700 rounded-lg bg-white dark:bg-[#0b0f17] text-slate-900 dark:text-slate-100"
+                >
+                  {classes.map((cls) => (
+                    <option key={cls.id} value={cls.id}>
+                      {cls.code} — {cls.name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1">
+                  {language === 'en' ? 'Meeting (1–16)' : 'Pertemuan (1–16)'}
+                </label>
+                <select
+                  value={taskMeetingNo}
+                  onChange={(e) => setTaskMeetingNo(Number(e.target.value))}
+                  className="w-full px-3 py-2 text-xs border border-slate-300 dark:border-slate-700 rounded-lg bg-white dark:bg-[#0b0f17] text-slate-900 dark:text-slate-100"
+                >
+                  {Array.from({ length: 16 }, (_, idx) => idx + 1).map((num) => (
+                    <option key={num} value={num}>
+                      Pertemuan {num < 10 ? `0${num}` : num}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1">
+                  {language === 'en' ? 'Deadline' : 'Tenggat'}
+                </label>
+                <input
+                  type="datetime-local"
+                  value={taskDeadline}
+                  onChange={(e) => setTaskDeadline(e.target.value)}
+                  className="w-full px-3 py-2 text-xs border border-slate-300 dark:border-slate-700 rounded-lg bg-white dark:bg-[#0b0f17] text-slate-900 dark:text-slate-100"
+                />
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 items-end">
+              <div>
+                <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1">
+                  {language === 'en' ? 'Assignment Title' : 'Judul Tugas'}
+                </label>
+                <input
+                  type="text"
+                  required
+                  value={taskTitle}
+                  onChange={(e) => setTaskTitle(e.target.value)}
+                  placeholder="Contoh: Tugas Praktikum 02 — Inheritance"
+                  className="w-full px-3 py-2 text-xs border border-slate-300 dark:border-slate-700 rounded-lg bg-white dark:bg-[#0b0f17] text-slate-900 dark:text-slate-100"
+                />
+              </div>
+              <div>
+                <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1">
+                  {language === 'en' ? 'Notes / Instructions' : 'Instruksi Singkat'}
+                </label>
+                <input
+                  type="text"
+                  value={taskNote}
+                  onChange={(e) => setTaskNote(e.target.value)}
+                  placeholder="Format PDF/ZIP atau link GitHub..."
+                  className="w-full px-3 py-2 text-xs border border-slate-300 dark:border-slate-700 rounded-lg bg-white dark:bg-[#0b0f17] text-slate-900 dark:text-slate-100"
+                />
+              </div>
+              <button
+                type="submit"
+                disabled={creatingTask || !taskTitle.trim()}
+                className="bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold px-4 py-2.5 rounded-lg transition disabled:opacity-50"
+              >
+                {creatingTask
+                  ? language === 'en' ? 'Publishing...' : 'Menerbitkan...'
+                  : language === 'en' ? 'Publish Assignment' : 'Terbitkan Tugas'}
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
 
       {/* Classes Managed List */}
       <div className="bg-white dark:bg-[#121822] p-6 rounded-2xl border border-slate-200 dark:border-[#232f42] shadow-xs">

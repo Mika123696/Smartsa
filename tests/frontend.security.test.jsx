@@ -1,15 +1,25 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, fireEvent, act, waitFor } from '@testing-library/react';
 
-const { mockAuthObj, mockDbObj, mockOnAuthStateChanged, mockGetDoc, mockSetDoc, mockUpdateProfile } =
-  vi.hoisted(() => ({
-    mockAuthObj: { currentUser: null },
-    mockDbObj: { name: 'mock-db' },
-    mockOnAuthStateChanged: vi.fn(),
-    mockGetDoc: vi.fn(),
-    mockSetDoc: vi.fn(),
-    mockUpdateProfile: vi.fn(),
-  }));
+const {
+  mockAuthObj,
+  mockDbObj,
+  mockOnAuthStateChanged,
+  mockGetDoc,
+  mockSetDoc,
+  mockUpdateDoc,
+  mockOnSnapshot,
+  mockUpdateProfile,
+} = vi.hoisted(() => ({
+  mockAuthObj: { currentUser: null },
+  mockDbObj: { name: 'mock-db' },
+  mockOnAuthStateChanged: vi.fn(),
+  mockGetDoc: vi.fn(),
+  mockSetDoc: vi.fn(),
+  mockUpdateDoc: vi.fn(),
+  mockOnSnapshot: vi.fn(() => () => {}),
+  mockUpdateProfile: vi.fn(),
+}));
 
 vi.mock('../src/firebase', () => ({
   app: null,
@@ -38,10 +48,10 @@ vi.mock('firebase/firestore', () => ({
   serverTimestamp: vi.fn(() => 'SERVER_TIMESTAMP'),
   collection: vi.fn(),
   getDocs: vi.fn(async () => ({ docs: [] })),
-  onSnapshot: vi.fn(() => () => {}),
+  onSnapshot: mockOnSnapshot,
   orderBy: vi.fn(),
   query: vi.fn(),
-  updateDoc: vi.fn(),
+  updateDoc: mockUpdateDoc,
   where: vi.fn(),
   addDoc: vi.fn(),
   deleteDoc: vi.fn(),
@@ -53,6 +63,8 @@ import { AuthProvider } from '../src/context/AuthContext';
 import { LanguageProvider } from '../src/context/LanguageContext';
 import { useAuth } from '../src/context/useAuth';
 import ClassDetailView from '../src/components/features/ClassDetailView';
+import DiscussionTab from '../src/components/features/DiscussionTab';
+import { upsertLearningProgress } from '../src/services/lmsFirestoreService';
 
 describe('Frontend Security & UI Components', () => {
   beforeEach(() => {
@@ -337,6 +349,196 @@ describe('Frontend Security & UI Components', () => {
         photoURL: null,
       }),
       { merge: true }
+    );
+  });
+
+  it('upsertLearningProgress preserves unspecified completion flags without overwriting', async () => {
+    mockAuthObj.currentUser = { uid: 'uid_student_progress' };
+    mockSetDoc.mockResolvedValue(undefined);
+
+    await upsertLearningProgress({
+      classId: 'subj_pbo',
+      meetingNo: 3,
+      materialCompleted: true,
+    });
+
+    expect(mockSetDoc).toHaveBeenCalledTimes(1);
+    const [ref, payload, opts] = mockSetDoc.mock.calls[0];
+    expect(ref).toEqual({ path: 'learning_progress/subj_pbo_m3_uid_student_progress' });
+    expect(opts).toEqual({ merge: true });
+    expect(payload).toMatchObject({
+      progressId: 'subj_pbo_m3_uid_student_progress',
+      classId: 'subj_pbo',
+      meetingNo: 3,
+      uid: 'uid_student_progress',
+      materialCompleted: true,
+    });
+    expect(payload).not.toHaveProperty('videoCompleted');
+  });
+
+  it('gates Posttest behind Pretest + Materi + Video, locks Pretest baseline, and renders Gain Card in ClassDetailView', async () => {
+    mockAuthObj.currentUser = null;
+    mockOnAuthStateChanged.mockImplementation((_auth, cb) => {
+      void cb(null);
+      return () => {};
+    });
+
+    render(
+      <LanguageProvider>
+        <AuthProvider>
+          <ClassDetailView
+            classData={{
+              id: 'subj_pbo',
+              name: 'Pemrograman Berorientasi Objek',
+              code: 'PBO101',
+              meetings: [],
+            }}
+            onBack={vi.fn()}
+            onNavigateAI={vi.fn()}
+          />
+        </AuthProvider>
+      </LanguageProvider>
+    );
+
+    // 1. Go to Exam tab: Posttest is locked initially
+    fireEvent.click(screen.getByRole('button', { name: /PRETEST & EVALUASI/i }));
+    const posttestBtnInitial = screen.getByRole('button', { name: /MULAI POST-TEST/i });
+    expect(posttestBtnInitial).toBeDisabled();
+    expect(screen.getByText(/PRETEST VS POSTTEST GAIN/i)).toBeInTheDocument();
+
+    // 2. Complete Pretest
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /MULAI PRETEST/i }));
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /KIRIM LEMBAR EVALUASI/i }));
+    });
+    expect(screen.getByText(/EVALUASI BERHASIL DISERAHKAN/i)).toBeInTheDocument();
+
+    // Return to Syllabus, then check Exam: Pretest is locked as baseline & Posttest still gated
+    fireEvent.click(screen.getByRole('button', { name: /KEMBALI KE SILABUS/i }));
+    fireEvent.click(screen.getByRole('button', { name: /PRETEST & EVALUASI/i }));
+    expect(screen.getByRole('button', { name: /PRETEST SELESAI \(BASELINE/i })).toBeDisabled();
+    expect(screen.getByRole('button', { name: /MULAI POST-TEST/i })).toBeDisabled();
+
+    // 3. Complete Material and Video
+    fireEvent.click(screen.getByRole('button', { name: /DELTA JSON/i }));
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /Tandai Materi Selesai/i }));
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: /VIDEO CDN/i }));
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /Tandai Video Selesai/i }));
+    });
+
+    // 4. Posttest should now be unlocked
+    fireEvent.click(screen.getByRole('button', { name: /PRETEST & EVALUASI/i }));
+    const unlockedPosttestBtn = screen.getByRole('button', { name: /MULAI POST-TEST/i });
+    expect(unlockedPosttestBtn).not.toBeDisabled();
+
+    // Complete Posttest and verify Gain Card displays delta
+    await act(async () => {
+      fireEvent.click(unlockedPosttestBtn);
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /KIRIM LEMBAR EVALUASI/i }));
+    });
+    fireEvent.click(screen.getByRole('button', { name: /KEMBALI KE SILABUS/i }));
+    expect(screen.getAllByText(/GAIN Δ/i).length).toBeGreaterThan(0);
+  });
+
+  it('allows lecturer to toggle Jawaban Terverifikasi Dosen in contextual DiscussionTab', async () => {
+    const lecturerUser = {
+      uid: 'uid_dosen_01',
+      email: 'dosen@smartsa.edu',
+      displayName: 'Dr. Andi Saputra',
+      emailVerified: true,
+    };
+
+    mockAuthObj.currentUser = lecturerUser;
+    mockGetDoc.mockResolvedValue({
+      exists: () => true,
+      data: () => ({
+        uid: 'uid_dosen_01',
+        email: 'dosen@smartsa.edu',
+        displayName: 'Dr. Andi Saputra',
+        role: 'lecturer',
+      }),
+    });
+    mockSetDoc.mockResolvedValue(undefined);
+    mockUpdateDoc.mockResolvedValue(undefined);
+    mockOnAuthStateChanged.mockImplementation((_auth, cb) => {
+      void cb(lecturerUser);
+      return () => {};
+    });
+
+    mockOnSnapshot.mockImplementation((_q, cb) => {
+      cb({
+        docs: [
+          {
+            id: 'disc_m1_01',
+            data: () => ({
+              classId: 'subj_pbo',
+              meetingNo: 1,
+              subject: 'Pemrograman Berorientasi Objek',
+              author: 'Mahasiswa Demo',
+              role: 'student',
+              content: 'Mengapa enkapsulasi penting?',
+              likes: 1,
+              likedBy: [],
+              timeLabel: '10:00 WIB',
+              isVerifiedAnswer: false,
+              verifiedBy: '',
+              verifiedReplyId: '',
+              replies: [
+                {
+                  id: 'rep_01',
+                  author: 'Mahasiswa Lain',
+                  role: 'student',
+                  content: 'Untuk menjaga invarian state objek.',
+                  time: '10:05 WIB',
+                },
+              ],
+            }),
+          },
+        ],
+      });
+      return () => {};
+    });
+
+    render(
+      <LanguageProvider>
+        <AuthProvider>
+          <DiscussionTab
+            embedded
+            classId="subj_pbo"
+            classNameTitle="Pemrograman Berorientasi Objek"
+            meetingNo={1}
+            meetingTitle="Kontrak Kuliah"
+          />
+        </AuthProvider>
+      </LanguageProvider>
+    );
+
+    await waitFor(() => {
+      expect(screen.getByText('Mengapa enkapsulasi penting?')).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: /Verifikasi Jawaban/i })).toBeInTheDocument();
+    });
+
+    const verifyBtn = screen.getByRole('button', { name: /Verifikasi Jawaban/i });
+    await act(async () => {
+      fireEvent.click(verifyBtn);
+    });
+
+    expect(mockUpdateDoc).toHaveBeenCalledTimes(1);
+    expect(mockUpdateDoc).toHaveBeenCalledWith(
+      { path: 'discussions/disc_m1_01' },
+      expect.objectContaining({
+        isVerifiedAnswer: true,
+        verifiedBy: 'uid_dosen_01',
+        verifiedReplyId: 'rep_01',
+      })
     );
   });
 });

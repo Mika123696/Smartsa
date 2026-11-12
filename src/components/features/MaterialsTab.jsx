@@ -25,6 +25,7 @@ import {
 import {
   fetchClasses,
   fetchAssignmentsWithUserSubmissions,
+  fetchUserLearningProgress,
   submitAssignmentToFirestore,
   cancelSubmissionInFirestore,
 } from '../../services/lmsFirestoreService';
@@ -35,6 +36,7 @@ const DEMO_ASSIGNMENTS_FALLBACK = [
   {
     id: 'asg_01',
     classId: 'subj_pbo',
+    meetingNo: 1,
     title: 'Tugas Praktikum 01: Implementasi OOP & Inheritance',
     subject: 'Pemrograman Berorientasi Objek',
     subjectCode: 'PBO101',
@@ -51,6 +53,7 @@ const DEMO_ASSIGNMENTS_FALLBACK = [
   {
     id: 'asg_02',
     classId: 'subj_bd',
+    meetingNo: 2,
     title: 'Tugas 02: Normalisasi Basis Data & Skema NoSQL',
     subject: 'Basis Data',
     subjectCode: 'BD202',
@@ -73,6 +76,8 @@ export default function MaterialsTab({ onSelectSubject }) {
   const [activeSubTab, setActiveSubTab] = useState('materi');
   const [classes, setClasses] = useState([]);
   const [assignments, setAssignments] = useState([]);
+  const [learningProgress, setLearningProgress] = useState([]);
+  const [meetingFilter, setMeetingFilter] = useState('all');
   const [loading, setLoading] = useState(true);
 
   // Modal pengumpulan tugas
@@ -87,11 +92,13 @@ export default function MaterialsTab({ onSelectSubject }) {
   const loadMaterialsAndTasks = async () => {
     setLoading(true);
     try {
-      const [classRes, taskRes] = await Promise.all([
+      const [classRes, taskRes, progressRes] = await Promise.all([
         fetchClasses(),
         currentUser ? fetchAssignmentsWithUserSubmissions() : Promise.resolve(null),
+        currentUser ? fetchUserLearningProgress(currentUser.uid) : Promise.resolve([]),
       ]);
       setClasses(classRes.classes || []);
+      setLearningProgress(progressRes || []);
       if (currentUser && taskRes) {
         setAssignments(taskRes.assignments || []);
       } else {
@@ -213,6 +220,7 @@ export default function MaterialsTab({ onSelectSubject }) {
         const saved = await submitAssignmentToFirestore({
           assignmentId: selectedAssignment.id,
           classId: selectedAssignment.classId,
+          meetingNo: Number(selectedAssignment.meetingNo || 1),
           assignmentTitle: selectedAssignment.title,
           className: selectedAssignment.subject,
           studentName: userProfile?.displayName || currentUser.displayName || 'Mahasiswa',
@@ -395,8 +403,11 @@ export default function MaterialsTab({ onSelectSubject }) {
           ) : (
             classes.map((subj) => {
               const Icon = getSubjectIcon(subj.iconType);
-              const totalMaterials = Math.max(1, Number(subj.materialsCount || 5));
-              const completed = Number(subj.completedCount || 0);
+              const totalMaterials = Math.max(1, Number(subj.meetingsCount || subj.materialsCount || 16));
+              const syncedCompleted = learningProgress.filter(
+                (p) => p.classId === subj.id && (p.materialCompleted || p.videoCompleted)
+              ).length;
+              const completed = currentUser ? syncedCompleted : Number(subj.completedCount || 0);
               return (
                 <button
                   key={subj.id}
@@ -499,7 +510,31 @@ export default function MaterialsTab({ onSelectSubject }) {
             </div>
           ) : (
             <div className="space-y-3">
-              {assignments.map((asg) => {
+              <div className="flex items-center justify-between gap-2 font-mono">
+                <span className="text-[10px] text-slate-500 dark:text-slate-400 uppercase">
+                  {language === 'en' ? 'Filter by Meeting:' : 'Filter Pertemuan:'}
+                </span>
+                <select
+                  aria-label={language === 'en' ? 'Filter assignments by meeting' : 'Filter tugas per pertemuan'}
+                  value={meetingFilter}
+                  onChange={(e) => setMeetingFilter(e.target.value)}
+                  className="px-2.5 py-1 text-[11px] rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-[#121822] text-slate-800 dark:text-slate-200"
+                >
+                  <option value="all">{language === 'en' ? 'All Meetings' : 'Semua Pertemuan'}</option>
+                  {Array.from({ length: 16 }, (_, idx) => idx + 1).map((num) => (
+                    <option key={num} value={String(num)}>
+                      Pertemuan {num}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              {assignments
+                .filter((asg) =>
+                  meetingFilter === 'all'
+                    ? true
+                    : Number(asg.meetingNo || 1) === Number(meetingFilter)
+                )
+                .map((asg) => {
                 const isSubmitted = asg.status === 'submitted';
                 return (
                   <div
@@ -525,9 +560,12 @@ export default function MaterialsTab({ onSelectSubject }) {
                     <div className="pl-2 space-y-2.5">
                       <div className="flex items-start justify-between gap-2">
                         <div>
-                          <div className="flex items-center gap-1.5 font-mono text-[9px]">
+                          <div className="flex flex-wrap items-center gap-1.5 font-mono text-[9px]">
                             <span className="font-bold text-sky-700 dark:text-[#00e5ff] bg-sky-50 dark:bg-[#00e5ff]/10 border border-sky-200 dark:border-[#00e5ff]/30 px-1.5 py-0.2 rounded-xs">
                               {asg.subjectCode}
+                            </span>
+                            <span className="font-bold text-amber-700 dark:text-[#f59e0b] bg-amber-50 dark:bg-[#f59e0b]/10 border border-amber-200 dark:border-[#f59e0b]/30 px-1.5 py-0.2 rounded-xs">
+                              PERTEMUAN {Number(asg.meetingNo || 1)}
                             </span>
                             <span className="text-slate-500 dark:text-slate-400 truncate max-w-[180px]">
                               {asg.subject}

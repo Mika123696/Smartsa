@@ -9,6 +9,7 @@ import {
   addDiscussionReply,
   deleteDiscussionReply,
   deleteDiscussionTopic,
+  toggleVerifyDiscussionReply,
 } from '../../services/lmsFirestoreService';
 import { AccessibleDialog } from '../common/AccessibleDialog';
 import SafeImage from '../common/SafeImage';
@@ -20,6 +21,8 @@ import {
   Trash2,
   Reply,
   AlertCircle,
+  CheckCircle2,
+  ShieldCheck,
 } from 'lucide-react';
 
 const TOPIC_TO_CLASS_ID = {
@@ -31,41 +34,53 @@ const TOPIC_TO_CLASS_ID = {
   'Pemodelan Perangkat Lunak': 'subj_ppl',
 };
 
-export default function DiscussionTab() {
+export default function DiscussionTab({
+  embedded = false,
+  classId: propClassId = null,
+  classNameTitle = '',
+  meetingNo: propMeetingNo = null,
+  meetingTitle = '',
+} = {}) {
   const { userProfile, currentUser, role } = useAuth();
   const { t, language } = useLanguage();
 
-  const currentKey = currentUser?.uid || 'demo';
+  const currentKey = `${currentUser?.uid || 'demo'}_${propClassId || 'all'}_${propMeetingNo || 'all'}`;
   const [discussions, setDiscussions] = useState([]);
   const [loadedKey, setLoadedKey] = useState(null);
   const [errorMsg, setErrorMsg] = useState(null);
   const [questionInput, setQuestionInput] = useState('');
   const [selectedTopic, setSelectedTopic] = useState('Pemrograman Berorientasi Objek');
+  const [postMeetingNo, setPostMeetingNo] = useState(() => Number(propMeetingNo || 1));
+  const [filterMeetingNo, setFilterMeetingNo] = useState('all');
   const [activeReplyId, setActiveReplyId] = useState(null);
   const [replyInputs, setReplyInputs] = useState({});
   const [posting, setPosting] = useState(false);
   const [deleteConfirm, setDeleteConfirm] = useState(null);
 
   const loading = loadedKey !== currentKey;
+  const effectiveMeetingNo = propMeetingNo ? Number(propMeetingNo) : Number(postMeetingNo || 1);
+  const effectiveClassId = propClassId || TOPIC_TO_CLASS_ID[selectedTopic] || 'subj_pbo';
+  const effectiveSubject = propClassId ? classNameTitle || 'Kelas Smartsa' : selectedTopic;
 
   useEffect(() => {
-    const unsubscribe = subscribeDiscussions((res) => {
-      setDiscussions(res.discussions || []);
-      setErrorMsg(res.error || null);
-      setLoadedKey(currentKey);
-    });
+    const unsubscribe = subscribeDiscussions(
+      (res) => {
+        setDiscussions(res.discussions || []);
+        setErrorMsg(res.error || null);
+        setLoadedKey(currentKey);
+      },
+      propClassId || null,
+      propClassId && propMeetingNo ? Number(propMeetingNo) : null
+    );
     return () => unsubscribe();
-  }, [currentKey]);
+  }, [currentKey, propClassId, propMeetingNo]);
 
   const activeAuthorName =
     userProfile?.displayName ||
     currentUser?.displayName ||
     (language === 'en' ? 'Demo Student' : 'Mahasiswa Demo');
 
-  const activeAvatar =
-    userProfile?.photoURL ||
-    currentUser?.photoURL ||
-    'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?auto=format&fit=crop&w=120&q=80';
+  const activeAvatar = userProfile?.photoURL || currentUser?.photoURL || '';
 
   const handlePostQuestion = async (e) => {
     e.preventDefault();
@@ -80,8 +95,9 @@ export default function DiscussionTab() {
         .padStart(2, '0')} WIB`;
       const demoItem = {
         id: `disc_demo_${Date.now()}`,
-        classId: TOPIC_TO_CLASS_ID[selectedTopic] || 'subj_pbo',
-        subject: selectedTopic,
+        classId: effectiveClassId,
+        meetingNo: effectiveMeetingNo,
+        subject: effectiveSubject,
         authorUid: 'demo_user',
         author: activeAuthorName,
         avatar: activeAvatar,
@@ -90,6 +106,9 @@ export default function DiscussionTab() {
         likes: 0,
         likedBy: [],
         replies: [],
+        isVerifiedAnswer: false,
+        verifiedBy: '',
+        verifiedReplyId: '',
       };
       setDiscussions((prev) => [demoItem, ...prev]);
       setQuestionInput('');
@@ -99,8 +118,9 @@ export default function DiscussionTab() {
     setPosting(true);
     try {
       await createDiscussionTopic({
-        classId: TOPIC_TO_CLASS_ID[selectedTopic] || 'subj_pbo',
-        subject: selectedTopic,
+        classId: effectiveClassId,
+        meetingNo: effectiveMeetingNo,
+        subject: effectiveSubject,
         content: questionInput.trim(),
         authorName: activeAuthorName,
         avatar: activeAvatar,
@@ -209,6 +229,42 @@ export default function DiscussionTab() {
 
   const isPrivileged = role === ROLES.LECTURER || role === ROLES.ADMIN;
 
+  const handleToggleVerify = async (disc, replyId = null) => {
+    if (!isPrivileged) return;
+    setErrorMsg(null);
+
+    const isAlreadyVerifiedForTarget =
+      Boolean(disc.isVerifiedAnswer) &&
+      (replyId ? disc.verifiedReplyId === replyId : !disc.verifiedReplyId);
+
+    const nextDemoState = isAlreadyVerifiedForTarget
+      ? { isVerifiedAnswer: false, verifiedBy: '', verifiedReplyId: '' }
+      : {
+          isVerifiedAnswer: true,
+          verifiedBy: currentUser?.uid || 'demo_lecturer',
+          verifiedReplyId: replyId || '',
+        };
+
+    if (!currentUser) {
+      setDiscussions((prev) =>
+        prev.map((d) => (d.id === disc.id ? { ...d, ...nextDemoState } : d))
+      );
+      return;
+    }
+
+    try {
+      await toggleVerifyDiscussionReply(disc, replyId);
+    } catch (err) {
+      setErrorMsg(err.message || 'Gagal memperbarui status verifikasi jawaban dosen.');
+    }
+  };
+
+  const visibleDiscussions = embedded
+    ? discussions
+    : filterMeetingNo === 'all'
+    ? discussions
+    : discussions.filter((d) => Number(d.meetingNo || 1) === Number(filterMeetingNo));
+
   return (
     <div className="space-y-6 font-sans">
       <AccessibleDialog
@@ -227,19 +283,37 @@ export default function DiscussionTab() {
       />
 
       {/* Header */}
-      <div className="flex items-start justify-between gap-2">
-        <div>
-          <h1 className="text-xl sm:text-2xl font-extrabold text-slate-900 dark:text-slate-100 tracking-tight">
-            {t('discussion_title')}
-          </h1>
-          <p className="text-xs sm:text-sm text-slate-500 dark:text-slate-400 mt-1">
-            {t('discussion_subtitle')}
-          </p>
+      {embedded ? (
+        <div className="flex flex-wrap items-center justify-between gap-2 pb-2 border-b border-slate-200 dark:border-[#1b263b]">
+          <div>
+            <span className="text-[10px] font-mono font-bold text-amber-700 dark:text-[#f59e0b] uppercase tracking-wider">
+              {language === 'en'
+                ? `// CONTEXTUAL DISCUSSION — MEETING ${String(effectiveMeetingNo).padStart(2, '0')}`
+                : `// DISKUSI KONTEKSTUAL — PERTEMUAN ${String(effectiveMeetingNo).padStart(2, '0')}`}
+            </span>
+            <h3 className="text-sm font-bold text-slate-900 dark:text-slate-100 mt-0.5">
+              {meetingTitle || `${effectiveSubject} — Pertemuan ${effectiveMeetingNo}`}
+            </h3>
+          </div>
+          <span className="text-[10px] font-mono font-bold px-2.5 py-1 rounded border bg-sky-50 dark:bg-[#121822] border-sky-200 dark:border-[#232f42] text-sky-700 dark:text-[#00e5ff] shrink-0">
+            {currentUser ? 'FIRESTORE LIVE' : 'MODE DEMO'}
+          </span>
         </div>
-        <span className="text-[10px] font-mono font-bold px-2.5 py-1 rounded border bg-sky-50 dark:bg-[#121822] border-sky-200 dark:border-[#232f42] text-sky-700 dark:text-[#00e5ff] shrink-0">
-          {currentUser ? 'FIRESTORE LIVE' : 'MODE DEMO'}
-        </span>
-      </div>
+      ) : (
+        <div className="flex items-start justify-between gap-2">
+          <div>
+            <h1 className="text-xl sm:text-2xl font-extrabold text-slate-900 dark:text-slate-100 tracking-tight">
+              {t('discussion_title')}
+            </h1>
+            <p className="text-xs sm:text-sm text-slate-500 dark:text-slate-400 mt-1">
+              {t('discussion_subtitle')}
+            </p>
+          </div>
+          <span className="text-[10px] font-mono font-bold px-2.5 py-1 rounded border bg-sky-50 dark:bg-[#121822] border-sky-200 dark:border-[#232f42] text-sky-700 dark:text-[#00e5ff] shrink-0">
+            {currentUser ? 'FIRESTORE LIVE' : 'MODE DEMO'}
+          </span>
+        </div>
+      )}
 
       {errorMsg && (
         <div className="p-3 bg-rose-50 dark:bg-rose-950/60 border border-rose-200 dark:border-rose-500/40 rounded-xl text-xs font-mono text-rose-700 dark:text-rose-300 flex items-center gap-2">
@@ -250,22 +324,39 @@ export default function DiscussionTab() {
 
       {/* New Topic Form */}
       <div className="bg-white dark:bg-[#121822] p-5 rounded-2xl border border-slate-200 dark:border-[#232f42] shadow-xs space-y-3 text-slate-900 dark:text-slate-100">
-        <div className="flex items-center justify-between gap-2">
+        <div className="flex flex-wrap items-center justify-between gap-2">
           <span className="text-xs font-bold text-amber-600 dark:text-[#f59e0b] font-mono">
             {language === 'en' ? '// START A NEW TOPIC' : '// MULAI TOPIK DISKUSI BARU'}
           </span>
-          <select
-            value={selectedTopic}
-            onChange={(e) => setSelectedTopic(e.target.value)}
-            className="text-xs border border-slate-300 dark:border-slate-700 rounded-lg px-2.5 py-1.5 bg-slate-50 dark:bg-[#18212e] text-slate-900 dark:text-slate-200 focus:outline-none focus:border-[#f59e0b] font-mono"
-          >
-            <option value="Pemrograman Berorientasi Objek">PBO</option>
-            <option value="Basis Data">Basis Data</option>
-            <option value="Pemrograman Web dan Perangkat Bergerak">PWPB</option>
-            <option value="Pemrograman Dasar & Algoritma">Algoritma</option>
-            <option value="Desain Industri & UI/UX">UI/UX</option>
-            <option value="Pemodelan Perangkat Lunak">PPL</option>
-          </select>
+          {!embedded && (
+            <div className="flex flex-wrap items-center gap-2">
+              <select
+                value={selectedTopic}
+                onChange={(e) => setSelectedTopic(e.target.value)}
+                aria-label={language === 'en' ? 'Select Course' : 'Pilih Mata Kuliah'}
+                className="text-xs border border-slate-300 dark:border-slate-700 rounded-lg px-2.5 py-1.5 bg-slate-50 dark:bg-[#18212e] text-slate-900 dark:text-slate-200 focus:outline-none focus:border-[#f59e0b] font-mono"
+              >
+                <option value="Pemrograman Berorientasi Objek">PBO</option>
+                <option value="Basis Data">Basis Data</option>
+                <option value="Pemrograman Web dan Perangkat Bergerak">PWPB</option>
+                <option value="Pemrograman Dasar & Algoritma">Algoritma</option>
+                <option value="Desain Industri & UI/UX">UI/UX</option>
+                <option value="Pemodelan Perangkat Lunak">PPL</option>
+              </select>
+              <select
+                value={postMeetingNo}
+                onChange={(e) => setPostMeetingNo(Number(e.target.value))}
+                aria-label={language === 'en' ? 'Select Meeting' : 'Pilih Pertemuan'}
+                className="text-xs border border-slate-300 dark:border-slate-700 rounded-lg px-2.5 py-1.5 bg-slate-50 dark:bg-[#18212e] text-slate-900 dark:text-slate-200 focus:outline-none focus:border-[#f59e0b] font-mono"
+              >
+                {Array.from({ length: 16 }, (_, idx) => idx + 1).map((num) => (
+                  <option key={num} value={num}>
+                    {language === 'en' ? 'Meeting' : 'Pertemuan'} {num < 10 ? `0${num}` : num}
+                  </option>
+                ))}
+              </select>
+            </div>
+          )}
         </div>
 
         <form onSubmit={handlePostQuestion} className="space-y-3">
@@ -296,6 +387,30 @@ export default function DiscussionTab() {
         </form>
       </div>
 
+      {/* Standalone Meeting Filter */}
+      {!embedded && (
+        <div className="flex flex-wrap items-center justify-between gap-2 text-xs font-mono">
+          <span className="text-slate-500 dark:text-slate-400">
+            {language === 'en'
+              ? `Showing ${visibleDiscussions.length} discussion topics`
+              : `Menampilkan ${visibleDiscussions.length} topik diskusi`}
+          </span>
+          <select
+            value={filterMeetingNo}
+            onChange={(e) => setFilterMeetingNo(e.target.value)}
+            aria-label={language === 'en' ? 'Filter by Meeting' : 'Filter Pertemuan'}
+            className="text-xs border border-slate-300 dark:border-slate-700 rounded-lg px-2.5 py-1.5 bg-white dark:bg-[#121822] text-slate-900 dark:text-slate-200 focus:outline-none focus:border-[#f59e0b]"
+          >
+            <option value="all">{language === 'en' ? 'All Meetings' : 'Semua Pertemuan'}</option>
+            {Array.from({ length: 16 }, (_, idx) => idx + 1).map((num) => (
+              <option key={num} value={String(num)}>
+                {language === 'en' ? 'Meeting' : 'Pertemuan'} {num < 10 ? `0${num}` : num}
+              </option>
+            ))}
+          </select>
+        </div>
+      )}
+
       {/* Discussions List */}
       <div className="space-y-4">
         {loading ? (
@@ -304,7 +419,7 @@ export default function DiscussionTab() {
               ? 'Loading discussion forum from Cloud Firestore...'
               : 'Memuat forum diskusi dari Cloud Firestore...'}
           </div>
-        ) : discussions.length === 0 ? (
+        ) : visibleDiscussions.length === 0 ? (
           <div className="p-8 text-center bg-white dark:bg-[#121822] rounded-2xl border border-slate-200 dark:border-[#232f42] text-slate-500 dark:text-slate-400 space-y-2">
             <div className="w-12 h-12 rounded-full bg-amber-50 dark:bg-[#182230] text-[#f59e0b] flex items-center justify-center mx-auto mb-2 border border-amber-200 dark:border-[#232f42]">
               <MessageSquare className="w-6 h-6" />
@@ -319,16 +434,21 @@ export default function DiscussionTab() {
             </p>
           </div>
         ) : (
-          discussions.map((d) => {
+          visibleDiscussions.map((d) => {
             const canDeleteTopic = !currentUser || d.authorUid === currentUser.uid || isPrivileged;
             const hasLiked = Boolean(
               currentUser && Array.isArray(d.likedBy) && d.likedBy.includes(currentUser.uid)
             );
+            const isThreadVerified = Boolean(d.isVerifiedAnswer);
 
             return (
               <div
                 key={d.id}
-                className="bg-white dark:bg-[#121822] p-5 rounded-2xl border border-slate-200 dark:border-[#232f42] shadow-xs space-y-3 text-slate-900 dark:text-slate-100 relative group"
+                className={`bg-white dark:bg-[#121822] p-5 rounded-2xl border shadow-xs space-y-3 text-slate-900 dark:text-slate-100 relative group ${
+                  isThreadVerified
+                    ? 'border-emerald-300 dark:border-emerald-500/50'
+                    : 'border-slate-200 dark:border-[#232f42]'
+                }`}
               >
                 {/* Header */}
                 <div className="flex items-start justify-between gap-2">
@@ -341,12 +461,25 @@ export default function DiscussionTab() {
                       className="w-9 h-9 rounded-full object-cover ring-2 ring-[#f59e0b]/40 shrink-0"
                     />
                     <div>
-                      <h4 className="text-xs sm:text-sm font-bold text-slate-900 dark:text-slate-100">
-                        {d.author}
-                      </h4>
-                      <span className="text-[10px] text-amber-700 dark:text-[#f59e0b] bg-amber-50 dark:bg-[#f59e0b]/10 border border-amber-200 dark:border-[#f59e0b]/30 px-2 py-0.5 rounded-md font-semibold font-mono">
-                        {d.subject}
-                      </span>
+                      <div className="flex flex-wrap items-center gap-1.5">
+                        <h4 className="text-xs sm:text-sm font-bold text-slate-900 dark:text-slate-100">
+                          {d.author}
+                        </h4>
+                        {isThreadVerified && (
+                          <span className="inline-flex items-center gap-1 text-[10px] font-mono font-bold text-emerald-700 dark:text-emerald-300 bg-emerald-50 dark:bg-emerald-950/70 border border-emerald-200 dark:border-emerald-500/40 px-2 py-0.5 rounded-full">
+                            <CheckCircle2 className="w-3 h-3" />
+                            {language === 'en' ? 'Lecturer Verified Answer' : 'Jawaban Terverifikasi Dosen'}
+                          </span>
+                        )}
+                      </div>
+                      <div className="flex flex-wrap items-center gap-1.5 mt-0.5">
+                        <span className="text-[10px] text-amber-700 dark:text-[#f59e0b] bg-amber-50 dark:bg-[#f59e0b]/10 border border-amber-200 dark:border-[#f59e0b]/30 px-2 py-0.5 rounded-md font-semibold font-mono">
+                          {d.subject}
+                        </span>
+                        <span className="text-[10px] text-sky-700 dark:text-[#00e5ff] bg-sky-50 dark:bg-[#00e5ff]/10 border border-sky-200 dark:border-[#00e5ff]/30 px-2 py-0.5 rounded-md font-semibold font-mono">
+                          {language === 'en' ? 'Meeting' : 'Pertemuan'} {String(d.meetingNo || 1).padStart(2, '0')}
+                        </span>
+                      </div>
                     </div>
                   </div>
 
@@ -374,7 +507,7 @@ export default function DiscussionTab() {
                 </p>
 
                 {/* Actions */}
-                <div className="pl-11 pt-1 flex items-center gap-4 text-xs text-slate-500 dark:text-slate-400 font-mono">
+                <div className="pl-11 pt-1 flex flex-wrap items-center gap-4 text-xs text-slate-500 dark:text-slate-400 font-mono">
                   <button
                     type="button"
                     onClick={() => handleLike(d)}
@@ -399,6 +532,28 @@ export default function DiscussionTab() {
                       {d.replies?.length || 0} {language === 'en' ? 'Replies' : 'Balasan'}
                     </span>
                   </button>
+                  {isPrivileged && (
+                    <button
+                      type="button"
+                      onClick={() => void handleToggleVerify(d, null)}
+                      className={`flex items-center gap-1.5 transition cursor-pointer ${
+                        isThreadVerified && !d.verifiedReplyId
+                          ? 'text-emerald-600 dark:text-emerald-400 font-bold'
+                          : 'hover:text-emerald-600 dark:hover:text-emerald-400'
+                      }`}
+                    >
+                      <ShieldCheck className="w-3.5 h-3.5" />
+                      <span>
+                        {isThreadVerified && !d.verifiedReplyId
+                          ? language === 'en'
+                            ? 'Unverify Thread'
+                            : 'Batal Verifikasi'
+                          : language === 'en'
+                          ? 'Mark Verified'
+                          : 'Verifikasi Diskusi'}
+                      </span>
+                    </button>
+                  )}
                 </div>
 
                 {/* Reply Form */}
@@ -444,20 +599,53 @@ export default function DiscussionTab() {
                         r.authorUid === currentUser.uid ||
                         d.authorUid === currentUser.uid ||
                         isPrivileged;
+                      const isThisReplyVerified =
+                        Boolean(d.isVerifiedAnswer) && Boolean(r.id) && d.verifiedReplyId === r.id;
                       return (
                         <div
                           key={r.id || rIdx}
-                          className="bg-slate-50 dark:bg-[#17202d] p-3 rounded-xl border border-slate-200 dark:border-[#232f42] space-y-1 relative group/rep"
+                          className={`p-3 rounded-xl border space-y-1 relative group/rep ${
+                            isThisReplyVerified
+                              ? 'bg-emerald-50/70 dark:bg-emerald-950/30 border-emerald-300 dark:border-emerald-500/50'
+                              : 'bg-slate-50 dark:bg-[#17202d] border-slate-200 dark:border-[#232f42]'
+                          }`}
                         >
-                          <div className="flex items-center justify-between text-xs">
-                            <span className="font-bold text-slate-900 dark:text-slate-200 flex items-center gap-1">
-                              <CornerDownRight className="w-3 h-3 text-[#f59e0b]" />
-                              {r.author}
-                            </span>
+                          <div className="flex items-center justify-between gap-2 text-xs">
+                            <div className="flex flex-wrap items-center gap-1.5">
+                              <span className="font-bold text-slate-900 dark:text-slate-200 flex items-center gap-1">
+                                <CornerDownRight className="w-3 h-3 text-[#f59e0b]" />
+                                {r.author}
+                              </span>
+                              {isThisReplyVerified && (
+                                <span className="inline-flex items-center gap-1 text-[9px] font-mono font-bold text-emerald-700 dark:text-emerald-300 bg-emerald-100 dark:bg-emerald-900/60 border border-emerald-300 dark:border-emerald-500/40 px-1.5 py-0.5 rounded-full">
+                                  <CheckCircle2 className="w-2.5 h-2.5" />
+                                  {language === 'en' ? 'Verified' : 'Jawaban Terverifikasi Dosen'}
+                                </span>
+                              )}
+                            </div>
                             <div className="flex items-center gap-2">
                               <span className="text-[10px] text-slate-500 dark:text-slate-400 font-mono">
                                 {r.time}
                               </span>
+                              {isPrivileged && (
+                                <button
+                                  type="button"
+                                  onClick={() => void handleToggleVerify(d, r.id || `rep_${rIdx}`)}
+                                  className={`text-[10px] font-mono font-bold px-2 py-0.5 rounded border transition cursor-pointer ${
+                                    isThisReplyVerified
+                                      ? 'bg-emerald-600 text-white border-emerald-600'
+                                      : 'bg-white dark:bg-[#121822] text-emerald-700 dark:text-emerald-300 border-emerald-300 dark:border-emerald-500/40 hover:bg-emerald-50'
+                                  }`}
+                                >
+                                  {isThisReplyVerified
+                                    ? language === 'en'
+                                      ? 'Verified ✓'
+                                      : 'Terverifikasi ✓'
+                                    : language === 'en'
+                                    ? 'Verify Answer'
+                                    : 'Verifikasi Jawaban'}
+                                </button>
+                              )}
                               {canDeleteReply && (
                                 <button
                                   type="button"

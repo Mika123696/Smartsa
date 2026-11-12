@@ -165,7 +165,10 @@ async function handleAi(body, decodedToken) {
     const nowMs = Date.now();
     const hasActiveExamInFirestore = attemptSnap.docs.some((docSnap) => {
       const data = docSnap.data();
-      if (data?.status !== 'in_progress' && data?.examActive !== true) {
+      const isInProgress =
+        data?.status === 'in_progress' ||
+        (data?.examActive === true && data?.status !== 'submitted');
+      if (!isInProgress) {
         return false;
       }
       const expiresAtMs =
@@ -329,9 +332,16 @@ async function resolveCallerRole(db, decodedToken) {
 }
 
 async function handleGrade(body, decodedToken) {
-  const { classId = 'subj_pbo', examType = 'pretest', answers = {}, action = 'submit' } = body || {};
+  const {
+    classId = 'subj_pbo',
+    meetingNo = 1,
+    examType = 'pretest',
+    answers = {},
+    action = 'submit',
+  } = body || {};
   const safeClassId = String(classId || 'subj_pbo').trim().replace(/[^a-zA-Z0-9_-]/g, '');
   const safeExamType = examType === 'posttest' ? 'posttest' : 'pretest';
+  const parsedMeetingNo = meetingNo === undefined || meetingNo === null || meetingNo === '' ? 1 : Number(meetingNo);
 
   if (!safeClassId) {
     return {
@@ -340,8 +350,16 @@ async function handleGrade(body, decodedToken) {
     };
   }
 
+  if (!Number.isInteger(parsedMeetingNo) || parsedMeetingNo < 1 || parsedMeetingNo > 32) {
+    return {
+      status: 400,
+      payload: { error: 'meetingNo harus berupa bilangan bulat 1–32.', code: 'INVALID_MEETING_NO' },
+    };
+  }
+
+  const safeMeetingNo = parsedMeetingNo;
   const db = getFirestore();
-  const attemptId = `${safeClassId}_${decodedToken.uid}`;
+  const attemptId = `${safeClassId}_m${safeMeetingNo}_${safeExamType}_${decodedToken.uid}`;
 
   if (action === 'instructor_keys') {
     const callerRole = await resolveCallerRole(db, decodedToken);
@@ -373,6 +391,7 @@ async function handleGrade(body, decodedToken) {
       status: 200,
       payload: {
         classId: safeClassId,
+        meetingNo: safeMeetingNo,
         examType: safeExamType,
         answerKey,
       },
@@ -388,6 +407,7 @@ async function handleGrade(body, decodedToken) {
         {
           attemptId,
           classId: safeClassId,
+          meetingNo: safeMeetingNo,
           uid: decodedToken.uid,
           examType: safeExamType,
           status: 'in_progress',
@@ -404,6 +424,7 @@ async function handleGrade(body, decodedToken) {
       payload: {
         attemptId,
         classId: safeClassId,
+        meetingNo: safeMeetingNo,
         examType: safeExamType,
         status: 'in_progress',
         examActive: true,
@@ -446,6 +467,7 @@ async function handleGrade(body, decodedToken) {
       {
         attemptId,
         classId: safeClassId,
+        meetingNo: safeMeetingNo,
         uid: decodedToken.uid,
         examType: safeExamType,
         status: 'submitted',
@@ -466,6 +488,7 @@ async function handleGrade(body, decodedToken) {
     payload: {
       attemptId,
       classId: safeClassId,
+      meetingNo: safeMeetingNo,
       examType: safeExamType,
       status: 'submitted',
       examActive: false,

@@ -35,7 +35,13 @@ function getLocalExamSession() {
   }
 }
 
-export function setLocalExamSession({ classId, examType, active, durationMs = 15 * 60 * 1000 }) {
+export function setLocalExamSession({
+  classId,
+  meetingNo = 1,
+  examType,
+  active,
+  durationMs = 15 * 60 * 1000,
+}) {
   try {
     if (active) {
       sessionStorage.setItem(
@@ -43,6 +49,7 @@ export function setLocalExamSession({ classId, examType, active, durationMs = 15
         JSON.stringify({
           active: true,
           classId: classId || 'subj_pbo',
+          meetingNo: Number(meetingNo) || 1,
           examType: examType || 'pretest',
           expiresAt: Date.now() + durationMs,
         })
@@ -57,7 +64,7 @@ export function setLocalExamSession({ classId, examType, active, durationMs = 15
   if (typeof window !== 'undefined') {
     window.dispatchEvent(
       new CustomEvent('smartsa_exam_status_changed', {
-        detail: { active: Boolean(active), classId, examType },
+        detail: { active: Boolean(active), classId, meetingNo: Number(meetingNo) || 1, examType },
       })
     );
   }

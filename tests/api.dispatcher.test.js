@@ -212,10 +212,71 @@ describe('Backend API Dispatcher (api/index.js)', () => {
     expect(mockSetAttempt).toHaveBeenCalledTimes(1);
     expect(mockSetAttempt).toHaveBeenCalledWith(
       expect.objectContaining({
-        attemptId: 'subj_pbo_student_03',
+        attemptId: 'subj_pbo_m1_pretest_student_03',
+        meetingNo: 1,
+        examType: 'pretest',
         score: 75,
         passed: true,
         examActive: false,
+      }),
+      { merge: true }
+    );
+  });
+
+  it('isolates per-meeting posttest attemptId from meeting 1 pretest on POST /api/grade', async () => {
+    mockVerifyIdToken.mockResolvedValueOnce({ uid: 'student_03', role: 'student' });
+
+    const mockDocIds = [];
+    const mockSetAttempt = vi.fn(async () => {});
+
+    mockCollection.mockImplementation((name) => {
+      if (name === 'exam_keys') {
+        return {
+          doc: vi.fn(() => ({
+            get: vi.fn(async () => ({
+              exists: true,
+              data: () => ({
+                posttest: { q1: 1, q2: 2, q3: 1, q4: 1 },
+              }),
+            })),
+          })),
+        };
+      }
+      if (name === 'exam_attempts') {
+        return {
+          doc: vi.fn((docId) => {
+            mockDocIds.push(docId);
+            return { set: mockSetAttempt };
+          }),
+        };
+      }
+      return {};
+    });
+
+    const req = {
+      method: 'POST',
+      url: '/api/grade',
+      headers: { authorization: 'Bearer valid-token' },
+      body: {
+        action: 'submit',
+        classId: 'subj_pbo',
+        meetingNo: 2,
+        examType: 'posttest',
+        answers: { q1: 1, q2: 2, q3: 1, q4: 1 }, // 4/4 => 100
+      },
+    };
+    const res = createMockRes();
+
+    await handler(req, res);
+
+    expect(res.statusCode).toBe(200);
+    expect(mockDocIds).toEqual(['subj_pbo_m2_posttest_student_03']);
+    expect(mockSetAttempt).toHaveBeenCalledWith(
+      expect.objectContaining({
+        attemptId: 'subj_pbo_m2_posttest_student_03',
+        meetingNo: 2,
+        examType: 'posttest',
+        score: 100,
       }),
       { merge: true }
     );

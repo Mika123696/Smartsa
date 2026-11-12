@@ -7,7 +7,11 @@ import {
   getSemesterAttendanceSummary,
   recordMeetingAttendance,
 } from '../../services/attendanceService';
-import { fetchClasses, fetchUserExamAttempts } from '../../services/lmsFirestoreService';
+import {
+  fetchClasses,
+  fetchUserExamAttempts,
+  fetchUserLearningProgress,
+} from '../../services/lmsFirestoreService';
 import SafeImage from '../common/SafeImage';
 import {
   Calendar,
@@ -29,6 +33,7 @@ import {
   AlertTriangle,
   ChevronRight,
   UserCheck,
+  TrendingUp,
 } from 'lucide-react';
 
 export default function StudentDashboard({ onNavigateTab, onSelectActivity }) {
@@ -39,6 +44,7 @@ export default function StudentDashboard({ onNavigateTab, onSelectActivity }) {
   const [classes, setClasses] = useState([]);
   const [loadingClasses, setLoadingClasses] = useState(true);
   const [examAttempts, setExamAttempts] = useState([]);
+  const [learningProgress, setLearningProgress] = useState([]);
 
   // State Modals Interaktif
   const [isLainnyaOpen, setIsLainnyaOpen] = useState(false);
@@ -101,14 +107,16 @@ export default function StudentDashboard({ onNavigateTab, onSelectActivity }) {
   const loadDashboardData = async () => {
     setLoadingClasses(true);
     try {
-      const [classRes, summary, attempts] = await Promise.all([
+      const [classRes, summary, attempts, progressList] = await Promise.all([
         fetchClasses(),
         getSemesterAttendanceSummary(currentUser?.uid),
         currentUser ? fetchUserExamAttempts(currentUser.uid) : Promise.resolve([]),
+        currentUser ? fetchUserLearningProgress(currentUser.uid) : Promise.resolve([]),
       ]);
       setClasses(classRes.classes || []);
       setSemesterAttendance(summary || { progress: 0, attended: 0 });
       setExamAttempts(attempts || []);
+      setLearningProgress(progressList || []);
     } finally {
       setLoadingClasses(false);
     }
@@ -172,10 +180,7 @@ export default function StudentDashboard({ onNavigateTab, onSelectActivity }) {
     userProfile?.nip ||
     (isDemoMode ? '25050974001' : t('not_set'));
 
-  const userPhoto =
-    userProfile?.photoURL ||
-    currentUser?.photoURL ||
-    'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?auto=format&fit=crop&w=120&q=80';
+  const userPhoto = userProfile?.photoURL || currentUser?.photoURL || null;
 
   const activeInstitution =
     userProfile?.institution || 'Universitas Negeri Surabaya';
@@ -226,6 +231,22 @@ export default function StudentDashboard({ onNavigateTab, onSelectActivity }) {
 
   const latestPretest = examAttempts.find((a) => a.examType === 'pretest' && typeof a.score === 'number');
   const latestPosttest = examAttempts.find((a) => a.examType === 'posttest' && typeof a.score === 'number');
+  const completedModulesCount = learningProgress.filter(
+    (p) => p.materialCompleted && p.videoCompleted
+  ).length;
+  const latestMatchedGain = (() => {
+    if (!latestPosttest) return null;
+    const matchPretest = examAttempts.find(
+      (a) =>
+        a.examType === 'pretest' &&
+        typeof a.score === 'number' &&
+        a.classId === latestPosttest.classId &&
+        Number(a.meetingNo || 1) === Number(latestPosttest.meetingNo || 1)
+    );
+    const base = matchPretest || latestPretest;
+    if (!base) return null;
+    return latestPosttest.score - base.score;
+  })();
 
   const academicServices = [
     {
@@ -536,13 +557,13 @@ export default function StudentDashboard({ onNavigateTab, onSelectActivity }) {
         )}
       </div>
 
-      {/* 5. TELEMETRI PROGRES KEHADIRAN SEMESTER (+6%/SCAN) */}
+      {/* 5. TELEMETRI PROGRES KEHADIRAN & LEARNING GAIN */}
       <div className="bg-white dark:bg-[#121822] p-4 rounded-2xl border border-slate-200 dark:border-[#1e2838] space-y-2.5 shadow-xs dark:shadow-md">
         <div className="flex items-center justify-between text-xs gap-2 flex-wrap">
           <div className="flex items-center gap-2">
             <BookOpen className="w-4 h-4 text-amber-600 dark:text-[#f59e0b]" />
             <span className="font-mono font-bold text-slate-800 dark:text-slate-200 text-[11px] uppercase tracking-wider">
-              {language === 'en' ? 'Semester Attendance Accumulation' : 'Akumulasi Kehadiran Semester'}
+              {language === 'en' ? 'Semester Attendance & Learning Gain' : 'Akumulasi Kehadiran & Progres Belajar'}
             </span>
           </div>
           <span className="text-[10px] font-mono font-bold text-sky-700 dark:text-[#00e5ff] bg-sky-50 dark:bg-[#00e5ff]/15 px-2 py-0.5 rounded border border-sky-200 dark:border-[#00e5ff]/30">
@@ -563,6 +584,33 @@ export default function StudentDashboard({ onNavigateTab, onSelectActivity }) {
             </span>
             <span>
               {classes.length} {language === 'en' ? 'Active Courses' : 'Mata Kuliah Aktif'}
+            </span>
+          </div>
+        </div>
+
+        <div className="grid grid-cols-3 gap-2 pt-2 border-t border-slate-100 dark:border-[#1e2838] font-mono text-center">
+          <div className="p-2 rounded-xl bg-slate-50 dark:bg-[#0a0f18] border border-slate-200 dark:border-[#1e2a3f]">
+            <span className="text-[9px] text-slate-500 block">MODUL SELESAI</span>
+            <span className="text-sm font-black text-sky-600 dark:text-[#00e5ff]">
+              {completedModulesCount}
+            </span>
+          </div>
+          <div className="p-2 rounded-xl bg-slate-50 dark:bg-[#0a0f18] border border-slate-200 dark:border-[#1e2a3f]">
+            <span className="text-[9px] text-slate-500 block">PRETEST / POST</span>
+            <span className="text-sm font-black text-amber-600 dark:text-[#f59e0b]">
+              {latestPretest ? latestPretest.score : '—'} / {latestPosttest ? latestPosttest.score : '—'}
+            </span>
+          </div>
+          <div className="p-2 rounded-xl bg-slate-50 dark:bg-[#0a0f18] border border-slate-200 dark:border-[#1e2a3f]">
+            <span className="text-[9px] text-slate-500 flex items-center justify-center gap-1">
+              <TrendingUp className="w-3 h-3 text-emerald-500" /> GAIN (Δ)
+            </span>
+            <span className="text-sm font-black text-emerald-600 dark:text-emerald-400">
+              {latestMatchedGain !== null
+                ? latestMatchedGain >= 0
+                  ? `+${latestMatchedGain}`
+                  : latestMatchedGain
+                : '—'}
             </span>
           </div>
         </div>
