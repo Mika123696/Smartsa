@@ -69,8 +69,8 @@ export async function getActiveExamStatus() {
     return { isExamActive: true, activeAttempt: localSession };
   }
 
-  const user = auth.currentUser;
-  if (!user) {
+  const user = auth?.currentUser;
+  if (!user || !db) {
     return { isExamActive: false, activeAttempt: null };
   }
 
@@ -116,8 +116,8 @@ export function subscribeActiveExamStatus(onChange) {
   }
 
   let unsubFirestore = () => {};
-  const user = auth.currentUser;
-  if (user) {
+  const user = auth?.currentUser;
+  if (user && db) {
     const q = query(collection(db, 'exam_attempts'), where('uid', '==', user.uid));
     unsubFirestore = onSnapshot(
       q,
@@ -204,7 +204,7 @@ export async function askAIAssistant({ mode = 'learning', prompt, context = '', 
   }
 
   // Kirim permintaan ke endpoint backend /api/ai dengan Firebase ID Token
-  if (auth.currentUser) {
+  if (auth?.currentUser) {
     try {
       const token = await auth.currentUser.getIdToken();
       const res = await fetch('/api/ai', {

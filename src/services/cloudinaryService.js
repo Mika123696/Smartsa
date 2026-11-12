@@ -119,7 +119,7 @@ export async function uploadMediaFile(file, category = 'image') {
   }
 
   // 3. Permintaan signature ke endpoint backend /api/upload-sign dengan Firebase ID Token
-  if (auth.currentUser) {
+  if (auth?.currentUser) {
     try {
       const token = await auth.currentUser.getIdToken();
       const res = await fetch('/api/upload-sign', {

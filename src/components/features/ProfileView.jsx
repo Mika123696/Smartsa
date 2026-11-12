@@ -4,6 +4,7 @@ import { useLanguage } from '../../context/useLanguage';
 import { useTheme } from '../../context/useTheme';
 import { ROLES, ROLE_BADGE_COLORS } from '../../constants/roles';
 import { uploadMediaFile, isValidExternalUrl } from '../../services/cloudinaryService';
+import SafeImage from '../common/SafeImage';
 import {
   Shield,
   CheckCircle,
@@ -282,9 +283,11 @@ export default function ProfileView({ onOpenAuth }) {
       <div className="bg-white dark:bg-[#121822] p-4 sm:p-5 rounded-xl border border-slate-200 dark:border-[#232f42] text-slate-900 dark:text-slate-100 relative shadow-xs">
         <div className="flex items-center gap-4">
           <div className="relative shrink-0 group">
-            <img
+            <SafeImage
               src={currentPhoto}
               alt={activeDisplayName}
+              fallbackLabel={activeDisplayName}
+              variant="avatar"
               className="w-16 h-16 rounded-xl object-cover ring-2 ring-amber-400/60 dark:ring-[#f59e0b]/40 shadow-md group-hover:brightness-90 transition"
             />
             <button
@@ -664,9 +667,11 @@ export default function ProfileView({ onOpenAuth }) {
             <div className="p-5 overflow-y-auto space-y-5">
               <div className="text-center space-y-2 py-2">
                 <div className="relative inline-block">
-                  <img
+                  <SafeImage
                     src={previewPhoto || currentPhoto}
                     alt="Preview"
+                    fallbackLabel={activeDisplayName}
+                    variant="avatar"
                     className="w-24 h-24 rounded-2xl object-cover ring-4 ring-[#f59e0b]/50 shadow-xl mx-auto bg-slate-100 dark:bg-[#0b0f17]"
                   />
                   <div className="absolute -bottom-1 -right-1 bg-[#f59e0b] text-black text-[10px] font-mono font-bold px-1.5 py-0.5 rounded-md shadow-xs border border-black/40">
@@ -730,9 +735,11 @@ export default function ProfileView({ onOpenAuth }) {
                         }`}
                       >
                         <div className="relative">
-                          <img
+                          <SafeImage
                             src={avatar.url}
                             alt={avatar.name}
+                            fallbackLabel={avatar.name}
+                            variant="avatar"
                             className="w-12 h-12 rounded-lg object-cover"
                           />
                           {isSelected && (

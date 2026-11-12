@@ -1,4 +1,5 @@
-import { useState, useEffect, useRef, useCallback } from 'react';
+import { useState, useEffect, useRef, useCallback, lazy, Suspense } from 'react';
+import { WifiOff } from 'lucide-react';
 import { ThemeProvider } from './context/ThemeContext';
 import { AuthProvider } from './context/AuthContext';
 import { LanguageProvider } from './context/LanguageContext';
@@ -8,6 +9,7 @@ import { ROLES } from './constants/roles';
 import { fetchClasses, normalizeClassDoc } from './services/lmsFirestoreService';
 
 // Common & Public UI Components
+import ErrorBoundary from './components/common/ErrorBoundary';
 import Navbar from './components/common/Navbar';
 import Sidebar from './components/common/Sidebar';
 import Topbar from './components/common/Topbar';
@@ -17,22 +19,33 @@ import FloatingActionButton from './components/common/FloatingActionButton';
 import AuthModal from './components/common/AuthModal';
 import { AccessibleDialog } from './components/common/AccessibleDialog';
 
-// Public Portal Views
+// Lightweight Public & LMS Views
 import LandingPage from './components/public/LandingPage';
-import PublicCatalog from './components/public/PublicCatalog';
-import AboutPage from './components/public/AboutPage';
-
-// LMS Dashboard & Feature Views
-import StudentDashboard from './components/dashboard/StudentDashboard';
-import TeacherDashboard from './components/dashboard/TeacherDashboard';
-import AdminDashboard from './components/dashboard/AdminDashboard';
 import ScheduleTab from './components/features/ScheduleTab';
 import MaterialsTab from './components/features/MaterialsTab';
 import DiscussionTab from './components/features/DiscussionTab';
-import ProfileView from './components/features/ProfileView';
-import ClassDetailView from './components/features/ClassDetailView';
-import AIAssistantView from './components/features/AIAssistantView';
-import ClassesView from './components/features/ClassesView';
+
+// Lazy-loaded Heavy Feature & Portal Views (Code-Splitting)
+const PublicCatalog = lazy(() => import('./components/public/PublicCatalog'));
+const AboutPage = lazy(() => import('./components/public/AboutPage'));
+const StudentDashboard = lazy(() => import('./components/dashboard/StudentDashboard'));
+const TeacherDashboard = lazy(() => import('./components/dashboard/TeacherDashboard'));
+const AdminDashboard = lazy(() => import('./components/dashboard/AdminDashboard'));
+const ProfileView = lazy(() => import('./components/features/ProfileView'));
+const ClassDetailView = lazy(() => import('./components/features/ClassDetailView'));
+const AIAssistantView = lazy(() => import('./components/features/AIAssistantView'));
+const ClassesView = lazy(() => import('./components/features/ClassesView'));
+
+function ViewFallback() {
+  return (
+    <div className="min-h-[40vh] flex flex-col items-center justify-center gap-3 p-8 text-center">
+      <div className="w-8 h-8 rounded-full border-2 border-amber-500 border-t-transparent animate-spin" />
+      <span className="text-xs font-mono tracking-wider text-slate-500 dark:text-slate-400">
+        MEMUAT MODUL HALAMAN...
+      </span>
+    </div>
+  );
+}
 
 const PUBLIC_VIEWS = ['landing', 'catalog', 'about'];
 const LMS_VIEWS = [
@@ -70,6 +83,48 @@ function MainApp() {
   // Exam Lockout Navigation Guard
   const [isExamActive, setIsExamActive] = useState(false);
   const [pendingNavView, setPendingNavView] = useState(null);
+
+  // Real-time Offline / Online Status Detection
+  const [isOnline, setIsOnline] = useState(() =>
+    typeof navigator !== 'undefined' ? navigator.onLine : true
+  );
+
+  useEffect(() => {
+    const handleOnline = () => setIsOnline(true);
+    const handleOffline = () => setIsOnline(false);
+    window.addEventListener('online', handleOnline);
+    window.addEventListener('offline', handleOffline);
+    return () => {
+      window.removeEventListener('online', handleOnline);
+      window.removeEventListener('offline', handleOffline);
+    };
+  }, []);
+
+  // Sync dynamic document.title based on active view & role
+  useEffect(() => {
+    const viewTitles = {
+      landing: language === 'en' ? 'Home' : 'Beranda',
+      catalog: language === 'en' ? 'Course Catalog' : 'Katalog Kelas',
+      about: language === 'en' ? 'About Smartsa' : 'Tentang Smartsa',
+      dashboard:
+        role === ROLES.ADMIN
+          ? 'Admin Console'
+          : role === ROLES.LECTURER
+            ? language === 'en'
+              ? 'Educator Hub'
+              : 'Hub Pengajar'
+            : 'Dashboard',
+      'classes-all': language === 'en' ? 'All Classes' : 'Semua Kelas',
+      kelas: language === 'en' ? 'Schedule & Attendance' : 'Jadwal & Presensi',
+      materi: language === 'en' ? 'Materials & Tasks' : 'Materi & Tugas',
+      diskusi: language === 'en' ? 'Discussion Forum' : 'Forum Diskusi',
+      detail: selectedSubject?.name || selectedSubject?.title || (language === 'en' ? 'Class Detail' : 'Detail Kelas'),
+      ai: language === 'en' ? 'Smartsa AI Assistant' : 'Asisten AI Smartsa',
+      profil: language === 'en' ? 'Profile & Settings' : 'Profil & Pengaturan',
+    };
+    const label = viewTitles[activeView] || 'Learning Management System';
+    document.title = `${label} | Smartsa LMS`;
+  }, [activeView, language, role, selectedSubject?.name, selectedSubject?.title]);
 
   const activeViewRef = useRef(activeView);
   const isExamActiveRef = useRef(isExamActive);
@@ -351,6 +406,21 @@ function MainApp() {
 
   return (
     <div className="min-h-screen bg-slate-50 dark:bg-[#0d1117] text-slate-900 dark:text-slate-100 font-sans antialiased selection:bg-[#f59e0b] selection:text-black transition-colors">
+      {!isOnline && (
+        <div
+          role="status"
+          aria-live="polite"
+          className="sticky top-0 z-50 w-full bg-amber-500 text-black px-4 py-2 text-xs font-semibold flex items-center justify-center gap-2 shadow-sm"
+        >
+          <WifiOff className="w-4 h-4 shrink-0" />
+          <span>
+            {language === 'en'
+              ? 'You are currently offline. Viewing cached Firestore data — changes will sync automatically when online.'
+              : 'Anda sedang offline. Menampilkan data cache Firestore — perubahan akan tersinkron otomatis saat kembali terhubung.'}
+          </span>
+        </div>
+      )}
+
       {isPublicView ? (
         <div className="min-h-screen flex flex-col">
           <Navbar
@@ -360,18 +430,20 @@ function MainApp() {
           />
 
           <main className="flex-1">
-            {activeView === 'catalog' ? (
-              <PublicCatalog onSelectClass={handleSelectSubject} />
-            ) : activeView === 'about' ? (
-              <AboutPage onGoToDashboard={() => navigateTo('dashboard')} />
-            ) : (
-              <LandingPage
-                onGoToDashboard={() => navigateTo('dashboard')}
-                onGoToCatalog={() => navigateTo('catalog')}
-                onOpenAuth={() => setAuthModalOpen(true)}
-                onSelectClass={handleSelectSubject}
-              />
-            )}
+            <Suspense fallback={<ViewFallback />}>
+              {activeView === 'catalog' ? (
+                <PublicCatalog onSelectClass={handleSelectSubject} />
+              ) : activeView === 'about' ? (
+                <AboutPage onGoToDashboard={() => navigateTo('dashboard')} />
+              ) : (
+                <LandingPage
+                  onGoToDashboard={() => navigateTo('dashboard')}
+                  onGoToCatalog={() => navigateTo('catalog')}
+                  onOpenAuth={() => setAuthModalOpen(true)}
+                  onSelectClass={handleSelectSubject}
+                />
+              )}
+            </Suspense>
           </main>
 
           <footer className="border-t border-slate-200 dark:border-[#232b38] bg-white dark:bg-[#12161f] py-6 px-4 sm:px-6 lg:px-8 text-xs text-slate-500 dark:text-slate-400">
@@ -406,7 +478,9 @@ function MainApp() {
             <MobileHeader />
 
             <main className="flex-1 w-full max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-4 sm:py-6 pb-28 md:pb-10">
-              {renderLMSContent()}
+              <Suspense fallback={<ViewFallback />}>
+                {renderLMSContent()}
+              </Suspense>
             </main>
 
             <FloatingActionButton
@@ -443,12 +517,14 @@ function MainApp() {
 
 export default function App() {
   return (
-    <ThemeProvider>
-      <LanguageProvider>
-        <AuthProvider>
-          <MainApp />
-        </AuthProvider>
-      </LanguageProvider>
-    </ThemeProvider>
+    <ErrorBoundary>
+      <ThemeProvider>
+        <LanguageProvider>
+          <AuthProvider>
+            <MainApp />
+          </AuthProvider>
+        </LanguageProvider>
+      </ThemeProvider>
+    </ErrorBoundary>
   );
 }

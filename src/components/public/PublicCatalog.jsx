@@ -3,6 +3,7 @@ import { Search, Users } from 'lucide-react';
 import { useLanguage } from '../../context/useLanguage';
 import { fetchPublicClasses } from '../../services/lmsFirestoreService';
 import { DEMO_CLASSES } from '../../services/mockData';
+import SafeImage from '../common/SafeImage';
 
 export default function PublicCatalog({ onSelectClass }) {
   const { t, language } = useLanguage();
@@ -103,9 +104,11 @@ export default function PublicCatalog({ onSelectClass }) {
               className="text-left bg-white dark:bg-[#121822] border border-slate-200 dark:border-[#232f42] rounded-2xl overflow-hidden shadow-xs hover:shadow-md transition cursor-pointer flex flex-col justify-between group"
             >
               <div className="relative h-40 w-full overflow-hidden">
-                <img
+                <SafeImage
                   src={cls.coverImage}
                   alt={cls.name || cls.title}
+                  fallbackLabel={cls.code || cls.name || cls.title}
+                  variant="cover"
                   className="w-full h-full object-cover group-hover:scale-105 transition duration-300"
                 />
                 <span className="absolute top-3 right-3 bg-slate-900/80 backdrop-blur-xs text-white text-xs font-mono font-bold px-2 py-0.5 rounded-md">

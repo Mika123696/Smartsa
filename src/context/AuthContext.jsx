@@ -82,12 +82,16 @@ export function AuthProvider({ children }) {
   const [currentUser, setCurrentUser] = useState(null);
   const [userProfile, setUserProfile] = useState(DEMO_USERS.student);
   const [role, setRole] = useState(ROLES.STUDENT);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(() => Boolean(auth));
   const [isDemoMode, setIsDemoMode] = useState(true);
   const [authError, setAuthError] = useState(null);
 
   useEffect(() => {
     clearLegacyAuthStorage();
+
+    if (!auth) {
+      return undefined;
+    }
 
     const unsubscribe = onAuthStateChanged(auth, async (user) => {
       if (user) {
@@ -96,14 +100,16 @@ export function AuthProvider({ children }) {
 
         let firestoreData = null;
         let docExists = false;
-        try {
-          const userDoc = await getDoc(doc(db, 'users', user.uid));
-          if (userDoc.exists()) {
-            docExists = true;
-            firestoreData = stripSensitiveFields(userDoc.data());
+        if (db) {
+          try {
+            const userDoc = await getDoc(doc(db, 'users', user.uid));
+            if (userDoc.exists()) {
+              docExists = true;
+              firestoreData = stripSensitiveFields(userDoc.data());
+            }
+          } catch (err) {
+            console.warn('Firestore getDoc gagal:', err);
           }
-        } catch (err) {
-          console.warn('Firestore getDoc gagal:', err);
         }
 
         const profile = buildUserProfile(user, firestoreData);
@@ -111,7 +117,7 @@ export function AuthProvider({ children }) {
         setRole(profile.role);
 
         // Hanya buat dokumen awal jika belum ada (role wajib 'student' sesuai firestore.rules)
-        if (!docExists) {
+        if (!docExists && db) {
           try {
             const initialDoc = {
               uid: profile.uid,
@@ -142,9 +148,21 @@ export function AuthProvider({ children }) {
     return () => unsubscribe();
   }, []);
 
+  const ensureFirebaseAuth = () => {
+    if (!auth) {
+      const err = new Error(
+        'Layanan Firebase Auth belum dikonfigurasi. Lengkapi VITE_FIREBASE_* pada file .env.'
+      );
+      err.code = 'auth/not-configured';
+      setAuthError(err.message);
+      throw err;
+    }
+  };
+
   // 1. Login dengan Email & Kata Sandi (Firebase Auth murni, tanpa menimpa role di Firestore)
   const login = async (email, password) => {
     setAuthError(null);
+    ensureFirebaseAuth();
     const cleanEmail = (email || '').trim().toLowerCase();
     const enteredPassword = password || '';
 
@@ -160,13 +178,15 @@ export function AuthProvider({ children }) {
       const fbUser = res.user;
 
       let fsData = null;
-      try {
-        const userDoc = await getDoc(doc(db, 'users', fbUser.uid));
-        if (userDoc.exists()) {
-          fsData = stripSensitiveFields(userDoc.data());
+      if (db) {
+        try {
+          const userDoc = await getDoc(doc(db, 'users', fbUser.uid));
+          if (userDoc.exists()) {
+            fsData = stripSensitiveFields(userDoc.data());
+          }
+        } catch (e) {
+          console.warn('Firestore getDoc error:', e);
         }
-      } catch (e) {
-        console.warn('Firestore getDoc error:', e);
       }
 
       const fullProfile = buildUserProfile(fbUser, fsData);
@@ -191,6 +211,7 @@ export function AuthProvider({ children }) {
     nim = ''
   ) => {
     setAuthError(null);
+    ensureFirebaseAuth();
     const cleanEmail = (email || '').trim().toLowerCase();
     const safeRole = ROLES.STUDENT;
     const cleanName = (displayName || '').trim() || (cleanEmail ? cleanEmail.split('@')[0] : 'Pengguna Smartsa');
@@ -225,10 +246,12 @@ export function AuthProvider({ children }) {
         updatedAt: serverTimestamp(),
       };
 
-      try {
-        await setDoc(doc(db, 'users', res.user.uid), newUserDoc);
-      } catch (fsErr) {
-        console.warn('Firestore setDoc failed:', fsErr);
+      if (db) {
+        try {
+          await setDoc(doc(db, 'users', res.user.uid), newUserDoc);
+        } catch (fsErr) {
+          console.warn('Firestore setDoc failed:', fsErr);
+        }
       }
 
       const profileState = {
@@ -249,35 +272,38 @@ export function AuthProvider({ children }) {
   // 3. Login dengan Akun Google (role default 'student' saat dokumen baru dibuat, tidak menimpa role lama)
   const loginWithGoogle = async () => {
     setAuthError(null);
+    ensureFirebaseAuth();
     try {
       const provider = new GoogleAuthProvider();
       provider.setCustomParameters({ prompt: 'select_account' });
       const res = await signInWithPopup(auth, provider);
 
       let firestoreData = null;
-      try {
-        const userRef = doc(db, 'users', res.user.uid);
-        const userDoc = await getDoc(userRef);
-        if (userDoc.exists()) {
-          firestoreData = stripSensitiveFields(userDoc.data());
-        } else {
-          firestoreData = {
-            uid: res.user.uid,
-            email: res.user.email || '',
-            displayName: res.user.displayName || 'Mahasiswa Smartsa',
-            photoURL: res.user.photoURL || null,
-            role: ROLES.STUDENT,
-            institution: 'Universitas Negeri Surabaya',
-            nim: '',
-            emailVerified: Boolean(res.user.emailVerified),
-            provider: 'google.com',
-            createdAt: serverTimestamp(),
-            updatedAt: serverTimestamp(),
-          };
-          await setDoc(userRef, firestoreData);
+      if (db) {
+        try {
+          const userRef = doc(db, 'users', res.user.uid);
+          const userDoc = await getDoc(userRef);
+          if (userDoc.exists()) {
+            firestoreData = stripSensitiveFields(userDoc.data());
+          } else {
+            firestoreData = {
+              uid: res.user.uid,
+              email: res.user.email || '',
+              displayName: res.user.displayName || 'Mahasiswa Smartsa',
+              photoURL: res.user.photoURL || null,
+              role: ROLES.STUDENT,
+              institution: 'Universitas Negeri Surabaya',
+              nim: '',
+              emailVerified: Boolean(res.user.emailVerified),
+              provider: 'google.com',
+              createdAt: serverTimestamp(),
+              updatedAt: serverTimestamp(),
+            };
+            await setDoc(userRef, firestoreData);
+          }
+        } catch (fsErr) {
+          console.warn('Firestore Google login error:', fsErr);
         }
-      } catch (fsErr) {
-        console.warn('Firestore Google login error:', fsErr);
       }
 
       const googleProfile = buildUserProfile(res.user, firestoreData);
@@ -296,34 +322,37 @@ export function AuthProvider({ children }) {
   // 4. Login dengan Akun GitHub (role default 'student' saat dokumen baru dibuat, tidak menimpa role lama)
   const loginWithGithub = async () => {
     setAuthError(null);
+    ensureFirebaseAuth();
     try {
       const provider = new GithubAuthProvider();
       const res = await signInWithPopup(auth, provider);
 
       let firestoreData = null;
-      try {
-        const userRef = doc(db, 'users', res.user.uid);
-        const userDoc = await getDoc(userRef);
-        if (userDoc.exists()) {
-          firestoreData = stripSensitiveFields(userDoc.data());
-        } else {
-          firestoreData = {
-            uid: res.user.uid,
-            email: res.user.email || '',
-            displayName: res.user.displayName || 'Pengguna GitHub',
-            photoURL: res.user.photoURL || null,
-            role: ROLES.STUDENT,
-            institution: 'Universitas Negeri Surabaya',
-            nim: '',
-            emailVerified: Boolean(res.user.emailVerified),
-            provider: 'github.com',
-            createdAt: serverTimestamp(),
-            updatedAt: serverTimestamp(),
-          };
-          await setDoc(userRef, firestoreData);
+      if (db) {
+        try {
+          const userRef = doc(db, 'users', res.user.uid);
+          const userDoc = await getDoc(userRef);
+          if (userDoc.exists()) {
+            firestoreData = stripSensitiveFields(userDoc.data());
+          } else {
+            firestoreData = {
+              uid: res.user.uid,
+              email: res.user.email || '',
+              displayName: res.user.displayName || 'Pengguna GitHub',
+              photoURL: res.user.photoURL || null,
+              role: ROLES.STUDENT,
+              institution: 'Universitas Negeri Surabaya',
+              nim: '',
+              emailVerified: Boolean(res.user.emailVerified),
+              provider: 'github.com',
+              createdAt: serverTimestamp(),
+              updatedAt: serverTimestamp(),
+            };
+            await setDoc(userRef, firestoreData);
+          }
+        } catch (fsErr) {
+          console.warn('Firestore Github login error:', fsErr);
         }
-      } catch (fsErr) {
-        console.warn('Firestore Github login error:', fsErr);
       }
 
       const githubProfile = buildUserProfile(res.user, firestoreData);
@@ -342,7 +371,7 @@ export function AuthProvider({ children }) {
   // 5. Keluar Akun (Logout)
   const logout = async () => {
     try {
-      if (auth.currentUser) {
+      if (auth?.currentUser) {
         await signOut(auth);
       }
     } catch (e) {
@@ -358,6 +387,7 @@ export function AuthProvider({ children }) {
   // 6. Reset Kata Sandi via Email
   const resetPassword = async (email) => {
     setAuthError(null);
+    ensureFirebaseAuth();
     const cleanEmail = (email || '').trim();
     if (!cleanEmail) {
       const err = new Error('Email wajib diisi.');
@@ -383,7 +413,7 @@ export function AuthProvider({ children }) {
       photoURL: cleanPhoto,
     }));
 
-    const activeUser = auth.currentUser || currentUser;
+    const activeUser = auth?.currentUser || currentUser;
     if (activeUser && !isDemoMode) {
       if (!cleanPhoto.startsWith('data:') && isAuthProfilePhotoUrlSafe(cleanPhoto)) {
         try {
@@ -392,14 +422,16 @@ export function AuthProvider({ children }) {
           console.warn('Gagal update Firebase Auth photoURL:', err);
         }
       }
-      try {
-        await setDoc(
-          doc(db, 'users', activeUser.uid),
-          { photoURL: cleanPhoto, updatedAt: serverTimestamp() },
-          { merge: true }
-        );
-      } catch (err) {
-        console.warn('Gagal update Firestore user photoURL:', err);
+      if (db) {
+        try {
+          await setDoc(
+            doc(db, 'users', activeUser.uid),
+            { photoURL: cleanPhoto, updatedAt: serverTimestamp() },
+            { merge: true }
+          );
+        } catch (err) {
+          console.warn('Gagal update Firestore user photoURL:', err);
+        }
       }
     }
   };
@@ -426,7 +458,7 @@ export function AuthProvider({ children }) {
       ...sanitizedUpdate,
     }));
 
-    const activeUser = auth.currentUser || currentUser;
+    const activeUser = auth?.currentUser || currentUser;
     if (activeUser && !isDemoMode) {
       const authProfileUpdates = {};
       if (sanitizedUpdate.displayName) {
@@ -448,14 +480,16 @@ export function AuthProvider({ children }) {
         }
       }
 
-      try {
-        await setDoc(
-          doc(db, 'users', activeUser.uid),
-          { ...sanitizedUpdate, updatedAt: serverTimestamp() },
-          { merge: true }
-        );
-      } catch (err) {
-        console.warn('Gagal update Firestore user data:', err);
+      if (db) {
+        try {
+          await setDoc(
+            doc(db, 'users', activeUser.uid),
+            { ...sanitizedUpdate, updatedAt: serverTimestamp() },
+            { merge: true }
+          );
+        } catch (err) {
+          console.warn('Gagal update Firestore user data:', err);
+        }
       }
     }
   };

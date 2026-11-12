@@ -8,6 +8,7 @@ import {
   recordMeetingAttendance,
 } from '../../services/attendanceService';
 import { fetchClasses, fetchUserExamAttempts } from '../../services/lmsFirestoreService';
+import SafeImage from '../common/SafeImage';
 import {
   Calendar,
   GraduationCap,
@@ -323,9 +324,11 @@ export default function StudentDashboard({ onNavigateTab, onSelectActivity }) {
             title={language === 'en' ? 'Open Account Profile' : 'Klik untuk membuka Profil Akun'}
           >
             <div className="w-16 h-16 sm:w-20 sm:h-20 rounded-full p-0.5 bg-red-600 ring-2 ring-white shadow-xl group-hover:scale-105 transition-transform overflow-hidden flex items-center justify-center">
-              <img
+              <SafeImage
                 src={userPhoto}
                 alt={fullName}
+                fallbackLabel={fullName}
+                variant="avatar"
                 className="w-full h-full rounded-full object-cover"
               />
             </div>

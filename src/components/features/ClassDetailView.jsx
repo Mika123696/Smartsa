@@ -237,7 +237,7 @@ export default function ClassDetailView({
     examEndTimeRef.current = null;
     const targetClassId = classIdRef.current;
 
-    if (!auth.currentUser) {
+    if (!auth?.currentUser) {
       const demoScore = computeLocalDevScore(answersToGrade);
       setLocalExamSession({ classId: targetClassId, examType: typeToGrade, active: false });
       setExamScore(demoScore);
@@ -360,7 +360,7 @@ export default function ClassDetailView({
       durationMs: 900 * 1000,
     });
 
-    if (auth.currentUser) {
+    if (auth?.currentUser) {
       try {
         const token = await auth.currentUser.getIdToken();
         const res = await fetch('/api/grade', {

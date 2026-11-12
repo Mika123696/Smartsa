@@ -58,7 +58,7 @@ function emitAttendanceUpdated(detail = {}) {
 export async function getClassAttendanceSession(classId) {
   if (!classId) return null;
 
-  if (!auth.currentUser) {
+  if (!auth?.currentUser || !db) {
     const demoSess = demoSessionStore.get(classId) || null;
     if (demoSess && demoSess.expiresAt <= Date.now()) {
       return { ...demoSess, isOpen: false, isExpired: true };
@@ -113,11 +113,11 @@ export async function openAttendanceSession({
     sessionCode,
     openedAt: nowMs,
     expiresAt,
-    openedBy: auth.currentUser?.uid || 'demo_lecturer',
+    openedBy: auth?.currentUser?.uid || 'demo_lecturer',
     isOpen: true,
   };
 
-  if (!auth.currentUser) {
+  if (!auth?.currentUser || !db) {
     demoSessionStore.set(classId, sessionPayload);
     emitAttendanceUpdated({ classId, meetingNo: parsedMeetingNo, sessionOpened: true });
     return sessionPayload;
@@ -135,7 +135,7 @@ export async function openAttendanceSession({
 export async function closeAttendanceSession(classId) {
   if (!classId) return;
 
-  if (!auth.currentUser) {
+  if (!auth?.currentUser || !db) {
     demoSessionStore.delete(classId);
     emitAttendanceUpdated({ classId, sessionClosed: true });
     return;
@@ -151,8 +151,8 @@ export async function closeAttendanceSession(classId) {
 export async function getClassAttendance(classId, uidOverride = null) {
   if (!classId) return { classId: '', attendedOrders: [], progress: 0, history: [] };
 
-  const uid = uidOverride || auth.currentUser?.uid;
-  if (!uid) {
+  const uid = uidOverride || auth?.currentUser?.uid;
+  if (!uid || !db) {
     const existing = demoAttendanceStore.get(classId);
     return (
       existing || {
@@ -199,8 +199,8 @@ export async function getClassAttendance(classId, uidOverride = null) {
 }
 
 export async function getSemesterAttendanceSummary(uidOverride = null) {
-  const uid = uidOverride || auth.currentUser?.uid;
-  if (!uid) {
+  const uid = uidOverride || auth?.currentUser?.uid;
+  if (!uid || !db) {
     let totalAttended = 0;
     for (const record of demoAttendanceStore.values()) {
       totalAttended += record.attendedOrders.length;
@@ -235,10 +235,10 @@ export async function recordMeetingAttendance({
     return { success: false, message: 'Data kelas tidak valid.' };
   }
 
-  const uid = auth.currentUser?.uid;
+  const uid = auth?.currentUser?.uid;
 
   // Mode Demo (tanpa akun Firebase aktif) -> simpan in-memory agar UI tetap responsif
-  if (!uid) {
+  if (!uid || !db) {
     const demoSession = demoSessionStore.get(classId);
     const resolvedOrder = Number.parseInt(meetingNo || demoSession?.meetingNo || 1, 10);
     if (demoSession) {

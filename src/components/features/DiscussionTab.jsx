@@ -11,6 +11,7 @@ import {
   deleteDiscussionTopic,
 } from '../../services/lmsFirestoreService';
 import { AccessibleDialog } from '../common/AccessibleDialog';
+import SafeImage from '../common/SafeImage';
 import {
   MessageSquare,
   ThumbsUp,
@@ -332,10 +333,12 @@ export default function DiscussionTab() {
                 {/* Header */}
                 <div className="flex items-start justify-between gap-2">
                   <div className="flex items-center gap-2.5">
-                    <img
+                    <SafeImage
                       src={d.avatar}
-                      alt=""
-                      className="w-9 h-9 rounded-full object-cover ring-2 ring-[#f59e0b]/40"
+                      alt={d.author}
+                      fallbackLabel={d.author}
+                      variant="avatar"
+                      className="w-9 h-9 rounded-full object-cover ring-2 ring-[#f59e0b]/40 shrink-0"
                     />
                     <div>
                       <h4 className="text-xs sm:text-sm font-bold text-slate-900 dark:text-slate-100">

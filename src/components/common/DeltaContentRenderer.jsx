@@ -3,6 +3,8 @@
  * Mencegah Stored XSS dengan merender setiap op Delta sebagai elemen React terstruktur.
  */
 
+import SafeImage from './SafeImage';
+
 function isSafeHttpUrl(url) {
   if (typeof url !== 'string') return false;
   try {
@@ -211,7 +213,13 @@ export default function DeltaContentRenderer({ delta, fallbackText = '' }) {
         if (block.type === 'image') {
           return (
             <div key={block.key} className="my-3 rounded-xl overflow-hidden border border-slate-200 dark:border-[#232f42]">
-              <img src={block.imageUrl} alt="Ilustrasi modul pembelajaran" className="max-h-80 w-full object-cover" />
+              <SafeImage
+                src={block.imageUrl}
+                alt="Ilustrasi modul pembelajaran"
+                fallbackLabel="ILUSTRASI MODUL"
+                variant="media"
+                className="max-h-80 min-h-36 w-full object-cover"
+              />
             </div>
           );
         }

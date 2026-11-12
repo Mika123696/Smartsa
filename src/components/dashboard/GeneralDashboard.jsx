@@ -3,6 +3,7 @@ import { useAuth } from '../../context/useAuth';
 import { useLanguage } from '../../context/useLanguage';
 import { fetchPublicClasses } from '../../services/lmsFirestoreService';
 import { DEMO_CLASSES } from '../../services/mockData';
+import SafeImage from '../common/SafeImage';
 import {
   BookOpen,
   Sparkles,
@@ -158,9 +159,11 @@ export default function GeneralDashboard({ onSelectClass, onNavigateView }) {
               className="text-left bg-white dark:bg-[#121822] border border-slate-200 dark:border-[#232f42] rounded-2xl overflow-hidden shadow-xs hover:shadow-md transition cursor-pointer flex flex-col justify-between group"
             >
               <div className="relative h-32 w-full overflow-hidden">
-                <img
+                <SafeImage
                   src={cls.coverImage}
                   alt={cls.name || cls.title}
+                  fallbackLabel={cls.code || cls.name || cls.title}
+                  variant="cover"
                   className="w-full h-full object-cover group-hover:scale-105 transition duration-300"
                 />
                 <span className="absolute top-2.5 right-2.5 bg-amber-600 text-white text-[10px] font-bold px-2 py-0.5 rounded-md">

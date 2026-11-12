@@ -90,6 +90,13 @@ export function normalizeClassDoc(id, data = {}) {
 }
 
 export async function fetchPublicClasses() {
+  if (!db) {
+    return {
+      classes: DEMO_CLASSES.map((c) => normalizeClassDoc(c.id, c)),
+      isEmpty: false,
+      source: 'demo',
+    };
+  }
   try {
     const q = query(collection(db, 'classes'), where('isPublic', '==', true));
     const snap = await getDocs(q);
@@ -111,7 +118,7 @@ export async function fetchPublicClasses() {
 }
 
 export async function fetchClasses() {
-  if (!auth.currentUser) {
+  if (!auth?.currentUser || !db) {
     return {
       classes: DEMO_CLASSES.map((c) => normalizeClassDoc(c.id, c)),
       isEmpty: false,
@@ -139,8 +146,8 @@ export async function fetchClasses() {
 }
 
 export async function fetchJoinedMemberships(uidOverride = null) {
-  const uid = uidOverride || auth.currentUser?.uid;
-  if (!uid) return [];
+  const uid = uidOverride || auth?.currentUser?.uid;
+  if (!uid || !db) return [];
 
   try {
     const q = query(
@@ -179,7 +186,7 @@ export async function createClassInFirestore({
     description: description.trim() || 'Kelas pembelajaran interaktif Smartsa LMS.',
     instructor: instructorName,
     lecturer: instructorName,
-    lecturerId: auth.currentUser?.uid || 'demo_lecturer',
+    lecturerId: auth?.currentUser?.uid || 'demo_lecturer',
     category,
     day,
     time,
@@ -196,7 +203,7 @@ export async function createClassInFirestore({
     meetings,
   };
 
-  if (auth.currentUser) {
+  if (auth?.currentUser && db) {
     await setDoc(doc(db, 'classes', classId), {
       ...payload,
       createdAt: serverTimestamp(),
@@ -215,7 +222,7 @@ export async function joinClassWithToken(classCode) {
     throw new Error('Kode kelas minimal terdiri dari 4 karakter alfanumerik.');
   }
 
-  if (!auth.currentUser) {
+  if (!auth?.currentUser || !db) {
     const found = DEMO_CLASSES.find((c) => c.code.toUpperCase() === cleanCode);
     if (!found) {
       throw new Error('Kode kelas tidak valid atau kelas tidak aktif (Mode Demo).');
@@ -314,7 +321,7 @@ function isDeadlineOverdue(deadline) {
 }
 
 export async function fetchAssignmentsWithUserSubmissions({ classId = null } = {}) {
-  if (!auth.currentUser) {
+  if (!auth?.currentUser || !db) {
     return { assignments: [], isEmpty: true, source: 'demo' };
   }
 
@@ -391,8 +398,8 @@ export async function submitAssignmentToFirestore({
   storageType = 'cloudinary',
   notes = '',
 }) {
-  const user = auth.currentUser;
-  if (!user) {
+  const user = auth?.currentUser;
+  if (!user || !db) {
     throw new Error('Masuk dengan akun Firebase untuk menyimpan pengumpulan tugas ke Firestore.');
   }
 
@@ -465,14 +472,14 @@ export async function submitAssignmentToFirestore({
 }
 
 export async function cancelSubmissionInFirestore(assignmentId) {
-  const user = auth.currentUser;
-  if (!user) return;
+  const user = auth?.currentUser;
+  if (!user || !db) return;
   const submissionId = `${assignmentId}_${user.uid}`;
   await deleteDoc(doc(db, 'submissions', submissionId));
 }
 
 export async function fetchAllSubmissionsForGrading() {
-  if (!auth.currentUser) return [];
+  if (!auth?.currentUser || !db) return [];
 
   try {
     const snap = await getDocs(collection(db, 'submissions'));
@@ -502,8 +509,8 @@ export async function fetchAllSubmissionsForGrading() {
 }
 
 export async function gradeSubmissionInFirestore({ submissionId, grade, feedback = '' }) {
-  const user = auth.currentUser;
-  if (!user) {
+  const user = auth?.currentUser;
+  if (!user || !db) {
     throw new Error('Masuk sebagai Dosen untuk menyimpan nilai ke Firestore.');
   }
   const numericGrade = Number(grade);
@@ -527,7 +534,7 @@ export async function gradeSubmissionInFirestore({ submissionId, grade, feedback
 // =========================================================================
 
 export function subscribeDiscussions(callback, classIdFilter = null) {
-  if (!auth.currentUser) {
+  if (!auth?.currentUser || !db) {
     callback({ discussions: [], source: 'demo' });
     return () => {};
   }
@@ -567,8 +574,8 @@ export function subscribeDiscussions(callback, classIdFilter = null) {
 }
 
 export async function createDiscussionTopic({ classId, subject, content, authorName, avatar }) {
-  const user = auth.currentUser;
-  if (!user) {
+  const user = auth?.currentUser;
+  if (!user || !db) {
     throw new Error('Masuk dengan akun Firebase untuk mengirim topik diskusi ke Firestore.');
   }
   const now = new Date();
@@ -598,8 +605,8 @@ export async function createDiscussionTopic({ classId, subject, content, authorN
 }
 
 export async function toggleLikeDiscussion(discussion) {
-  const user = auth.currentUser;
-  if (!user || !discussion?.id) return;
+  const user = auth?.currentUser;
+  if (!user || !db || !discussion?.id) return;
 
   const currentLikedBy = Array.isArray(discussion.likedBy) ? discussion.likedBy : [];
   const hasLiked = currentLikedBy.includes(user.uid);
@@ -616,8 +623,8 @@ export async function toggleLikeDiscussion(discussion) {
 }
 
 export async function addDiscussionReply(discussion, replyText, authorName) {
-  const user = auth.currentUser;
-  if (!user || !discussion?.id) return;
+  const user = auth?.currentUser;
+  if (!user || !db || !discussion?.id) return;
 
   const now = new Date();
   const timeFormatted = `${now.getHours().toString().padStart(2, '0')}:${now
@@ -640,8 +647,8 @@ export async function addDiscussionReply(discussion, replyText, authorName) {
 }
 
 export async function deleteDiscussionReply(discussion, replyIndex) {
-  const user = auth.currentUser;
-  if (!user || !discussion?.id) return;
+  const user = auth?.currentUser;
+  if (!user || !db || !discussion?.id) return;
 
   const nextReplies = (discussion.replies || []).filter((_, idx) => idx !== replyIndex);
   await updateDoc(doc(db, 'discussions', discussion.id), {
@@ -651,7 +658,7 @@ export async function deleteDiscussionReply(discussion, replyIndex) {
 }
 
 export async function deleteDiscussionTopic(discussionId) {
-  if (!auth.currentUser || !discussionId) return;
+  if (!auth?.currentUser || !db || !discussionId) return;
   await deleteDoc(doc(db, 'discussions', discussionId));
 }
 
@@ -660,8 +667,8 @@ export async function deleteDiscussionTopic(discussionId) {
 // =========================================================================
 
 export async function fetchUserExamAttempts(uidOverride = null) {
-  const uid = uidOverride || auth.currentUser?.uid;
-  if (!uid) return [];
+  const uid = uidOverride || auth?.currentUser?.uid;
+  if (!uid || !db) return [];
 
   try {
     const q = query(collection(db, 'exam_attempts'), where('uid', '==', uid));
@@ -674,8 +681,8 @@ export async function fetchUserExamAttempts(uidOverride = null) {
 }
 
 export async function fetchClassExamAttempt(classId, uidOverride = null) {
-  const uid = uidOverride || auth.currentUser?.uid;
-  if (!uid || !classId) return null;
+  const uid = uidOverride || auth?.currentUser?.uid;
+  if (!uid || !db || !classId) return null;
 
   try {
     const snap = await getDoc(doc(db, 'exam_attempts', `${classId}_${uid}`));
@@ -690,7 +697,7 @@ export async function fetchClassExamAttempt(classId, uidOverride = null) {
 // =========================================================================
 
 export async function fetchAdminOverviewData() {
-  if (!auth.currentUser) {
+  if (!auth?.currentUser || !db) {
     return { users: [], classes: [], source: 'demo' };
   }
 
@@ -716,7 +723,7 @@ export async function fetchAdminOverviewData() {
 }
 
 export async function updateUserVerificationByAdmin(uid, { role, verificationStatus }) {
-  if (!auth.currentUser || !uid) {
+  if (!auth?.currentUser || !db || !uid) {
     throw new Error('Otorisasi admin diperlukan untuk memperbarui status pengguna.');
   }
   await updateDoc(doc(db, 'users', uid), {

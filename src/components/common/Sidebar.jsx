@@ -1,6 +1,7 @@
 import { useAuth } from '../../context/useAuth';
 import { useLanguage } from '../../context/useLanguage';
 import { ROLES, ROLE_BADGE_COLORS } from '../../constants/roles';
+import SafeImage from './SafeImage';
 import {
   LayoutDashboard,
   BookOpen,
@@ -80,13 +81,15 @@ export default function Sidebar({ currentView, setCurrentView }) {
 
         {/* User mini profile box */}
         <div className="p-4 border-b border-slate-200 dark:border-[#232b38] flex items-center gap-3">
-          <img
+          <SafeImage
             src={
               userProfile?.photoURL ||
               currentUser?.photoURL ||
               'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?auto=format&fit=crop&w=120&q=80'
             }
             alt={displayName}
+            fallbackLabel={displayName}
+            variant="avatar"
             className="w-10 h-10 rounded-xl object-cover ring-2 ring-amber-500/30 shrink-0"
           />
           <div className="min-w-0">
