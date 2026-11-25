@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { useAuth } from '../../context/useAuth';
 import { useLanguage } from '../../context/useLanguage';
 import {
@@ -10,7 +10,7 @@ import {
   AlertTriangle,
   Calendar,
 } from 'lucide-react';
-import { fetchClasses } from '../../services/lmsFirestoreService';
+import { fetchClassesForUser } from '../../services/lmsFirestoreService';
 import {
   getClassAttendance,
   getClassAttendanceSession,
@@ -19,9 +19,9 @@ import {
 
 export default function ScheduleTab() {
   const { t, language } = useLanguage();
-  const { currentUser } = useAuth();
+  const { currentUser, role } = useAuth();
 
-  const currentKey = currentUser?.uid || 'demo';
+  const currentKey = `${currentUser?.uid || 'demo'}_${role || 'student'}`;
   const [subjects, setSubjects] = useState([]);
   const [loadedKey, setLoadedKey] = useState(null);
   const [selectedQRSubject, setSelectedQRSubject] = useState(null);
@@ -35,18 +35,27 @@ export default function ScheduleTab() {
   const [isScanning, setIsScanning] = useState(false);
   const [lastScanResult, setLastScanResult] = useState(null);
 
+  const reqIdRef = useRef(0);
   const loading = loadedKey !== currentKey;
 
   useEffect(() => {
     let mounted = true;
+    const reqId = ++reqIdRef.current;
 
     const syncSubjects = async () => {
       try {
-        const res = await fetchClasses();
-        if (!mounted) return;
+        const res = currentUser?.uid
+          ? await fetchClassesForUser({ uid: currentUser.uid, role })
+          : { classes: [] };
+        if (!mounted || reqId !== reqIdRef.current) return;
         setSubjects(res.classes || []);
+        setSelectedQRSubject(null);
+        setSelectedHistorySubject(null);
+        setSessionCodeInput('');
+        setLastScanResult(null);
+        setQrSubmitted(false);
       } finally {
-        if (mounted) setLoadedKey(currentKey);
+        if (mounted && reqId === reqIdRef.current) setLoadedKey(currentKey);
       }
     };
 
@@ -59,7 +68,7 @@ export default function ScheduleTab() {
       mounted = false;
       window.removeEventListener('smartsa_attendance_updated', handleUpdate);
     };
-  }, [currentKey]);
+  }, [currentKey, currentUser?.uid, role]);
 
   useEffect(() => {
     if (!selectedQRSubject && !selectedHistorySubject) return;

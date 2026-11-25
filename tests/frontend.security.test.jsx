@@ -10,6 +10,11 @@ const {
   mockUpdateDoc,
   mockOnSnapshot,
   mockUpdateProfile,
+  mockCollection,
+  mockGetDocs,
+  mockQuery,
+  mockWhere,
+  mockDocumentId,
 } = vi.hoisted(() => ({
   mockAuthObj: { currentUser: null },
   mockDbObj: { name: 'mock-db' },
@@ -19,6 +24,11 @@ const {
   mockUpdateDoc: vi.fn(),
   mockOnSnapshot: vi.fn(() => () => {}),
   mockUpdateProfile: vi.fn(),
+  mockCollection: vi.fn((_db, col) => ({ col })),
+  mockGetDocs: vi.fn(async () => ({ docs: [] })),
+  mockQuery: vi.fn((...args) => ({ type: 'query', args })),
+  mockWhere: vi.fn((...args) => ({ type: 'where', args })),
+  mockDocumentId: vi.fn(() => '__name__'),
 }));
 
 vi.mock('../src/firebase', () => ({
@@ -46,25 +56,52 @@ vi.mock('firebase/firestore', () => ({
   getDoc: mockGetDoc,
   setDoc: mockSetDoc,
   serverTimestamp: vi.fn(() => 'SERVER_TIMESTAMP'),
-  collection: vi.fn(),
-  getDocs: vi.fn(async () => ({ docs: [] })),
+  collection: mockCollection,
+  getDocs: mockGetDocs,
   onSnapshot: mockOnSnapshot,
-  orderBy: vi.fn(),
-  query: vi.fn(),
+  orderBy: vi.fn((...args) => ({ type: 'orderBy', args })),
+  query: mockQuery,
   updateDoc: mockUpdateDoc,
-  where: vi.fn(),
+  where: mockWhere,
+  documentId: mockDocumentId,
   addDoc: vi.fn(),
   deleteDoc: vi.fn(),
 }));
 
 import DeltaContentRenderer from '../src/components/common/DeltaContentRenderer';
 import SafeImage from '../src/components/common/SafeImage';
+import Navbar from '../src/components/common/Navbar';
+import { ThemeProvider } from '../src/context/ThemeContext';
 import { AuthProvider } from '../src/context/AuthContext';
 import { LanguageProvider } from '../src/context/LanguageContext';
 import { useAuth } from '../src/context/useAuth';
 import ClassDetailView from '../src/components/features/ClassDetailView';
 import DiscussionTab from '../src/components/features/DiscussionTab';
-import { upsertLearningProgress } from '../src/services/lmsFirestoreService';
+import MaterialsTab from '../src/components/features/MaterialsTab';
+import ProfileView from '../src/components/features/ProfileView';
+import LandingPage from '../src/components/public/LandingPage';
+import PublicCatalog from '../src/components/public/PublicCatalog';
+import GeneralDashboard from '../src/components/dashboard/GeneralDashboard';
+import AdminDashboard from '../src/components/dashboard/AdminDashboard';
+import StudentDashboard from '../src/components/dashboard/StudentDashboard';
+import {
+  createClassInFirestore,
+  fetchAssignmentsWithUserSubmissions,
+  fetchClasses,
+  fetchClassesForUser,
+  fetchLearningProgressByClass,
+  fetchPublicClasses,
+  fetchSubmissionsForLecturerClasses,
+  fetchUserClassExamAttempts,
+  normalizeClassDoc,
+  upsertLearningProgress,
+} from '../src/services/lmsFirestoreService';
+import {
+  clearDemoAttendanceStore,
+  getSemesterAttendanceSummary,
+  recordMeetingAttendance,
+} from '../src/services/attendanceService';
+import { getActiveExamStatus, setLocalExamSession } from '../src/services/aiService';
 
 describe('Frontend Security & UI Components', () => {
   beforeEach(() => {
@@ -72,10 +109,17 @@ describe('Frontend Security & UI Components', () => {
     mockAuthObj.currentUser = null;
     localStorage.clear();
     sessionStorage.clear();
+    clearDemoAttendanceStore();
+    mockCollection.mockImplementation((_db, col) => ({ col }));
+    mockGetDocs.mockResolvedValue({ docs: [] });
+    mockQuery.mockImplementation((...args) => ({ type: 'query', args }));
+    mockWhere.mockImplementation((...args) => ({ type: 'where', args }));
+    mockDocumentId.mockImplementation(() => '__name__');
   });
 
   afterEach(() => {
     vi.useRealTimers();
+    vi.unstubAllGlobals();
   });
 
   it('sanitizes XSS payloads and blocks javascript: URLs in DeltaContentRenderer', () => {
@@ -186,8 +230,8 @@ describe('Frontend Security & UI Components', () => {
       return (
         <div>
           <span data-testid="role">{role}</span>
-          <span data-testid="nim">{userProfile.nim}</span>
-          <span data-testid="name">{userProfile.displayName}</span>
+          <span data-testid="nim">{userProfile?.nim || ''}</span>
+          <span data-testid="name">{userProfile?.displayName || ''}</span>
           <span data-testid="demo">{String(isDemoMode)}</span>
           <button
             type="button"
@@ -239,12 +283,68 @@ describe('Frontend Security & UI Components', () => {
   });
 
   it('auto-submits exam and clears exam lockout state when exam timer expires in ClassDetailView', async () => {
-    vi.useFakeTimers();
-    mockAuthObj.currentUser = null;
+    const studentUser = {
+      uid: 'uid_student_01',
+      email: 'mhs@gmail.com',
+      displayName: 'Mahasiswa Uji',
+      emailVerified: true,
+      getIdToken: vi.fn(async () => 'mock-student-token'),
+    };
+    mockAuthObj.currentUser = studentUser;
     mockOnAuthStateChanged.mockImplementation((_auth, cb) => {
-      void cb(null);
+      void cb(studentUser);
       return () => {};
     });
+    mockGetDoc.mockImplementation(async (ref) => {
+      if (ref?.path === 'users/uid_student_01') {
+        return {
+          exists: () => true,
+          data: () => ({ uid: 'uid_student_01', role: 'student', displayName: 'Mahasiswa Uji' }),
+        };
+      }
+      if (ref?.path === 'exams/subj_pbo_m1_pretest') {
+        return {
+          exists: () => true,
+          data: () => ({
+            examId: 'subj_pbo_m1_pretest',
+            classId: 'subj_pbo',
+            meetingNo: 1,
+            examType: 'pretest',
+            questions: [
+              { id: 'q1', question: 'Apa prinsip enkapsulasi?', options: ['A', 'B', 'C', 'D'] },
+            ],
+          }),
+        };
+      }
+      return { exists: () => false };
+    });
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (_url, opts) => {
+        const body = JSON.parse(opts?.body || '{}');
+        return {
+          ok: true,
+          headers: { get: () => 'application/json' },
+          json: async () =>
+            body.action === 'start'
+              ? {
+                  attemptId: 'subj_pbo_m1_pretest_uid_student_01',
+                  meetingNo: 1,
+                  examType: 'pretest',
+                  status: 'in_progress',
+                  examActive: true,
+                }
+              : {
+                  attemptId: 'subj_pbo_m1_pretest_uid_student_01',
+                  meetingNo: 1,
+                  examType: 'pretest',
+                  status: 'submitted',
+                  examActive: false,
+                  score: 100,
+                },
+        };
+      })
+    );
 
     const onExamStateChange = vi.fn();
 
@@ -256,8 +356,17 @@ describe('Frontend Security & UI Components', () => {
               id: 'subj_pbo',
               name: 'Pemrograman Berorientasi Objek',
               code: 'PBO101',
-              meetings: [],
+              meetings: [
+                {
+                  id: 'subj_pbo_m1',
+                  order: 1,
+                  title: 'Pertemuan 01: Pengantar OOP',
+                  date: 'Senin, 08.00–10.30',
+                  status: 'in_progress',
+                },
+              ],
             }}
+            isMember={true}
             onBack={vi.fn()}
             onNavigateAI={vi.fn()}
             onExamStateChange={onExamStateChange}
@@ -266,8 +375,13 @@ describe('Frontend Security & UI Components', () => {
       </LanguageProvider>
     );
 
-    // Switch to Exam tab
+    // Switch to Exam tab and wait until dynamic exam questions finish loading
     fireEvent.click(screen.getByRole('button', { name: /PRETEST & EVALUASI/i }));
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: /MULAI PRETEST/i })).not.toBeDisabled();
+    });
+
+    vi.useFakeTimers();
 
     // Start Pretest
     await act(async () => {
@@ -317,9 +431,9 @@ describe('Frontend Security & UI Components', () => {
       return (
         <div>
           <span data-testid="admin-role">{ctx.role}</span>
-          <span data-testid="admin-name">{ctx.userProfile.displayName}</span>
-          <span data-testid="admin-nip">{ctx.userProfile.nip}</span>
-          <span data-testid="admin-photo">{String(ctx.userProfile.photoURL)}</span>
+          <span data-testid="admin-name">{ctx.userProfile?.displayName || ''}</span>
+          <span data-testid="admin-nip">{ctx.userProfile?.nip || ''}</span>
+          <span data-testid="admin-photo">{String(ctx.userProfile?.photoURL ?? null)}</span>
           <span data-testid="has-sim">{String('simulateDevRole' in ctx)}</span>
         </div>
       );
@@ -377,11 +491,80 @@ describe('Frontend Security & UI Components', () => {
   });
 
   it('gates Posttest behind Pretest + Materi + Video, locks Pretest baseline, and renders Gain Card in ClassDetailView', async () => {
-    mockAuthObj.currentUser = null;
+    const studentUser = {
+      uid: 'uid_student_02',
+      email: 'mhs2@gmail.com',
+      displayName: 'Mahasiswa Gain',
+      emailVerified: true,
+      getIdToken: vi.fn(async () => 'mock-student-token-2'),
+    };
+    mockAuthObj.currentUser = studentUser;
+    mockSetDoc.mockResolvedValue(undefined);
     mockOnAuthStateChanged.mockImplementation((_auth, cb) => {
-      void cb(null);
+      void cb(studentUser);
       return () => {};
     });
+    mockGetDoc.mockImplementation(async (ref) => {
+      if (ref?.path === 'users/uid_student_02') {
+        return {
+          exists: () => true,
+          data: () => ({ uid: 'uid_student_02', role: 'student', displayName: 'Mahasiswa Gain' }),
+        };
+      }
+      if (ref?.path === 'exams/subj_pbo_m1_pretest') {
+        return {
+          exists: () => true,
+          data: () => ({
+            examId: 'subj_pbo_m1_pretest',
+            classId: 'subj_pbo',
+            meetingNo: 1,
+            examType: 'pretest',
+            questions: [{ id: 'q1', question: 'Pretest Q1?', options: ['A', 'B', 'C', 'D'] }],
+          }),
+        };
+      }
+      if (ref?.path === 'exams/subj_pbo_m1_posttest') {
+        return {
+          exists: () => true,
+          data: () => ({
+            examId: 'subj_pbo_m1_posttest',
+            classId: 'subj_pbo',
+            meetingNo: 1,
+            examType: 'posttest',
+            questions: [{ id: 'q1', question: 'Posttest Q1?', options: ['A', 'B', 'C', 'D'] }],
+          }),
+        };
+      }
+      return { exists: () => false };
+    });
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (_url, opts) => {
+        const body = JSON.parse(opts?.body || '{}');
+        const score = body.examType === 'posttest' ? 100 : 50;
+        return {
+          ok: true,
+          headers: { get: () => 'application/json' },
+          json: async () =>
+            body.action === 'start'
+              ? {
+                  attemptId: `subj_pbo_m1_${body.examType}_uid_student_02`,
+                  meetingNo: 1,
+                  examType: body.examType,
+                  status: 'in_progress',
+                  examActive: true,
+                }
+              : {
+                  attemptId: `subj_pbo_m1_${body.examType}_uid_student_02`,
+                  meetingNo: 1,
+                  examType: body.examType,
+                  status: 'submitted',
+                  examActive: false,
+                  score,
+                },
+        };
+      })
+    );
 
     render(
       <LanguageProvider>
@@ -391,8 +574,17 @@ describe('Frontend Security & UI Components', () => {
               id: 'subj_pbo',
               name: 'Pemrograman Berorientasi Objek',
               code: 'PBO101',
-              meetings: [],
+              meetings: [
+                {
+                  id: 'subj_pbo_m1',
+                  order: 1,
+                  title: 'Pertemuan 01: Pengantar OOP',
+                  date: 'Senin, 08.00–10.30',
+                  status: 'in_progress',
+                },
+              ],
             }}
+            isMember={true}
             onBack={vi.fn()}
             onNavigateAI={vi.fn()}
           />
@@ -400,8 +592,11 @@ describe('Frontend Security & UI Components', () => {
       </LanguageProvider>
     );
 
-    // 1. Go to Exam tab: Posttest is locked initially
+    // 1. Go to Exam tab: wait for configured exams, Posttest must be locked initially
     fireEvent.click(screen.getByRole('button', { name: /PRETEST & EVALUASI/i }));
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: /MULAI PRETEST/i })).not.toBeDisabled();
+    });
     const posttestBtnInitial = screen.getByRole('button', { name: /MULAI POST-TEST/i });
     expect(posttestBtnInitial).toBeDisabled();
     expect(screen.getByText(/PRETEST VS POSTTEST GAIN/i)).toBeInTheDocument();
@@ -437,7 +632,7 @@ describe('Frontend Security & UI Components', () => {
     const unlockedPosttestBtn = screen.getByRole('button', { name: /MULAI POST-TEST/i });
     expect(unlockedPosttestBtn).not.toBeDisabled();
 
-    // Complete Posttest and verify Gain Card displays delta
+    // Complete Posttest and verify Gain Card displays delta (+50)
     await act(async () => {
       fireEvent.click(unlockedPosttestBtn);
     });
@@ -540,5 +735,911 @@ describe('Frontend Security & UI Components', () => {
         verifiedReplyId: 'rep_01',
       })
     );
+  });
+
+  it('creates 100% empty classes without auto-seeded fallback meetings or dummy materials', async () => {
+    mockAuthObj.currentUser = { uid: 'uid_dosen_clean' };
+    mockSetDoc.mockResolvedValue(undefined);
+
+    const created = await createClassInFirestore({
+      name: 'Sistem Terdistribusi',
+      category: 'Ilmu Komputer',
+      instructorName: 'Dr. Andi Saputra',
+    });
+
+    expect(created.meetings).toEqual([]);
+    expect(created.meetingsCount).toBe(0);
+    expect(created.materialsCount).toBe(0);
+    expect(created.enrolledCount).toBe(0);
+    expect(created.coverImage).toBe('');
+    expect(created.videoUrl).toBe('');
+    expect(created.pdfUrl).toBe('');
+    expect(created.description).toBe('');
+
+    expect(mockSetDoc).toHaveBeenCalledTimes(1);
+    const [, savedPayload] = mockSetDoc.mock.calls[0];
+    expect(savedPayload.meetings).toEqual([]);
+    expect(savedPayload.meetingsCount).toBe(0);
+    expect(savedPayload.materialsCount).toBe(0);
+
+    const normalizedEmpty = normalizeClassDoc('cls_empty', {
+      name: 'Kelas Kosong',
+      meetings: [],
+    });
+    expect(normalizedEmpty.meetings).toEqual([]);
+    expect(normalizedEmpty.meetingsCount).toBe(0);
+    expect(normalizedEmpty.materialsCount).toBe(0);
+  });
+
+  it('renders empty state for new classes and preserves stable max(order)+1 meeting numbers on add/delete in ClassDetailView', async () => {
+    const lecturerUser = {
+      uid: 'uid_dosen_01',
+      email: 'dosen@smartsa.edu',
+      displayName: 'Dr. Andi Saputra',
+      emailVerified: true,
+    };
+
+    mockAuthObj.currentUser = lecturerUser;
+    mockGetDoc.mockResolvedValue({
+      exists: () => true,
+      data: () => ({
+        uid: 'uid_dosen_01',
+        email: 'dosen@smartsa.edu',
+        displayName: 'Dr. Andi Saputra',
+        role: 'lecturer',
+      }),
+    });
+    mockSetDoc.mockResolvedValue(undefined);
+    mockUpdateDoc.mockResolvedValue(undefined);
+    mockOnAuthStateChanged.mockImplementation((_auth, cb) => {
+      void cb(lecturerUser);
+      return () => {};
+    });
+
+    const onClassUpdated = vi.fn();
+
+    render(
+      <LanguageProvider>
+        <AuthProvider>
+          <ClassDetailView
+            classData={{
+              id: 'cls_new_1',
+              name: 'Kelas Baru Kosong',
+              code: 'CLS101',
+              category: 'Ilmu Komputer',
+              description: '',
+              instructor: 'Dr. Andi Saputra',
+              lecturerId: 'uid_dosen_01',
+              meetings: [],
+              meetingsCount: 0,
+              materialsCount: 0,
+            }}
+            onBack={vi.fn()}
+            onNavigateAI={vi.fn()}
+            onClassUpdated={onClassUpdated}
+          />
+        </AuthProvider>
+      </LanguageProvider>
+    );
+
+    await waitFor(() => {
+      expect(screen.getByText(/Belum Ada Pertemuan di Kelas Ini/i)).toBeInTheDocument();
+    });
+
+    const titleInput = screen.getByPlaceholderText(/Kontrak Kuliah/i);
+    const addBtn = screen.getByRole('button', { name: /^Tambah$/i });
+
+    // 1. Add Meeting 1 (order: 1)
+    fireEvent.change(titleInput, { target: { value: 'Kontrak Kuliah' } });
+    await act(async () => {
+      fireEvent.click(addBtn);
+    });
+
+    expect(mockUpdateDoc).toHaveBeenLastCalledWith(
+      { path: 'classes/cls_new_1' },
+      expect.objectContaining({
+        meetingsCount: 1,
+        meetings: [expect.objectContaining({ id: 'cls_new_1_m1', order: 1, title: 'Kontrak Kuliah' })],
+      })
+    );
+
+    // 2. Add Meeting 2 (order: 2)
+    fireEvent.change(titleInput, { target: { value: 'Struktur Data' } });
+    await act(async () => {
+      fireEvent.click(addBtn);
+    });
+
+    expect(mockUpdateDoc).toHaveBeenLastCalledWith(
+      { path: 'classes/cls_new_1' },
+      expect.objectContaining({
+        meetingsCount: 2,
+        meetings: [
+          expect.objectContaining({ order: 1 }),
+          expect.objectContaining({ id: 'cls_new_1_m2', order: 2, title: 'Struktur Data' }),
+        ],
+      })
+    );
+
+    // 3. Delete Meeting 1 -> Meeting 2 MUST keep order: 2 (no renumbering)
+    fireEvent.click(screen.getByRole('button', { name: /Hapus pertemuan 1/i }));
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /^Hapus$/i }));
+    });
+
+    expect(mockUpdateDoc).toHaveBeenLastCalledWith(
+      { path: 'classes/cls_new_1' },
+      expect.objectContaining({
+        meetingsCount: 1,
+        meetings: [expect.objectContaining({ id: 'cls_new_1_m2', order: 2, title: 'Struktur Data' })],
+      })
+    );
+
+    // 4. Add another meeting -> MUST get max(2) + 1 = 3, NOT 2
+    fireEvent.change(titleInput, { target: { value: 'Algoritma Graf' } });
+    await act(async () => {
+      fireEvent.click(addBtn);
+    });
+
+    expect(mockUpdateDoc).toHaveBeenLastCalledWith(
+      { path: 'classes/cls_new_1' },
+      expect.objectContaining({
+        meetingsCount: 2,
+        meetings: [
+          expect.objectContaining({ id: 'cls_new_1_m2', order: 2, title: 'Struktur Data' }),
+          expect.objectContaining({ id: 'cls_new_1_m3', order: 3, title: 'Algoritma Graf' }),
+        ],
+      })
+    );
+    expect(onClassUpdated).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        meetingsCount: 2,
+      })
+    );
+  });
+
+  it('renders clean empty states for reading material, video, PDF, and unconfigured exams without dummy fallbacks', async () => {
+    const studentUser = {
+      uid: 'uid_student_empty',
+      email: 'mhs.empty@gmail.com',
+      displayName: 'Mahasiswa Baru',
+      emailVerified: true,
+      getIdToken: vi.fn(async () => 'token-empty'),
+    };
+    mockAuthObj.currentUser = studentUser;
+    mockOnAuthStateChanged.mockImplementation((_auth, cb) => {
+      void cb(studentUser);
+      return () => {};
+    });
+    mockGetDoc.mockImplementation(async (ref) => {
+      if (ref?.path === 'users/uid_student_empty') {
+        return {
+          exists: () => true,
+          data: () => ({ uid: 'uid_student_empty', role: 'student', displayName: 'Mahasiswa Baru' }),
+        };
+      }
+      return { exists: () => false };
+    });
+
+    const { container } = render(
+      <LanguageProvider>
+        <AuthProvider>
+          <ClassDetailView
+            classData={{
+              id: 'cls_empty_02',
+              name: 'Keamanan Jaringan',
+              code: 'SEC202',
+              category: 'Keamanan Siber',
+              description: '',
+              instructor: 'Dr. Budi',
+              lecturerId: 'uid_dosen_02',
+              videoUrl: '',
+              pdfUrl: '',
+              meetings: [
+                {
+                  id: 'cls_empty_02_m1',
+                  order: 1,
+                  title: 'Pengantar Kriptografi',
+                  date: 'Selasa, 10.00',
+                  status: 'open',
+                  hasVideo: false,
+                  hasPdf: false,
+                },
+              ],
+            }}
+            isMember={true}
+            onBack={vi.fn()}
+            onNavigateAI={vi.fn()}
+          />
+        </AuthProvider>
+      </LanguageProvider>
+    );
+
+    // 1. Reading tab: no DEFAULT_SAMPLE_DELTA ("Clean Architecture"), clean empty state
+    fireEvent.click(screen.getByRole('button', { name: /DELTA JSON/i }));
+    expect(screen.getByText(/Belum ada materi bacaan untuk pertemuan ini/i)).toBeInTheDocument();
+    expect(screen.queryByText(/Clean Architecture/i)).toBeNull();
+
+    // 2. Video tab: no ForBiggerBlazes.mp4 fallback
+    fireEvent.click(screen.getByRole('button', { name: /VIDEO CDN/i }));
+    expect(
+      screen.getByText(/Belum Ada Video Pembelajaran untuk Pertemuan Ini/i)
+    ).toBeInTheDocument();
+    expect(container.innerHTML).not.toContain('ForBiggerBlazes');
+
+    // 3. Manual Book PDF tab: no synthetic Buku_Panduan_Praktikum_*.txt
+    fireEvent.click(screen.getByRole('button', { name: /MANUAL BOOK/i }));
+    expect(screen.getByText(/Belum Ada Dokumen PDF untuk Pertemuan Ini/i)).toBeInTheDocument();
+    expect(container.innerHTML).not.toContain('Buku_Panduan_Praktikum');
+
+    // 4. Exam tab: unconfigured exams disabled & no hardcoded EXAM_QUESTIONS
+    fireEvent.click(screen.getByRole('button', { name: /PRETEST & EVALUASI/i }));
+    await waitFor(() => {
+      expect(
+        screen.getByText(/Evaluasi untuk pertemuan ini belum dibuat oleh dosen/i)
+      ).toBeInTheDocument();
+    });
+    expect(screen.getByRole('button', { name: /PRETEST BELUM TERSEDIA/i })).toBeDisabled();
+    expect(screen.getByRole('button', { name: /POST-TEST BELUM TERSEDIA/i })).toBeDisabled();
+  });
+
+  it('allows lecturer to manage per-meeting reading material, video/PDF URLs safely, and syncs hasVideo/hasPdf/materialsCount', async () => {
+    const lecturerUser = {
+      uid: 'uid_dosen_01',
+      email: 'dosen@smartsa.edu',
+      displayName: 'Dr. Andi Saputra',
+      emailVerified: true,
+      getIdToken: vi.fn(async () => 'token-dosen'),
+    };
+    mockAuthObj.currentUser = lecturerUser;
+    mockOnAuthStateChanged.mockImplementation((_auth, cb) => {
+      void cb(lecturerUser);
+      return () => {};
+    });
+    mockGetDoc.mockImplementation(async (ref) => {
+      if (ref?.path === 'users/uid_dosen_01') {
+        return {
+          exists: () => true,
+          data: () => ({ uid: 'uid_dosen_01', role: 'lecturer', displayName: 'Dr. Andi Saputra' }),
+        };
+      }
+      return { exists: () => false };
+    });
+    mockUpdateDoc.mockResolvedValue(undefined);
+    const onClassUpdated = vi.fn();
+
+    render(
+      <LanguageProvider>
+        <AuthProvider>
+          <ClassDetailView
+            classData={{
+              id: 'cls_crud_mat',
+              name: 'Algoritma Lanjut',
+              code: 'ALG301',
+              category: 'Ilmu Komputer',
+              description: '',
+              instructor: 'Dr. Andi Saputra',
+              lecturerId: 'uid_dosen_01',
+              videoUrl: '',
+              pdfUrl: '',
+              meetings: [
+                {
+                  id: 'cls_crud_mat_m1',
+                  order: 1,
+                  title: 'Divide and Conquer',
+                  date: 'Rabu, 08.00',
+                  status: 'open',
+                  hasVideo: false,
+                  hasPdf: false,
+                },
+              ],
+            }}
+            onBack={vi.fn()}
+            onNavigateAI={vi.fn()}
+            onClassUpdated={onClassUpdated}
+          />
+        </AuthProvider>
+      </LanguageProvider>
+    );
+
+    await waitFor(() => {
+      expect(screen.getByText(/MODE INSTRUKTUR/i)).toBeInTheDocument();
+    });
+
+    // 1. Save reading material (Delta JSON) -> materialsCount: 1
+    fireEvent.click(screen.getByRole('button', { name: /DELTA JSON/i }));
+    const matTextarea = screen.getByLabelText(/Teks materi pertemuan/i);
+    fireEvent.change(matTextarea, {
+      target: { value: '# Pengantar\nMembagi masalah besar menjadi sub-masalah.' },
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /Simpan Materi/i }));
+    });
+    expect(mockUpdateDoc).toHaveBeenLastCalledWith(
+      { path: 'classes/cls_crud_mat' },
+      expect.objectContaining({
+        materialsCount: 1,
+        meetings: [
+          expect.objectContaining({
+            id: 'cls_crud_mat_m1',
+            deltaContent: expect.objectContaining({ ops: expect.any(Array) }),
+          }),
+        ],
+      })
+    );
+
+    // 2. Reject javascript: video URL, then accept valid https://youtu.be URL -> hasVideo: true
+    fireEvent.click(screen.getByRole('button', { name: /VIDEO CDN/i }));
+    const videoInput = screen.getByLabelText(/URL video pembelajaran pertemuan/i);
+    const prevUpdateCalls = mockUpdateDoc.mock.calls.length;
+
+    fireEvent.change(videoInput, { target: { value: 'javascript:alert(1)' } });
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /Simpan Video/i }));
+    });
+    expect(screen.getByText(/URL video tidak valid/i)).toBeInTheDocument();
+    expect(mockUpdateDoc.mock.calls.length).toBe(prevUpdateCalls);
+
+    fireEvent.change(videoInput, { target: { value: 'https://youtu.be/dQw4w9WgXcQ' } });
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /Simpan Video/i }));
+    });
+    expect(mockUpdateDoc).toHaveBeenLastCalledWith(
+      { path: 'classes/cls_crud_mat' },
+      expect.objectContaining({
+        materialsCount: 2,
+        meetings: [
+          expect.objectContaining({
+            id: 'cls_crud_mat_m1',
+            videoUrl: 'https://youtu.be/dQw4w9WgXcQ',
+            hasVideo: true,
+          }),
+        ],
+      })
+    );
+
+    // 3. Reject invalid javascript: PDF URL, then save valid https:// PDF URL -> hasPdf: true, materialsCount: 3
+    fireEvent.click(screen.getByRole('button', { name: /MANUAL BOOK/i }));
+    const pdfInput = screen.getByLabelText(/URL PDF pertemuan/i);
+    const callsBeforeInvalidPdf = mockUpdateDoc.mock.calls.length;
+    fireEvent.change(pdfInput, { target: { value: 'javascript:alert(2)' } });
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /Simpan PDF/i }));
+    });
+    expect(screen.getByText(/URL PDF tidak valid/i)).toBeInTheDocument();
+    expect(mockUpdateDoc.mock.calls.length).toBe(callsBeforeInvalidPdf);
+
+    fireEvent.change(pdfInput, { target: { value: 'https://example.com/modul-algoritma.pdf' } });
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /Simpan PDF/i }));
+    });
+    expect(mockUpdateDoc).toHaveBeenLastCalledWith(
+      { path: 'classes/cls_crud_mat' },
+      expect.objectContaining({
+        materialsCount: 3,
+        meetings: [
+          expect.objectContaining({
+            id: 'cls_crud_mat_m1',
+            pdfUrl: 'https://example.com/modul-algoritma.pdf',
+            hasPdf: true,
+          }),
+        ],
+      })
+    );
+
+    // 4. Delete Video -> hasVideo: false, materialsCount: 2
+    fireEvent.click(screen.getByRole('button', { name: /VIDEO CDN/i }));
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /Hapus Video/i }));
+    });
+    expect(mockUpdateDoc).toHaveBeenLastCalledWith(
+      { path: 'classes/cls_crud_mat' },
+      expect.objectContaining({
+        materialsCount: 2,
+        meetings: [
+          expect.objectContaining({
+            id: 'cls_crud_mat_m1',
+            videoUrl: '',
+            hasVideo: false,
+          }),
+        ],
+      })
+    );
+    expect(onClassUpdated).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        materialsCount: 2,
+      })
+    );
+  });
+
+  it('allows lecturer to create and save exam questions + server reference answerKey via save_exam without correctIndex', async () => {
+    const lecturerUser = {
+      uid: 'uid_dosen_exam',
+      email: 'dosen.exam@smartsa.edu',
+      displayName: 'Dr. Exam',
+      emailVerified: true,
+      getIdToken: vi.fn(async () => 'token-exam-dosen'),
+    };
+    mockAuthObj.currentUser = lecturerUser;
+    mockOnAuthStateChanged.mockImplementation((_auth, cb) => {
+      void cb(lecturerUser);
+      return () => {};
+    });
+    mockGetDoc.mockImplementation(async (ref) => {
+      if (ref?.path === 'users/uid_dosen_exam') {
+        return {
+          exists: () => true,
+          data: () => ({ uid: 'uid_dosen_exam', role: 'lecturer', displayName: 'Dr. Exam' }),
+        };
+      }
+      return { exists: () => false };
+    });
+
+    const fetchMock = vi.fn(async (_url, opts) => {
+      const parsed = JSON.parse(opts?.body || '{}');
+      if (parsed.action === 'instructor_keys') {
+        return {
+          ok: true,
+          headers: { get: () => 'application/json' },
+          json: async () => ({
+            classId: 'cls_exam_01',
+            meetingNo: 1,
+            examType: 'pretest',
+            answerKey: {},
+            isConfigured: false,
+          }),
+        };
+      }
+      return {
+        ok: true,
+        headers: { get: () => 'application/json' },
+        json: async () => ({
+          saved: true,
+          examId: 'cls_exam_01_m1_pretest',
+          classId: 'cls_exam_01',
+          meetingNo: 1,
+          examType: 'pretest',
+          questionsCount: 1,
+        }),
+      };
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    render(
+      <LanguageProvider>
+        <AuthProvider>
+          <ClassDetailView
+            classData={{
+              id: 'cls_exam_01',
+              name: 'Basis Data',
+              code: 'BD101',
+              category: 'Sistem Informasi',
+              description: '',
+              instructor: 'Dr. Exam',
+              lecturerId: 'uid_dosen_exam',
+              meetings: [
+                {
+                  id: 'cls_exam_01_m1',
+                  order: 1,
+                  title: 'Normalisasi',
+                  date: 'Kamis, 09.00',
+                  status: 'open',
+                },
+              ],
+            }}
+            onBack={vi.fn()}
+            onNavigateAI={vi.fn()}
+          />
+        </AuthProvider>
+      </LanguageProvider>
+    );
+
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: /KUNCI & STATISTIK/i })).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: /KUNCI & STATISTIK/i }));
+    await waitFor(() => {
+      expect(screen.getByLabelText(/Teks Soal 1/i)).toBeInTheDocument();
+    });
+
+    fireEvent.change(screen.getByLabelText(/Teks Soal 1/i), {
+      target: { value: 'Apa tujuan utama bentuk normal ketiga (3NF)?' },
+    });
+    fireEvent.change(screen.getByLabelText(/Soal 1 Opsi 1/i), { target: { value: 'Duplikasi data' } });
+    fireEvent.change(screen.getByLabelText(/Soal 1 Opsi 2/i), {
+      target: { value: 'Menghilangkan ketergantungan transitif' },
+    });
+    fireEvent.change(screen.getByLabelText(/Soal 1 Opsi 3/i), {
+      target: { value: 'Menambah indeks tabel' },
+    });
+    fireEvent.change(screen.getByLabelText(/Soal 1 Opsi 4/i), {
+      target: { value: 'Menggabungkan tabel' },
+    });
+    fireEvent.change(screen.getByLabelText(/Kunci Jawaban Soal 1/i), { target: { value: '1' } });
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /Simpan Soal & Kunci ke Server/i }));
+    });
+
+    const saveCall = fetchMock.mock.calls.find(([, opts]) => {
+      const b = JSON.parse(opts?.body || '{}');
+      return b.action === 'save_exam';
+    });
+    expect(saveCall).toBeDefined();
+    const sentBody = JSON.parse(saveCall[1].body);
+    expect(sentBody).toMatchObject({
+      action: 'save_exam',
+      classId: 'cls_exam_01',
+      meetingNo: 1,
+      examType: 'pretest',
+      answerKey: { q1: 1 },
+      questions: [
+        {
+          id: 'q1',
+          question: 'Apa tujuan utama bentuk normal ketiga (3NF)?',
+          options: [
+            'Duplikasi data',
+            'Menghilangkan ketergantungan transitif',
+            'Menambah indeks tabel',
+            'Menggabungkan tabel',
+          ],
+        },
+      ],
+    });
+    expect(JSON.stringify(sentBody)).not.toContain('correctIndex');
+  });
+
+  it('keeps userProfile null when unauthenticated and renders Navbar/ProfileView/StudentDashboard cleanly without fake demo identities', async () => {
+    mockAuthObj.currentUser = null;
+    mockOnAuthStateChanged.mockImplementation((_auth, cb) => {
+      void cb(null);
+      return () => {};
+    });
+
+    function ProfileNullInspector() {
+      const { userProfile, currentUser } = useAuth();
+      return (
+        <div>
+          <span data-testid="profile-is-null">{String(userProfile === null)}</span>
+          <span data-testid="user-is-null">{String(currentUser === null)}</span>
+        </div>
+      );
+    }
+
+    render(
+      <ThemeProvider>
+        <LanguageProvider>
+          <AuthProvider>
+            <ProfileNullInspector />
+            <Navbar activeTab="landing" setActiveTab={vi.fn()} onOpenAuth={vi.fn()} />
+            <ProfileView onOpenAuth={vi.fn()} />
+            <StudentDashboard onNavigateTab={vi.fn()} onSelectActivity={vi.fn()} />
+          </AuthProvider>
+        </LanguageProvider>
+      </ThemeProvider>
+    );
+
+    await waitFor(() => {
+      expect(screen.getByTestId('profile-is-null')).toHaveTextContent('true');
+    });
+
+    expect(screen.getByTestId('user-is-null')).toHaveTextContent('true');
+    expect(screen.queryByText(/mhs@smartsa\.edu/i)).toBeNull();
+    expect(screen.queryByText(/25050974001/i)).toBeNull();
+    expect(screen.queryByText(/Ruang Lab Komputer 03/i)).toBeNull();
+    expect(screen.queryByText(/^18$/)).toBeNull();
+  });
+
+  it('returns empty collections without DEMO_CLASSES and renders clean empty states across public/dashboard views', async () => {
+    mockAuthObj.currentUser = null;
+    mockOnAuthStateChanged.mockImplementation((_auth, cb) => {
+      void cb(null);
+      return () => {};
+    });
+
+    const pubRes = await fetchPublicClasses();
+    const clsRes = await fetchClasses();
+    expect(pubRes).toMatchObject({ classes: [], isEmpty: true });
+    expect(clsRes).toMatchObject({ classes: [], isEmpty: true });
+
+    const { unmount } = render(
+      <LanguageProvider>
+        <AuthProvider>
+          <LandingPage
+            onGoToDashboard={vi.fn()}
+            onGoToCatalog={vi.fn()}
+            onOpenAuth={vi.fn()}
+            onSelectClass={vi.fn()}
+          />
+          <PublicCatalog onSelectClass={vi.fn()} />
+          <GeneralDashboard onSelectClass={vi.fn()} onNavigateView={vi.fn()} />
+          <AdminDashboard onClassesChanged={vi.fn()} />
+        </AuthProvider>
+      </LanguageProvider>
+    );
+
+    await waitFor(() => {
+      expect(screen.getByText(/Belum Ada Kelas Publik Tersedia/i)).toBeInTheDocument();
+      expect(screen.getByText(/Belum ada kelas publik yang tersedia saat ini/i)).toBeInTheDocument();
+      expect(screen.getByText(/Belum ada kursus publik terbuka yang tersedia/i)).toBeInTheDocument();
+      expect(screen.getByText(/Belum ada log audit server yang tercatat pada sesi ini/i)).toBeInTheDocument();
+    });
+
+    expect(screen.queryByText('8.5h')).toBeNull();
+    expect(screen.queryByText('20 / 20')).toBeNull();
+    expect(screen.queryByText('1420')).toBeNull();
+    expect(screen.queryByText(/Seed Kelas Standar/i)).toBeNull();
+    expect(screen.queryByText(/Bambang Sudarmono/i)).toBeNull();
+    unmount();
+
+    const { unmount: unmountMaterials } = render(
+      <LanguageProvider>
+        <AuthProvider>
+          <MaterialsTab onSelectSubject={vi.fn()} />
+        </AuthProvider>
+      </LanguageProvider>
+    );
+
+    await waitFor(() => {
+      expect(screen.getByText(/Belum Ada Modul Mata Kuliah/i)).toBeInTheDocument();
+    });
+    const tasksSubTabBtn = screen.getByRole('button', { name: /Tugas/i });
+    fireEvent.click(tasksSubTabBtn);
+    await waitFor(() => {
+      expect(screen.getByText(/Belum Ada Tugas di Firestore/i)).toBeInTheDocument();
+    });
+    expect(screen.queryByText(/Tugas Praktikum 01: Implementasi OOP/i)).toBeNull();
+    unmountMaterials();
+  });
+
+  it('disables standalone DiscussionTab new-topic form when 0 classes exist so empty classId is never submitted', async () => {
+    mockAuthObj.currentUser = { uid: 'uid_no_class_user', displayName: 'Pengguna Baru' };
+    mockOnAuthStateChanged.mockImplementation((_auth, cb) => {
+      void cb(mockAuthObj.currentUser);
+      return () => {};
+    });
+    mockGetDoc.mockResolvedValue({
+      exists: () => true,
+      data: () => ({ uid: 'uid_no_class_user', role: 'student', displayName: 'Pengguna Baru' }),
+    });
+
+    render(
+      <LanguageProvider>
+        <AuthProvider>
+          <DiscussionTab />
+        </AuthProvider>
+      </LanguageProvider>
+    );
+
+    await waitFor(() => {
+      expect(screen.getByText(/Belum ada kelas tersedia untuk forum diskusi/i)).toBeInTheDocument();
+    });
+
+    const submitBtn = screen.getByRole('button', { name: /Kirim Pertanyaan/i });
+    expect(submitBtn).toBeDisabled();
+  });
+
+  it('enforces role-scoped fetchClassesForUser, 10-ID documentId chunking, 0-class short-circuits, and classId filters', async () => {
+    // 1. Lecturer role: strictly filters classes by lecturerId
+    mockAuthObj.currentUser = { uid: 'uid_dosen_1' };
+    mockGetDocs.mockResolvedValueOnce({
+      docs: [{ id: 'cls_lec_1', data: () => ({ name: 'Basis Data', lecturerId: 'uid_dosen_1' }) }],
+    });
+    const lecRes = await fetchClassesForUser({ uid: 'uid_dosen_1', role: 'lecturer' });
+    expect(lecRes.classes.map((c) => c.id)).toEqual(['cls_lec_1']);
+    expect(mockWhere).toHaveBeenCalledWith('lecturerId', '==', 'uid_dosen_1');
+
+    // 2. Student with 0 memberships: short-circuits without ever issuing `in: []`
+    vi.clearAllMocks();
+    mockAuthObj.currentUser = { uid: 'uid_mhs_0' };
+    mockGetDocs.mockResolvedValueOnce({ docs: [] });
+    const emptyStudentRes = await fetchClassesForUser({ uid: 'uid_mhs_0', role: 'student' });
+    expect(emptyStudentRes.classes).toEqual([]);
+    expect(emptyStudentRes.isEmpty).toBe(true);
+    expect(mockGetDocs).toHaveBeenCalledTimes(1);
+    expect(mockDocumentId).not.toHaveBeenCalled();
+
+    // 3. Student with 12 memberships: chunks Firestore `in` queries into max 10 IDs (10 + 2)
+    vi.clearAllMocks();
+    mockAuthObj.currentUser = { uid: 'uid_mhs_12' };
+    const twelveClassIds = Array.from(
+      { length: 12 },
+      (_, idx) => `cls_${String(idx + 1).padStart(2, '0')}`
+    );
+    mockGetDocs
+      .mockResolvedValueOnce({
+        docs: twelveClassIds.map((cid, idx) => ({
+          id: `${cid}_uid_mhs_12_${idx}`,
+          data: () => ({ classId: cid, uid: 'uid_mhs_12' }),
+        })),
+      })
+      .mockResolvedValueOnce({
+        docs: twelveClassIds.slice(0, 10).map((cid) => ({
+          id: cid,
+          data: () => ({ name: `Kelas ${cid}`, lecturerId: 'uid_lec' }),
+        })),
+      })
+      .mockResolvedValueOnce({
+        docs: twelveClassIds.slice(10).map((cid) => ({
+          id: cid,
+          data: () => ({ name: `Kelas ${cid}`, lecturerId: 'uid_lec' }),
+        })),
+      });
+
+    const chunkedRes = await fetchClassesForUser({ uid: 'uid_mhs_12', role: 'student' });
+    expect(chunkedRes.classes).toHaveLength(12);
+    expect(mockGetDocs).toHaveBeenCalledTimes(3);
+    const inCalls = mockWhere.mock.calls.filter((args) => args[1] === 'in');
+    expect(inCalls).toHaveLength(2);
+    expect(inCalls[0][2]).toHaveLength(10);
+    expect(inCalls[1][2]).toHaveLength(2);
+
+    // 4. 0-class short-circuits on assignments & lecturer grading submissions
+    vi.clearAllMocks();
+    mockAuthObj.currentUser = { uid: 'uid_mhs_0' };
+    const emptyAssignments = await fetchAssignmentsWithUserSubmissions({ classIds: [] });
+    const emptySubmissions = await fetchSubmissionsForLecturerClasses([]);
+    expect(emptyAssignments.assignments).toEqual([]);
+    expect(emptyAssignments.isEmpty).toBe(true);
+    expect(emptySubmissions).toEqual([]);
+    expect(mockGetDocs).not.toHaveBeenCalled();
+
+    // 5. Class-scoped progress & exam attempts always filter both `classId` and `uid`
+    vi.clearAllMocks();
+    mockAuthObj.currentUser = { uid: 'uid_mhs_01' };
+    await fetchLearningProgressByClass('cls_scoped', 'uid_mhs_01');
+    await fetchUserClassExamAttempts('cls_scoped', 'uid_mhs_01');
+    expect(mockWhere).toHaveBeenCalledWith('classId', '==', 'cls_scoped');
+    expect(mockWhere).toHaveBeenCalledWith('uid', '==', 'uid_mhs_01');
+  });
+
+  it('scopes attendance summaries to active classes, clears demo store/exam sessionStorage, and locks meeting switching during active exam', async () => {
+    // 1. Demo store scoping & clearing
+    await recordMeetingAttendance({ classId: 'cls_enrolled', meetingNo: 1 });
+    await recordMeetingAttendance({ classId: 'cls_untracked', meetingNo: 1 });
+    expect(
+      await getSemesterAttendanceSummary(null, [{ id: 'cls_enrolled', meetingsCount: 4 }])
+    ).toEqual({
+      attended: 1,
+      totalMeetings: 4,
+      progress: 25,
+    });
+    expect(await getSemesterAttendanceSummary(null, [])).toEqual({
+      attended: 0,
+      totalMeetings: 0,
+      progress: 0,
+    });
+    clearDemoAttendanceStore();
+    expect(
+      await getSemesterAttendanceSummary(null, [{ id: 'cls_enrolled', meetingsCount: 4 }])
+    ).toEqual({
+      attended: 0,
+      totalMeetings: 4,
+      progress: 0,
+    });
+
+    // 2. Authenticated Firestore attendance summary ignores non-member class docs & avoids global / 16
+    vi.clearAllMocks();
+    mockGetDocs.mockResolvedValueOnce({
+      docs: [
+        { id: 'cls_A_m1_uid_mhs_1', data: () => ({ uid: 'uid_mhs_1', classId: 'cls_A' }) },
+        { id: 'cls_B_m1_uid_mhs_1', data: () => ({ uid: 'uid_mhs_1', classId: 'cls_B' }) },
+        { id: 'cls_OLD_m1_uid_mhs_1', data: () => ({ uid: 'uid_mhs_1', classId: 'cls_OLD' }) },
+      ],
+    });
+    expect(
+      await getSemesterAttendanceSummary('uid_mhs_1', [
+        { id: 'cls_A', meetingsCount: 2 },
+        { id: 'cls_B', meetingsCount: 3 },
+      ])
+    ).toEqual({
+      attended: 2,
+      totalMeetings: 5,
+      progress: 40,
+    });
+
+    // 3. Exam sessionStorage lifecycle reset
+    setLocalExamSession({
+      classId: 'cls_lock',
+      meetingNo: 1,
+      examType: 'pretest',
+      active: true,
+      durationMs: 60000,
+    });
+    const beforeReset = await getActiveExamStatus();
+    expect(beforeReset.isExamActive).toBe(true);
+    expect(beforeReset.activeAttempt?.classId).toBe('cls_lock');
+
+    setLocalExamSession({ active: false });
+    const afterReset = await getActiveExamStatus();
+    expect(afterReset.isExamActive).toBe(false);
+    expect(afterReset.activeAttempt).toBeNull();
+
+    // 4. ClassDetailView disables meeting selector while examActive === true
+    const studentUser = {
+      uid: 'uid_mhs_lock',
+      email: 'mhs@smartsa.edu',
+      displayName: 'Mahasiswa Uji',
+      getIdToken: vi.fn(async () => 'fake-token'),
+    };
+    mockAuthObj.currentUser = studentUser;
+    mockOnAuthStateChanged.mockImplementation((_auth, cb) => {
+      void cb(studentUser);
+      return () => {};
+    });
+    mockGetDoc.mockImplementation(async (ref) => {
+      if (ref?.path === 'users/uid_mhs_lock') {
+        return {
+          exists: () => true,
+          data: () => ({ uid: 'uid_mhs_lock', role: 'student', displayName: 'Mahasiswa Uji' }),
+        };
+      }
+      if (ref?.path === 'exams/cls_lock_m1_pretest') {
+        return {
+          exists: () => true,
+          data: () => ({
+            classId: 'cls_lock',
+            meetingNo: 1,
+            examType: 'pretest',
+            questions: [
+              {
+                id: 'q1',
+                question: 'Apa prinsip enkapsulasi pada OOP?',
+                options: ['Menyembunyikan detail internal', 'Pewarisan', 'Polimorfisme', 'Abstraksi'],
+              },
+            ],
+          }),
+        };
+      }
+      return { exists: () => false };
+    });
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => ({
+        ok: true,
+        headers: { get: () => 'application/json' },
+        json: async () => ({ status: 'started', attemptId: 'cls_lock_m1_pretest_uid_mhs_lock' }),
+      }))
+    );
+
+    render(
+      <LanguageProvider>
+        <AuthProvider>
+          <ClassDetailView
+            classData={{
+              id: 'cls_lock',
+              name: 'PBO Terisolasi',
+              code: 'PBO301',
+              category: 'Pemrograman',
+              instructor: 'Dr. Andi',
+              lecturerId: 'uid_dosen_lock',
+              meetings: [
+                { id: 'cls_lock_m1', order: 1, title: 'Enkapsulasi', status: 'open' },
+                { id: 'cls_lock_m2', order: 2, title: 'Pewarisan', status: 'open' },
+              ],
+            }}
+            isMember={true}
+            onBack={vi.fn()}
+            onNavigateAI={vi.fn()}
+          />
+        </AuthProvider>
+      </LanguageProvider>
+    );
+
+    const meetingSelect = await screen.findByLabelText(/Pilih pertemuan aktif/i);
+    expect(meetingSelect).not.toBeDisabled();
+
+    fireEvent.click(screen.getByRole('button', { name: /PRETEST & EVALUASI/i }));
+    const startBtn = await screen.findByRole('button', { name: /MULAI PRETEST/i });
+    await waitFor(() => {
+      expect(startBtn).not.toBeDisabled();
+    });
+
+    fireEvent.click(startBtn);
+
+    await waitFor(() => {
+      expect(screen.getByLabelText(/Pilih pertemuan aktif/i)).toBeDisabled();
+    });
   });
 });

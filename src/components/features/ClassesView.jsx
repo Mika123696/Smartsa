@@ -1,9 +1,9 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import { useAuth } from '../../context/useAuth';
 import { useLanguage } from '../../context/useLanguage';
 import { ROLES } from '../../constants/roles';
 import {
-  fetchClasses,
+  fetchClassesForUser,
   fetchJoinedMemberships,
   createClassInFirestore,
   joinClassWithToken,
@@ -25,6 +25,7 @@ export default function ClassesView({
   requestedModal,
   onClearRequestedModal,
   onMembershipChanged,
+  onClassCreated,
 }) {
   const { role, currentUser, userProfile } = useAuth();
   const { t, language } = useLanguage();
@@ -38,41 +39,79 @@ export default function ClassesView({
   const [classCodeInput, setClassCodeInput] = useState('');
   const [newClassName, setNewClassName] = useState('');
   const [newClassCategory, setNewClassCategory] = useState('Teknologi Informasi');
+  const [newClassDay, setNewClassDay] = useState('');
+  const [newClassTime, setNewClassTime] = useState('');
+  const [newClassCode, setNewClassCode] = useState('');
   const [newClassDesc, setNewClassDesc] = useState('');
   const [feedback, setFeedback] = useState(null);
   const [bannerFeedback, setBannerFeedback] = useState(null);
   const [joining, setJoining] = useState(false);
   const [creating, setCreating] = useState(false);
 
-  const loadClassesData = async () => {
+  const loadReqIdRef = useRef(0);
+  const mountedRef = useRef(true);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
+
+  const loadClassesData = useCallback(async () => {
+    const reqId = ++loadReqIdRef.current;
     setLoading(true);
     try {
+      if (!currentUser?.uid) {
+        if (!mountedRef.current || reqId !== loadReqIdRef.current) return;
+        setClasses([]);
+        setDataSource('demo');
+        setJoinedIds(new Set());
+        setFeedback(null);
+        setBannerFeedback(null);
+        setIsJoinModalOpen(false);
+        setIsCreateModalOpen(false);
+        return;
+      }
+
       const [classRes, memberships] = await Promise.all([
-        fetchClasses(),
-        currentUser ? fetchJoinedMemberships(currentUser.uid) : Promise.resolve([]),
+        fetchClassesForUser({ uid: currentUser.uid, role }),
+        fetchJoinedMemberships(currentUser.uid),
       ]);
+      if (!mountedRef.current || reqId !== loadReqIdRef.current) return;
       setClasses(classRes.classes || []);
       setDataSource(classRes.source || 'demo');
       setJoinedIds(new Set(memberships.map((m) => m.classId)));
+      setFeedback(null);
+      setBannerFeedback(null);
+      setIsJoinModalOpen(false);
+      setIsCreateModalOpen(false);
+      setSearchTerm('');
     } finally {
-      setLoading(false);
+      if (mountedRef.current && reqId === loadReqIdRef.current) {
+        setLoading(false);
+      }
     }
-  };
+  }, [currentUser?.uid, role]);
 
   useEffect(() => {
-    void loadClassesData();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [currentUser?.uid]);
+    Promise.resolve().then(() => {
+      if (mountedRef.current) void loadClassesData();
+    });
+  }, [loadClassesData]);
 
   useEffect(() => {
     if (!requestedModal) return;
-    if (requestedModal === 'join') {
-      setFeedback(null);
-      setIsJoinModalOpen(true);
-    } else if (requestedModal === 'create') {
-      setIsCreateModalOpen(true);
-    }
-    onClearRequestedModal?.();
+    Promise.resolve().then(() => {
+      if (!mountedRef.current) return;
+      if (requestedModal === 'join') {
+        setFeedback(null);
+        setIsJoinModalOpen(true);
+      } else if (requestedModal === 'create') {
+        setIsCreateModalOpen(true);
+      }
+      onClearRequestedModal?.();
+    });
   }, [requestedModal, onClearRequestedModal]);
 
   useEffect(() => {
@@ -168,12 +207,19 @@ export default function ClassesView({
         name: newClassName.trim(),
         category: newClassCategory,
         description: newClassDesc.trim(),
+        day: newClassDay,
+        time: newClassTime.trim(),
+        code: newClassCode.trim(),
         instructorName: userProfile?.displayName || currentUser?.displayName || 'Pendidik Terdaftar',
       });
       setClasses((prev) => [newClassObj, ...prev]);
+      onClassCreated?.(newClassObj);
       setIsCreateModalOpen(false);
       setNewClassName('');
       setNewClassDesc('');
+      setNewClassDay('');
+      setNewClassTime('');
+      setNewClassCode('');
       setBannerFeedback({
         type: 'success',
         text:
@@ -360,7 +406,9 @@ export default function ClassesView({
                     <h4 className="text-base font-bold text-slate-900 dark:text-slate-100 mt-1 line-clamp-1 group-hover:text-blue-600 dark:group-hover:text-[#f59e0b] transition">
                       {cls.name}
                     </h4>
-                    <p className="text-xs text-slate-500 dark:text-slate-400 mt-1 line-clamp-2">{cls.description}</p>
+                    <p className="text-xs text-slate-500 dark:text-slate-400 mt-1 line-clamp-2">
+                      {cls.description || (language === 'en' ? 'No syllabus description yet.' : 'Belum ada deskripsi silabus.')}
+                    </p>
                     <p className="text-xs font-medium text-slate-700 dark:text-slate-300 mt-2">
                       {language === 'en' ? 'Educator' : 'Pendidik'}: {cls.instructor}
                     </p>
@@ -448,7 +496,7 @@ export default function ClassesView({
                   type="text"
                   maxLength={8}
                   required
-                  placeholder="Contoh: PBO101"
+                  placeholder={language === 'en' ? 'e.g. CLS101' : 'Contoh: CLS101'}
                   value={classCodeInput}
                   onChange={(e) => setClassCodeInput(e.target.value.toUpperCase())}
                   className="w-full px-3 py-2.5 text-center text-lg font-mono font-bold tracking-widest uppercase border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-[#0b0f17] rounded-xl focus:outline-none focus:border-blue-500 dark:focus:border-[#f59e0b] text-slate-900 dark:text-slate-100"
@@ -457,15 +505,9 @@ export default function ClassesView({
 
               <div className="p-3 bg-slate-50 dark:bg-[#0e1522] border border-slate-200 dark:border-[#232f42] rounded-xl text-[11px] text-slate-500 dark:text-slate-400">
                 <strong>Tips:</strong>{' '}
-                {language === 'en' ? 'Try code' : 'Gunakan kode'}{' '}
-                <code className="bg-slate-200 dark:bg-slate-800 px-1 py-0.5 rounded font-mono font-bold text-slate-800 dark:text-slate-200">
-                  PBO101
-                </code>{' '}
-                {language === 'en' ? 'or' : 'atau'}{' '}
-                <code className="bg-slate-200 dark:bg-slate-800 px-1 py-0.5 rounded font-mono font-bold text-slate-800 dark:text-slate-200">
-                  BD202
-                </code>
-                .
+                {language === 'en'
+                  ? 'Ask your course lecturer for the unique 4–8 character class enrollment code.'
+                  : 'Minta kode kelas unik (4–8 karakter) yang dibagikan oleh dosen pengampu kelas Anda.'}
               </div>
 
               <div className="flex justify-end gap-2 pt-2">
@@ -549,9 +591,57 @@ export default function ClassesView({
                 </select>
               </div>
 
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                <div>
+                  <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1">
+                    {language === 'en' ? 'Schedule Day (Optional)' : 'Hari Kuliah (Opsional)'}
+                  </label>
+                  <select
+                    value={newClassDay}
+                    onChange={(e) => setNewClassDay(e.target.value)}
+                    className="w-full px-3 py-2 text-xs border border-slate-300 dark:border-slate-700 rounded-lg focus:outline-none focus:border-indigo-500 bg-slate-50 dark:bg-[#0b0f17] text-slate-900 dark:text-slate-100"
+                  >
+                    <option value="">{language === 'en' ? '-- Not set --' : '-- Belum diatur --'}</option>
+                    <option value="Senin">Senin</option>
+                    <option value="Selasa">Selasa</option>
+                    <option value="Rabu">Rabu</option>
+                    <option value="Kamis">Kamis</option>
+                    <option value="Jumat">Jumat</option>
+                    <option value="Sabtu">Sabtu</option>
+                  </select>
+                </div>
+
+                <div>
+                  <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1">
+                    {language === 'en' ? 'Time (Optional)' : 'Jam (Opsional)'}
+                  </label>
+                  <input
+                    type="text"
+                    placeholder="08.00–10.30"
+                    value={newClassTime}
+                    onChange={(e) => setNewClassTime(e.target.value)}
+                    className="w-full px-3 py-2 text-xs bg-slate-50 dark:bg-[#0b0f17] border border-slate-300 dark:border-slate-700 rounded-lg focus:outline-none focus:border-indigo-500 text-slate-900 dark:text-slate-100"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1">
+                    {language === 'en' ? 'Custom Code (Optional)' : 'Kode Kelas (Opsional)'}
+                  </label>
+                  <input
+                    type="text"
+                    maxLength={10}
+                    placeholder={language === 'en' ? 'Auto if blank' : 'Otomatis jika kosong'}
+                    value={newClassCode}
+                    onChange={(e) => setNewClassCode(e.target.value.toUpperCase())}
+                    className="w-full px-3 py-2 text-xs font-mono uppercase bg-slate-50 dark:bg-[#0b0f17] border border-slate-300 dark:border-slate-700 rounded-lg focus:outline-none focus:border-indigo-500 text-slate-900 dark:text-slate-100"
+                  />
+                </div>
+              </div>
+
               <div>
                 <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1">
-                  {language === 'en' ? 'Syllabus Description' : 'Deskripsi Silabus'}
+                  {language === 'en' ? 'Syllabus Description (Optional)' : 'Deskripsi Silabus (Opsional)'}
                 </label>
                 <textarea
                   rows="3"

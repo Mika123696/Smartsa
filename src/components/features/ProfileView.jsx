@@ -102,11 +102,7 @@ export default function ProfileView({ onOpenAuth }) {
   const activeEmail =
     userProfile?.email ||
     currentUser?.email ||
-    (role === ROLES.ADMIN
-      ? 'admin@smartsa.edu'
-      : role === ROLES.LECTURER
-        ? 'dosen@smartsa.edu'
-        : 'mhs@smartsa.edu');
+    t('not_set', 'Belum diisi');
 
   const currentPhoto =
     userProfile?.photoURL ||
@@ -115,18 +111,19 @@ export default function ProfileView({ onOpenAuth }) {
 
   const activeNim =
     role === ROLES.LECTURER
-      ? userProfile?.nidn || userProfile?.nim || (isDemoMode ? '0012088501' : t('not_set', 'Belum diisi'))
+      ? userProfile?.nidn || userProfile?.nim || t('not_set', 'Belum diisi')
       : role === ROLES.ADMIN
-        ? userProfile?.nip || userProfile?.nim || (isDemoMode ? 'ADM-001' : t('not_set', 'Belum diisi'))
-        : userProfile?.nim || (isDemoMode ? '25050974001' : t('not_set', 'Belum diisi'));
+        ? userProfile?.nip || userProfile?.nim || t('not_set', 'Belum diisi')
+        : userProfile?.nim || t('not_set', 'Belum diisi');
 
   const activeDisplayName =
     userProfile?.displayName ||
     currentUser?.displayName ||
-    (isDemoMode ? t('demo_student_name', 'Mahasiswa Demo') : neutralRoleFallback);
+    neutralRoleFallback;
 
   const activeInstitution =
-    userProfile?.institution || 'Universitas Negeri Surabaya';
+    userProfile?.institution ||
+    (currentUser ? 'Universitas Negeri Surabaya' : t('not_set', 'Belum diisi'));
 
   const getIdLabel = () => {
     if (role === ROLES.LECTURER) return t('id_lecturer');

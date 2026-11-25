@@ -63,7 +63,7 @@ export default function AIAssistantView() {
       const result = await askAIAssistant({
         mode,
         prompt: textToSend,
-        context: 'Materi Kuliah Rekayasa Perangkat Lunak Smartsa LMS',
+        context: language === 'en' ? 'Smartsa LMS Learning Assistant' : 'Asisten Pembelajaran Smartsa LMS',
         isExamActive: examLock.isExamActive,
       });
 

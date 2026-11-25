@@ -2,25 +2,25 @@ import { useState, useEffect, useMemo } from 'react';
 import { Search, Users } from 'lucide-react';
 import { useLanguage } from '../../context/useLanguage';
 import { fetchPublicClasses } from '../../services/lmsFirestoreService';
-import { DEMO_CLASSES } from '../../services/mockData';
 import SafeImage from '../common/SafeImage';
 
 export default function PublicCatalog({ onSelectClass }) {
   const { t, language } = useLanguage();
-  const [classes, setClasses] = useState(DEMO_CLASSES);
+  const [classes, setClasses] = useState([]);
   const [loading, setLoading] = useState(true);
   const [searchTerm, setSearchTerm] = useState('');
   const [selectedCategory, setSelectedCategory] = useState('ALL');
 
   useEffect(() => {
     let mounted = true;
-    fetchPublicClasses().then((res) => {
-      if (!mounted) return;
-      if (res?.classes?.length) {
-        setClasses(res.classes);
-      }
-      setLoading(false);
-    });
+    fetchPublicClasses()
+      .then((res) => {
+        if (!mounted) return;
+        setClasses(res?.classes || []);
+      })
+      .finally(() => {
+        if (mounted) setLoading(false);
+      });
     return () => {
       mounted = false;
     };
@@ -90,9 +90,13 @@ export default function PublicCatalog({ onSelectClass }) {
         </div>
       ) : filtered.length === 0 ? (
         <div className="text-center py-12 bg-white dark:bg-[#121822] rounded-2xl border border-dashed border-slate-200 dark:border-[#232f42] text-xs text-slate-500 dark:text-slate-400">
-          {language === 'en'
-            ? 'No courses match your search filter.'
-            : 'Tidak ada kelas yang cocok dengan filter pencarian Anda.'}
+          {classes.length === 0
+            ? language === 'en'
+              ? 'No public classes are available at the moment.'
+              : 'Belum ada kelas publik yang tersedia saat ini.'
+            : language === 'en'
+              ? 'No courses match your search filter.'
+              : 'Tidak ada kelas yang cocok dengan filter pencarian Anda.'}
         </div>
       ) : (
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">

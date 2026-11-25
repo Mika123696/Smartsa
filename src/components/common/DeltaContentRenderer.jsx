@@ -15,46 +15,6 @@ function isSafeHttpUrl(url) {
   }
 }
 
-const DEFAULT_SAMPLE_DELTA = {
-  ops: [
-    { insert: '1. Arsitektur Klien Terdistribusi' },
-    { insert: '\n', attributes: { header: 2 } },
-    {
-      insert:
-        'Arsitektur terdistribusi modern membagi beban komputasi antara klien pintar (React / Flutter) dan lapisan komputasi awan yang stateless. Pendekatan ini memungkinkan ketersediaan tinggi tanpa biaya pemeliharaan server fisik.',
-    },
-    { insert: '\n' },
-    { insert: 'Prinsip Utama:' },
-    { insert: '\n', attributes: { header: 3 } },
-    { insert: 'Pemisahan Domain Logic dari infrastruktur database NoSQL.' },
-    { insert: '\n', attributes: { list: 'bullet' } },
-    { insert: 'Validasi sesi terpusat menggunakan Firebase Auth ID Token.' },
-    { insert: '\n', attributes: { list: 'bullet' } },
-    { insert: 'Penyimpanan konten pembelajaran dalam format ' },
-    { insert: 'Quill Delta JSON', attributes: { bold: true, code: true } },
-    { insert: ' untuk mencegah injeksi HTML/XSS.' },
-    { insert: '\n', attributes: { list: 'bullet' } },
-    { insert: '// Operasi Atomik Firestore (Smartsa LMS Spec)' },
-    { insert: '\n', attributes: { 'code-block': true } },
-    { insert: 'await updateDoc(doc(db, "classes", classId), { activeAttendanceSession: payload });' },
-    { insert: '\n', attributes: { 'code-block': true } },
-    { insert: '2. Prinsip Isolasi Kunci Evaluasi' },
-    { insert: '\n', attributes: { header: 2 } },
-    { insert: 'Kunci jawaban soal evaluasi dievaluasi semata-mata pada sisi server (' },
-    { insert: '/api/grade', attributes: { code: true } },
-    {
-      insert:
-        '). Klien tidak pernah menerima atribut kunci jawaban dalam payload HTTP untuk mengeliminasi celah inspeksi jaringan.',
-    },
-    { insert: '\n' },
-    {
-      insert:
-        'Catatan Instruktur: Selesaikan pretest diagnostik sebelum melanjutkan ke sesi post-test dan pengumpulan proyek.',
-    },
-    { insert: '\n', attributes: { blockquote: true } },
-  ],
-};
-
 function renderInlineSegment(segment, key) {
   const { text, attributes = {} } = segment;
   let node = text;
@@ -145,7 +105,7 @@ function parseDeltaOpsToLines(delta) {
   return lines;
 }
 
-export default function DeltaContentRenderer({ delta, fallbackText = '' }) {
+export default function DeltaContentRenderer({ delta, fallbackText = '', emptyMessage = '' }) {
   let normalizedDelta = delta;
   if (typeof delta === 'string') {
     try {
@@ -158,13 +118,29 @@ export default function DeltaContentRenderer({ delta, fallbackText = '' }) {
     }
   }
 
-  const lines = parseDeltaOpsToLines(normalizedDelta || DEFAULT_SAMPLE_DELTA);
+  const lines = parseDeltaOpsToLines(normalizedDelta);
 
-  if (!lines || lines.length === 0) {
+  const hasVisibleLineContent =
+    Array.isArray(lines) &&
+    lines.some(
+      (line) =>
+        Boolean(line.imageUrl) ||
+        (Array.isArray(line.runs) && line.runs.some((r) => String(r.text || '').trim().length > 0))
+    );
+
+  if (!lines || lines.length === 0 || !hasVisibleLineContent) {
+    if (typeof fallbackText === 'string' && fallbackText.trim()) {
+      return (
+        <p className="text-xs sm:text-sm text-slate-700 dark:text-slate-300 leading-relaxed whitespace-pre-wrap">
+          {fallbackText}
+        </p>
+      );
+    }
+
     return (
-      <p className="text-xs sm:text-sm text-slate-700 dark:text-slate-300 leading-relaxed whitespace-pre-wrap">
-        {fallbackText}
-      </p>
+      <div className="py-8 text-center bg-slate-50 dark:bg-[#0b101a] rounded-xl border border-dashed border-slate-200 dark:border-[#1e2a3f] text-xs font-mono text-slate-500 dark:text-slate-400">
+        {emptyMessage || 'Belum ada materi bacaan yang ditambahkan untuk pertemuan ini.'}
+      </div>
     );
   }
 

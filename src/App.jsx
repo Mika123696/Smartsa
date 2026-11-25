@@ -7,10 +7,12 @@ import { useLanguage } from './context/useLanguage';
 import { useAuth } from './context/useAuth';
 import { ROLES } from './constants/roles';
 import {
-  fetchClasses,
+  fetchClassesForUser,
   fetchJoinedMemberships,
   normalizeClassDoc,
 } from './services/lmsFirestoreService';
+import { setLocalExamSession } from './services/aiService';
+import { clearDemoAttendanceStore } from './services/attendanceService';
 
 // Common & Public UI Components
 import ErrorBoundary from './components/common/ErrorBoundary';
@@ -149,30 +151,47 @@ function MainApp() {
     currentUserRef.current = currentUser;
   }, [currentUser]);
 
-  const refreshClassesAndMemberships = useCallback(async (uidOverride = currentUser?.uid) => {
-    const [res, memberships] = await Promise.all([
-      fetchClasses(),
-      uidOverride ? fetchJoinedMemberships(uidOverride) : Promise.resolve([]),
-    ]);
-    const loaded = res.classes || [];
-    setClasses(loaded);
-    setJoinedClassIds(new Set(memberships.map((m) => m.classId)));
-    setMembershipsLoaded(true);
-    setSelectedSubject((prev) => {
-      if (prev && loaded.some((c) => c.id === prev.id)) {
-        return loaded.find((c) => c.id === prev.id);
+  const refreshClassesAndMemberships = useCallback(
+    async (uidOverride = currentUser?.uid) => {
+      if (!uidOverride) {
+        setClasses([]);
+        setJoinedClassIds(new Set());
+        setMembershipsLoaded(false);
+        setSelectedSubject(null);
+        return;
       }
-      return loaded[0] || prev;
-    });
-  }, [currentUser?.uid]);
+      const [res, memberships] = await Promise.all([
+        fetchClassesForUser({ uid: uidOverride, role }),
+        fetchJoinedMemberships(uidOverride),
+      ]);
+      const loaded = res.classes || [];
+      setClasses(loaded);
+      setJoinedClassIds(new Set(memberships.map((m) => m.classId)));
+      setMembershipsLoaded(true);
+      setSelectedSubject((prev) => {
+        if (prev && loaded.some((c) => c.id === prev.id)) {
+          return loaded.find((c) => c.id === prev.id) || null;
+        }
+        return loaded[0] || null;
+      });
+    },
+    [currentUser?.uid, role]
+  );
 
-  // Load classes and memberships for active user / demo session
+  // Load classes and memberships isolated by active user & role
   useEffect(() => {
     let mounted = true;
     const loadClasses = async () => {
+      if (!currentUser?.uid) {
+        setClasses([]);
+        setJoinedClassIds(new Set());
+        setMembershipsLoaded(false);
+        setSelectedSubject(null);
+        return;
+      }
       const [res, memberships] = await Promise.all([
-        fetchClasses(),
-        currentUser?.uid ? fetchJoinedMemberships(currentUser.uid) : Promise.resolve([]),
+        fetchClassesForUser({ uid: currentUser.uid, role }),
+        fetchJoinedMemberships(currentUser.uid),
       ]);
       if (!mounted) return;
       const loaded = res.classes || [];
@@ -181,16 +200,16 @@ function MainApp() {
       setMembershipsLoaded(true);
       setSelectedSubject((prev) => {
         if (prev && loaded.some((c) => c.id === prev.id)) {
-          return loaded.find((c) => c.id === prev.id);
+          return loaded.find((c) => c.id === prev.id) || null;
         }
-        return loaded[0] || prev;
+        return loaded[0] || null;
       });
     };
     void loadClasses();
     return () => {
       mounted = false;
     };
-  }, [currentUser?.uid]);
+  }, [currentUser?.uid, role]);
 
   const commitNavigation = useCallback((nextView, { replace = false } = {}) => {
     if (!ALL_VIEWS.includes(nextView)) return;
@@ -241,21 +260,38 @@ function MainApp() {
       return;
     }
 
-    if (prevUidRef.current === null && currentUid !== null) {
+    if (prevUidRef.current !== currentUid) {
+      const hadPreviousUser = prevUidRef.current !== null;
       prevUidRef.current = currentUid;
-      if (PUBLIC_VIEWS.includes(activeViewRef.current)) {
-        commitNavigation('dashboard', { replace: true });
-      }
-      return;
-    }
+      setLocalExamSession({ active: false });
+      clearDemoAttendanceStore();
 
-    if (prevUidRef.current !== null && currentUid === null) {
-      prevUidRef.current = null;
-      setIsExamActive(false);
-      setPendingNavView(null);
-      if (!PUBLIC_VIEWS.includes(activeViewRef.current)) {
-        commitNavigation('landing', { replace: true });
-      }
+      Promise.resolve().then(() => {
+        setIsExamActive(false);
+        setPendingNavView(null);
+        setRequestedClassModal(null);
+
+        if (currentUid !== null) {
+          if (hadPreviousUser) {
+            setClasses([]);
+            setJoinedClassIds(new Set());
+            setMembershipsLoaded(false);
+            setSelectedSubject(null);
+          }
+          if (PUBLIC_VIEWS.includes(activeViewRef.current)) {
+            commitNavigation('dashboard', { replace: true });
+          }
+        } else {
+          setClasses([]);
+          setJoinedClassIds(new Set());
+          setMembershipsLoaded(false);
+          setSelectedSubject(null);
+          if (!PUBLIC_VIEWS.includes(activeViewRef.current)) {
+            commitNavigation('landing', { replace: true });
+          }
+        }
+      });
+      return;
     }
   }, [authLoading, currentUser?.uid, explicitView, commitNavigation]);
 
@@ -300,12 +336,13 @@ function MainApp() {
     const target = pendingNavView || detailReturnView || 'materi';
     setPendingNavView(null);
     setIsExamActive(false);
+    setLocalExamSession({ active: false });
     commitNavigation(target);
   };
 
   const handleSelectSubject = (subj) => {
-    if (!subj) return;
-    const normalized = normalizeClassDoc(subj.id || 'subj_pbo', subj);
+    if (!subj?.id) return;
+    const normalized = normalizeClassDoc(subj.id, subj);
     setSelectedSubject(normalized);
     setClasses((prev) =>
       prev.some((c) => c.id === normalized.id)
@@ -365,10 +402,31 @@ function MainApp() {
   const renderLMSContent = () => {
     if (activeView === 'detail') {
       const activeClass =
-        classes.find((c) => c.id === selectedSubject?.id) ||
-        selectedSubject ||
-        classes[0] ||
-        normalizeClassDoc('subj_pbo', {});
+        (selectedSubject?.id
+          ? classes.find((c) => c.id === selectedSubject.id) || selectedSubject
+          : classes[0]) || null;
+
+      if (!activeClass) {
+        return (
+          <div className="bg-white dark:bg-[#121822] p-8 rounded-2xl border border-dashed border-slate-300 dark:border-[#232f42] text-center space-y-3">
+            <h2 className="text-base font-bold text-slate-900 dark:text-slate-100">
+              {language === 'en' ? 'No Class Selected Yet' : 'Belum Ada Kelas Dipilih'}
+            </h2>
+            <p className="text-xs text-slate-500 dark:text-slate-400 max-w-md mx-auto">
+              {language === 'en'
+                ? 'Select a class from your directory or create/join a class to open its learning modules.'
+                : 'Pilih kelas dari direktori atau buat/gabung kelas terlebih dahulu untuk membuka detail pembelajaran.'}
+            </p>
+            <button
+              type="button"
+              onClick={() => navigateTo('classes-all')}
+              className="bg-[#f59e0b] hover:bg-[#d97706] text-black text-xs font-bold px-4 py-2 rounded-lg transition"
+            >
+              {language === 'en' ? 'Go to Classes Directory' : 'Buka Daftar Kelas'}
+            </button>
+          </div>
+        );
+      }
 
       return (
         <ClassDetailView
@@ -414,6 +472,7 @@ function MainApp() {
             requestedModal={requestedClassModal}
             onClearRequestedModal={() => setRequestedClassModal(null)}
             onMembershipChanged={handleMembershipChanged}
+            onClassCreated={handleClassUpdated}
           />
         </div>
       );

@@ -47,6 +47,12 @@ service cloud.firestore {
       return exists(/databases/$(database)/documents/class_members/$(classId + '_' + uid));
     }
 
+    function isClassLecturer(classId) {
+      return isSignedIn()
+        && exists(/databases/$(database)/documents/classes/$(classId))
+        && get(/databases/$(database)/documents/classes/$(classId)).data.lecturerId == request.auth.uid;
+    }
+
     // 1. users/{uid}
     match /users/{uid} {
       allow read: if isSignedIn() && (request.auth.uid == uid || isAdmin());
@@ -72,25 +78,42 @@ service cloud.firestore {
 
     // 2. classes/{classId}
     match /classes/{classId} {
-      allow read: if isSignedIn() || resource.data.isPublic == true;
+      allow read: if isAdmin()
+        || resource.data.isPublic == true
+        || (isSignedIn() && (
+          resource.data.lecturerId == request.auth.uid
+          || isClassMember(classId, request.auth.uid)
+        ));
       allow create: if isAdmin()
         || (isLecturer() && request.resource.data.lecturerId == request.auth.uid);
-      allow update: if isLecturerOrAdmin();
+      allow update: if isAdmin()
+        || (
+          isLecturer()
+          && resource.data.lecturerId == request.auth.uid
+          && request.resource.data.lecturerId == resource.data.lecturerId
+        );
       allow delete: if isAdmin()
         || (isLecturer() && resource.data.lecturerId == request.auth.uid);
     }
 
     // 3. class_members/{classId}_{uid} (dikelola server-side via /api/join-class Admin SDK)
     match /class_members/{memberId} {
-      allow read: if isSignedIn()
-        && (resource.data.uid == request.auth.uid || isLecturerOrAdmin());
+      allow read: if isSignedIn() && (
+        resource.data.uid == request.auth.uid
+        || isAdmin()
+        || (resource.data.classId is string && isClassLecturer(resource.data.classId))
+      );
       allow create, update, delete: if false;
     }
 
     // 4. attendance/{classId}_m{meetingNo}_{uid}
     match /attendance/{attendanceId} {
-      allow read: if isSignedIn()
-        && (resource.data.uid == request.auth.uid || isLecturerOrAdmin());
+      allow read: if isAdmin() || (
+        isSignedIn() && (
+          resource.data.uid == request.auth.uid
+          || (resource.data.classId is string && isClassLecturer(resource.data.classId))
+        )
+      );
       allow create: if isSignedIn()
         && request.resource.data.uid == request.auth.uid
         && request.resource.data.classId is string
@@ -99,38 +122,93 @@ service cloud.firestore {
         && request.resource.data.meetingNo <= 32
         && attendanceId == (request.resource.data.classId + '_m' + string(request.resource.data.meetingNo) + '_' + request.auth.uid)
         && isClassMember(request.resource.data.classId, request.auth.uid);
-      allow update, delete: if isLecturerOrAdmin();
+      allow update, delete: if isAdmin()
+        || (isLecturer() && resource.data.classId is string && isClassLecturer(resource.data.classId));
     }
 
     // 5. assignments/{assignmentId}
     match /assignments/{assignmentId} {
-      allow read: if isSignedIn();
-      allow create, update, delete: if isLecturerOrAdmin();
+      allow read: if isAdmin() || (
+        isSignedIn()
+        && resource.data.classId is string
+        && (
+          isClassLecturer(resource.data.classId)
+          || isClassMember(resource.data.classId, request.auth.uid)
+        )
+      );
+      allow create: if isAdmin() || (
+        isLecturer()
+        && request.resource.data.classId is string
+        && isClassLecturer(request.resource.data.classId)
+      );
+      allow update: if isAdmin() || (
+        isLecturer()
+        && resource.data.classId is string
+        && isClassLecturer(resource.data.classId)
+        && request.resource.data.classId == resource.data.classId
+      );
+      allow delete: if isAdmin() || (
+        isLecturer()
+        && resource.data.classId is string
+        && isClassLecturer(resource.data.classId)
+      );
     }
 
     // 6. submissions/{assignmentId}_{uid}
     match /submissions/{submissionId} {
-      allow read: if isSignedIn()
-        && (resource.data.uid == request.auth.uid || isLecturerOrAdmin());
+      allow read: if isAdmin() || (
+        isSignedIn() && (
+          resource.data.uid == request.auth.uid
+          || (resource.data.classId is string && isClassLecturer(resource.data.classId))
+        )
+      );
       allow create: if isSignedIn()
         && request.resource.data.uid == request.auth.uid
         && request.resource.data.assignmentId is string
+        && request.resource.data.classId is string
+        && isClassMember(request.resource.data.classId, request.auth.uid)
         && submissionId == (request.resource.data.assignmentId + '_' + request.auth.uid)
         && !request.resource.data.keys().hasAny(['grade', 'score', 'feedback', 'gradedBy']);
-      allow update: if isLecturerOrAdmin()
+      allow update: if isAdmin()
+        || (isLecturer() && resource.data.classId is string && isClassLecturer(resource.data.classId))
         || (
           isSignedIn()
           && resource.data.uid == request.auth.uid
           && submissionId == (resource.data.assignmentId + '_' + request.auth.uid)
-          && !request.resource.data.diff(resource.data).affectedKeys().hasAny(['grade', 'score', 'feedback', 'gradedBy', 'uid', 'assignmentId'])
+          && !request.resource.data.diff(resource.data).affectedKeys().hasAny(['grade', 'score', 'feedback', 'gradedBy', 'uid', 'assignmentId', 'classId'])
         );
-      allow delete: if isSignedIn() && (resource.data.uid == request.auth.uid || isAdmin());
+      allow delete: if isAdmin() || (isSignedIn() && resource.data.uid == request.auth.uid);
     }
 
     // 7. exam_attempts/{classId}_m{meetingNo}_{examType}_{uid} (dikelola server-side via /api/grade Admin SDK)
     match /exam_attempts/{attemptId} {
-      allow read: if isSignedIn()
-        && (resource.data.uid == request.auth.uid || isLecturerOrAdmin());
+      allow read: if isAdmin() || (
+        isSignedIn() && (
+          resource.data.uid == request.auth.uid
+          || (resource.data.classId is string && isClassLecturer(resource.data.classId))
+        )
+      );
+      allow create, update, delete: if false;
+    }
+
+    // 7b. exams/{classId}_m{meetingNo}_{examType} (soal bebas kunci; ditulis server-side via /api/grade)
+    match /exams/{examId} {
+      allow get: if isSignedIn() && (
+        resource == null
+        || isAdmin()
+        || (resource.data.classId is string && (
+          isClassLecturer(resource.data.classId)
+          || isClassMember(resource.data.classId, request.auth.uid)
+        ))
+      );
+      allow list: if isAdmin() || (
+        isSignedIn()
+        && resource.data.classId is string
+        && (
+          isClassLecturer(resource.data.classId)
+          || isClassMember(resource.data.classId, request.auth.uid)
+        )
+      );
       allow create, update, delete: if false;
     }
 
@@ -141,32 +219,63 @@ service cloud.firestore {
 
     // 9. discussions/{discussionId}
     match /discussions/{discussionId} {
-      allow read: if isSignedIn();
+      allow read: if isAdmin() || (
+        isSignedIn()
+        && resource.data.classId is string
+        && (
+          isClassLecturer(resource.data.classId)
+          || isClassMember(resource.data.classId, request.auth.uid)
+        )
+      );
       allow create: if isSignedIn()
         && request.resource.data.authorUid == request.auth.uid
+        && request.resource.data.classId is string
+        && (
+          isAdmin()
+          || isClassLecturer(request.resource.data.classId)
+          || isClassMember(request.resource.data.classId, request.auth.uid)
+        )
         && request.resource.data.get('isVerifiedAnswer', false) == false;
       allow update: if isSignedIn()
+        && resource.data.classId is string
         && (
-          isLecturerOrAdmin()
+          isAdmin()
+          || isClassLecturer(resource.data.classId)
+          || isClassMember(resource.data.classId, request.auth.uid)
+        )
+        && (
+          isAdmin()
+          || isClassLecturer(resource.data.classId)
           || (
-            !request.resource.data.diff(resource.data).affectedKeys().hasAny(['isVerifiedAnswer', 'verifiedBy'])
+            !request.resource.data.diff(resource.data).affectedKeys().hasAny(['isVerifiedAnswer', 'verifiedBy', 'verifiedReplyId', 'classId'])
             && (
               resource.data.authorUid == request.auth.uid
               || request.resource.data.diff(resource.data).affectedKeys().hasOnly(['likes', 'likedBy', 'replies', 'updatedAt'])
             )
           )
         );
-      allow delete: if isSignedIn()
-        && (resource.data.authorUid == request.auth.uid || isLecturerOrAdmin());
+      allow delete: if isAdmin() || (
+        isSignedIn()
+        && resource.data.classId is string
+        && (
+          resource.data.authorUid == request.auth.uid
+          || isClassLecturer(resource.data.classId)
+        )
+      );
     }
 
     // 10. learning_progress/{classId}_m{meetingNo}_{uid}
     match /learning_progress/{progressId} {
-      allow read: if isSignedIn()
-        && (resource.data.uid == request.auth.uid || isLecturerOrAdmin());
+      allow read: if isAdmin() || (
+        isSignedIn() && (
+          resource.data.uid == request.auth.uid
+          || (resource.data.classId is string && isClassLecturer(resource.data.classId))
+        )
+      );
       allow create: if isSignedIn()
         && request.resource.data.uid == request.auth.uid
         && request.resource.data.classId is string
+        && isClassMember(request.resource.data.classId, request.auth.uid)
         && request.resource.data.meetingNo is int
         && request.resource.data.meetingNo >= 1
         && request.resource.data.meetingNo <= 32

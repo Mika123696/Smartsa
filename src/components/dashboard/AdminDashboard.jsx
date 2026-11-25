@@ -5,12 +5,10 @@ import { ROLES } from '../../constants/roles';
 import {
   deleteClassByAdmin,
   fetchAdminOverviewData,
-  seedStandardClassesByAdmin,
   updateClassByAdmin,
   updateUserByAdmin,
   updateUserVerificationByAdmin,
 } from '../../services/lmsFirestoreService';
-import { DEMO_AUDIT_LOGS } from '../../services/mockData';
 import { AccessibleDialog, AccessibleToast } from '../common/AccessibleDialog';
 import {
   Users,
@@ -23,31 +21,9 @@ import {
   Search,
   Save,
   Trash2,
-  PlusCircle,
   RefreshCw,
   BookOpen,
 } from 'lucide-react';
-
-const DEMO_VERIFICATION_QUEUE = [
-  {
-    id: 'verif_01',
-    name: 'Bambang Sudarmono, M.T.',
-    email: 'bambang@poltek.ac.id',
-    institution: 'Politeknik Elektronika Negeri Surabaya',
-    type: 'Dosen',
-    appliedAt: '22 Okt 2026, 06:30 WIB',
-    isFirestoreUser: false,
-  },
-  {
-    id: 'verif_02',
-    name: 'Nur Aini Farida, S.Pd.',
-    email: 'nuraini@smkn2-sby.sch.id',
-    institution: 'SMK Negeri 2 Surabaya',
-    type: 'Guru',
-    appliedAt: '21 Okt 2026, 17:45 WIB',
-    isFirestoreUser: false,
-  },
-];
 
 export default function AdminDashboard({ onClassesChanged }) {
   const { userProfile, currentUser, role } = useAuth();
@@ -55,11 +31,11 @@ export default function AdminDashboard({ onClassesChanged }) {
 
   const [usersList, setUsersList] = useState([]);
   const [classesList, setClassesList] = useState([]);
-  const [classesCount, setClassesCount] = useState(6);
-  const [dataSource, setDataSource] = useState('demo');
+  const [classesCount, setClassesCount] = useState(0);
+  const [dataSource, setDataSource] = useState('unconnected');
   const [loadedAdminUid, setLoadedAdminUid] = useState(null);
-  const [verificationQueue, setVerificationQueue] = useState(DEMO_VERIFICATION_QUEUE);
-  const [auditLogs, setAuditLogs] = useState(DEMO_AUDIT_LOGS);
+  const [verificationQueue, setVerificationQueue] = useState([]);
+  const [auditLogs, setAuditLogs] = useState([]);
   const [confirmAction, setConfirmAction] = useState(null);
   const [confirmDeleteClass, setConfirmDeleteClass] = useState(null);
   const [toast, setToast] = useState(null);
@@ -72,7 +48,6 @@ export default function AdminDashboard({ onClassesChanged }) {
   // Class Catalog Management state
   const [classDrafts, setClassDrafts] = useState({});
   const [savingClassId, setSavingClassId] = useState(null);
-  const [seedingClasses, setSeedingClasses] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
 
   const loading = Boolean(
@@ -242,32 +217,6 @@ export default function AdminDashboard({ onClassesChanged }) {
     }
   };
 
-  const handleSeedClasses = async () => {
-    if (seedingClasses) return;
-    setSeedingClasses(true);
-    try {
-      const res = await seedStandardClassesByAdmin();
-      setClassesList(res.classes);
-      setClassesCount(res.classes.length);
-      hydrateDrafts(usersList, res.classes);
-      onClassesChanged?.();
-      appendAuditLog(
-        'SEED_CLASSES',
-        `created=${res.createdCount}, skipped=${res.skippedCount}`
-      );
-      showToast(
-        language === 'en'
-          ? `Seeding done: ${res.createdCount} added, ${res.skippedCount} existing.`
-          : `Seeding selesai: ${res.createdCount} kelas baru ditambahkan, ${res.skippedCount} sudah ada.`,
-        'success'
-      );
-    } catch (err) {
-      showToast(err.message || 'Gagal melakukan seeding kelas.', 'error');
-    } finally {
-      setSeedingClasses(false);
-    }
-  };
-
   const handleSaveClassRow = async (cls) => {
     const draft = classDrafts[cls.id];
     if (!draft) return;
@@ -341,7 +290,7 @@ export default function AdminDashboard({ onClassesChanged }) {
     );
   });
 
-  const totalUsersDisplay = dataSource === 'firestore' ? usersList.length : 1420;
+  const totalUsersDisplay = usersList.length;
 
   return (
     <div className="space-y-6">
@@ -416,7 +365,11 @@ export default function AdminDashboard({ onClassesChanged }) {
             {loading ? '...' : totalUsersDisplay}
           </div>
           <span className="text-[11px] text-emerald-600 dark:text-emerald-400 font-semibold mt-1 inline-block">
-            {dataSource === 'firestore' ? 'Live Cloud Firestore' : 'Demo Snapshot'}
+            {dataSource === 'firestore'
+              ? 'Live Cloud Firestore'
+              : language === 'en'
+                ? 'Awaiting Firestore'
+                : 'Menunggu Firestore'}
           </span>
         </div>
 
@@ -446,7 +399,11 @@ export default function AdminDashboard({ onClassesChanged }) {
             {loading ? '...' : classesCount}
           </div>
           <span className="text-[11px] text-slate-500 dark:text-slate-400 mt-1 inline-block">
-            {dataSource === 'firestore' ? 'Firestore Classes' : 'Active Modules'}
+            {dataSource === 'firestore'
+              ? 'Firestore Classes'
+              : language === 'en'
+                ? 'Unloaded'
+                : 'Belum dimuat'}
           </span>
         </div>
 
@@ -752,25 +709,10 @@ export default function AdminDashboard({ onClassesChanged }) {
             </h3>
             <p className="text-xs text-slate-500 dark:text-slate-400">
               {language === 'en'
-                ? 'Seed standard LMS courses, reassign lead instructors, or remove classes from Firestore.'
-                : 'Lakukan seeding katalog kelas standar, atur ulang dosen pengampu, atau hapus kelas dari Firestore.'}
+                ? 'Reassign lead instructors or remove classes from Firestore.'
+                : 'Atur ulang dosen pengampu atau hapus kelas dari Firestore.'}
             </p>
           </div>
-          <button
-            type="button"
-            onClick={() => void handleSeedClasses()}
-            disabled={seedingClasses || dataSource !== 'firestore'}
-            className="inline-flex items-center gap-1.5 bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold px-3.5 py-2 rounded-xl shadow-xs transition disabled:opacity-50 shrink-0"
-          >
-            <PlusCircle className="w-4 h-4" />
-            {seedingClasses
-              ? language === 'en'
-                ? 'Seeding...'
-                : 'Memproses Seeding...'
-              : language === 'en'
-                ? 'Seed Standard Classes'
-                : 'Seed Kelas Standar'}
-          </button>
         </div>
 
         {dataSource !== 'firestore' ? (
@@ -782,8 +724,8 @@ export default function AdminDashboard({ onClassesChanged }) {
         ) : classesList.length === 0 ? (
           <div className="text-center py-8 bg-slate-50 dark:bg-[#0f141e] rounded-xl border border-dashed border-slate-200 dark:border-[#232f42] text-xs text-slate-500 dark:text-slate-400">
             {language === 'en'
-              ? 'No classes found in Firestore. Click "Seed Standard Classes" to initialize the catalog.'
-              : 'Belum ada kelas di Firestore. Klik "Seed Kelas Standar" untuk mengisi katalog awal.'}
+              ? 'No classes found in Firestore yet.'
+              : 'Belum ada kelas di Firestore.'}
           </div>
         ) : (
           <div className="overflow-x-auto">
@@ -901,53 +843,61 @@ export default function AdminDashboard({ onClassesChanged }) {
           </p>
         </div>
 
-        <div className="overflow-x-auto">
-          <table className="w-full text-left text-xs font-mono">
-            <thead className="bg-slate-900 dark:bg-[#090d16] text-slate-200 uppercase text-[10px] tracking-wider">
-              <tr>
-                <th className="py-3 px-4">Timestamp</th>
-                <th className="py-3 px-4">Actor</th>
-                <th className="py-3 px-4">Action</th>
-                <th className="py-3 px-4">Target</th>
-                <th className="py-3 px-4">Status</th>
-                <th className="py-3 px-4">Source</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-slate-100 dark:divide-[#232f42] font-sans">
-              {auditLogs.map((log) => (
-                <tr
-                  key={log.id}
-                  className="hover:bg-slate-50 dark:hover:bg-[#161d2a] transition text-[11px]"
-                >
-                  <td className="py-3 px-4 text-slate-500 dark:text-slate-400 font-mono">
-                    {log.timestamp}
-                  </td>
-                  <td className="py-3 px-4 font-semibold text-slate-900 dark:text-slate-100">
-                    {log.actor}
-                  </td>
-                  <td className="py-3 px-4">
-                    <span className="font-mono bg-slate-100 dark:bg-[#0f141e] text-slate-800 dark:text-amber-400 px-2 py-0.5 rounded-md text-[10px]">
-                      {log.action}
-                    </span>
-                  </td>
-                  <td className="py-3 px-4 text-slate-700 dark:text-slate-300">{log.target}</td>
-                  <td className="py-3 px-4">
-                    <span
-                      className={`font-semibold px-2 py-0.5 rounded-full text-[10px] ${
-                        log.status === 'SUCCESS'
-                          ? 'bg-emerald-50 dark:bg-emerald-950/60 text-emerald-700 dark:text-emerald-400 border border-emerald-200 dark:border-emerald-500/30'
-                          : 'bg-rose-50 dark:bg-rose-950/60 text-rose-700 dark:text-rose-400 border border-rose-200 dark:border-rose-500/30'
-                      }`}
-                    >
-                      {log.status}
-                    </span>
-                  </td>
-                  <td className="py-3 px-4 text-slate-400 font-mono">{log.ip}</td>
+        {auditLogs.length === 0 ? (
+          <div className="text-center py-8 bg-slate-50 dark:bg-[#0f141e] rounded-xl border border-dashed border-slate-200 dark:border-[#232f42] text-xs text-slate-500 dark:text-slate-400">
+            {language === 'en'
+              ? 'No server audit logs recorded yet in this session.'
+              : 'Belum ada log audit server yang tercatat pada sesi ini.'}
+          </div>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-left text-xs font-mono">
+              <thead className="bg-slate-900 dark:bg-[#090d16] text-slate-200 uppercase text-[10px] tracking-wider">
+                <tr>
+                  <th className="py-3 px-4">Timestamp</th>
+                  <th className="py-3 px-4">Actor</th>
+                  <th className="py-3 px-4">Action</th>
+                  <th className="py-3 px-4">Target</th>
+                  <th className="py-3 px-4">Status</th>
+                  <th className="py-3 px-4">Source</th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
+              </thead>
+              <tbody className="divide-y divide-slate-100 dark:divide-[#232f42] font-sans">
+                {auditLogs.map((log) => (
+                  <tr
+                    key={log.id}
+                    className="hover:bg-slate-50 dark:hover:bg-[#161d2a] transition text-[11px]"
+                  >
+                    <td className="py-3 px-4 text-slate-500 dark:text-slate-400 font-mono">
+                      {log.timestamp}
+                    </td>
+                    <td className="py-3 px-4 font-semibold text-slate-900 dark:text-slate-100">
+                      {log.actor}
+                    </td>
+                    <td className="py-3 px-4">
+                      <span className="font-mono bg-slate-100 dark:bg-[#0f141e] text-slate-800 dark:text-amber-400 px-2 py-0.5 rounded-md text-[10px]">
+                        {log.action}
+                      </span>
+                    </td>
+                    <td className="py-3 px-4 text-slate-700 dark:text-slate-300">{log.target}</td>
+                    <td className="py-3 px-4">
+                      <span
+                        className={`font-semibold px-2 py-0.5 rounded-full text-[10px] ${
+                          log.status === 'SUCCESS'
+                            ? 'bg-emerald-50 dark:bg-emerald-950/60 text-emerald-700 dark:text-emerald-400 border border-emerald-200 dark:border-emerald-500/30'
+                            : 'bg-rose-50 dark:bg-rose-950/60 text-rose-700 dark:text-rose-400 border border-rose-200 dark:border-rose-500/30'
+                        }`}
+                      >
+                        {log.status}
+                      </span>
+                    </td>
+                    <td className="py-3 px-4 text-slate-400 font-mono">{log.ip}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
       </div>
     </div>
   );

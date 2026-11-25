@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import {
   signInWithEmailAndPassword,
   createUserWithEmailAndPassword,
@@ -14,7 +14,8 @@ import {
 import { doc, getDoc, setDoc, serverTimestamp } from 'firebase/firestore';
 import { auth, db } from '../firebase';
 import { ROLES } from '../constants/roles';
-import { DEMO_USERS } from '../services/mockData';
+import { setLocalExamSession } from '../services/aiService';
+import { clearDemoAttendanceStore } from '../services/attendanceService';
 import { AuthContext } from './authContextDef';
 
 const LEGACY_STORAGE_KEYS = [
@@ -255,11 +256,12 @@ async function syncInstitutionalUserDoc(firebaseUser, firestoreData, docExists) 
 
 export function AuthProvider({ children }) {
   const [currentUser, setCurrentUser] = useState(null);
-  const [userProfile, setUserProfile] = useState(DEMO_USERS.student);
+  const [userProfile, setUserProfile] = useState(null);
   const [role, setRole] = useState(ROLES.STUDENT);
   const [loading, setLoading] = useState(() => Boolean(auth));
   const [isDemoMode, setIsDemoMode] = useState(true);
   const [authError, setAuthError] = useState(null);
+  const lastAuthUidRef = useRef(null);
 
   useEffect(() => {
     clearLegacyAuthStorage();
@@ -270,6 +272,11 @@ export function AuthProvider({ children }) {
 
     const unsubscribe = onAuthStateChanged(auth, async (user) => {
       if (user) {
+        if (lastAuthUidRef.current !== null && lastAuthUidRef.current !== user.uid) {
+          setLocalExamSession({ active: false });
+          clearDemoAttendanceStore();
+        }
+        lastAuthUidRef.current = user.uid;
         setCurrentUser(user);
         setIsDemoMode(false);
 
@@ -293,9 +300,12 @@ export function AuthProvider({ children }) {
 
         await syncInstitutionalUserDoc(user, firestoreData, docExists);
       } else {
+        lastAuthUidRef.current = null;
+        setLocalExamSession({ active: false });
+        clearDemoAttendanceStore();
         setCurrentUser(null);
         setIsDemoMode(true);
-        setUserProfile(DEMO_USERS.student);
+        setUserProfile(null);
         setRole(ROLES.STUDENT);
       }
       setLoading(false);
@@ -558,10 +568,13 @@ export function AuthProvider({ children }) {
     } catch (e) {
       console.warn('SignOut error:', e);
     }
+    lastAuthUidRef.current = null;
     clearLegacyAuthStorage();
+    setLocalExamSession({ active: false });
+    clearDemoAttendanceStore();
     setCurrentUser(null);
     setIsDemoMode(true);
-    setUserProfile(DEMO_USERS.student);
+    setUserProfile(null);
     setRole(ROLES.STUDENT);
   };
 
@@ -589,10 +602,9 @@ export function AuthProvider({ children }) {
     if (!photoURL || typeof photoURL !== 'string') return;
     const cleanPhoto = photoURL.trim();
 
-    setUserProfile((prev) => ({
-      ...prev,
-      photoURL: cleanPhoto,
-    }));
+    setUserProfile((prev) =>
+      prev ? { ...prev, photoURL: cleanPhoto } : { photoURL: cleanPhoto }
+    );
 
     const activeUser = auth?.currentUser || currentUser;
     if (activeUser && !isDemoMode) {
@@ -634,10 +646,9 @@ export function AuthProvider({ children }) {
 
     if (Object.keys(sanitizedUpdate).length === 0) return;
 
-    setUserProfile((prev) => ({
-      ...prev,
-      ...sanitizedUpdate,
-    }));
+    setUserProfile((prev) =>
+      prev ? { ...prev, ...sanitizedUpdate } : { ...sanitizedUpdate }
+    );
 
     const activeUser = auth?.currentUser || currentUser;
     if (activeUser && !isDemoMode) {

@@ -48,7 +48,7 @@ export function setLocalExamSession({
         ACTIVE_EXAM_SESSION_KEY,
         JSON.stringify({
           active: true,
-          classId: classId || 'subj_pbo',
+          classId: classId || '',
           meetingNo: Number(meetingNo) || 1,
           examType: examType || 'pretest',
           expiresAt: Date.now() + durationMs,

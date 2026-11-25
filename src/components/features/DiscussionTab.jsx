@@ -1,8 +1,9 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { useAuth } from '../../context/useAuth';
 import { useLanguage } from '../../context/useLanguage';
 import { ROLES } from '../../constants/roles';
 import {
+  fetchClassesForUser,
   subscribeDiscussions,
   createDiscussionTopic,
   toggleLikeDiscussion,
@@ -25,15 +26,6 @@ import {
   ShieldCheck,
 } from 'lucide-react';
 
-const TOPIC_TO_CLASS_ID = {
-  'Pemrograman Berorientasi Objek': 'subj_pbo',
-  'Basis Data': 'subj_bd',
-  'Pemrograman Web dan Perangkat Bergerak': 'subj_pwmb',
-  'Pemrograman Dasar & Algoritma': 'subj_pda',
-  'Desain Industri & UI/UX': 'subj_uiux',
-  'Pemodelan Perangkat Lunak': 'subj_ppl',
-};
-
 export default function DiscussionTab({
   embedded = false,
   classId: propClassId = null,
@@ -44,46 +36,123 @@ export default function DiscussionTab({
   const { userProfile, currentUser, role } = useAuth();
   const { t, language } = useLanguage();
 
-  const currentKey = `${currentUser?.uid || 'demo'}_${propClassId || 'all'}_${propMeetingNo || 'all'}`;
+  const [availableClasses, setAvailableClasses] = useState([]);
+  const [classesLoaded, setClassesLoaded] = useState(Boolean(propClassId));
+  const [selectedClassId, setSelectedClassId] = useState('');
   const [discussions, setDiscussions] = useState([]);
   const [loadedKey, setLoadedKey] = useState(null);
   const [errorMsg, setErrorMsg] = useState(null);
   const [questionInput, setQuestionInput] = useState('');
-  const [selectedTopic, setSelectedTopic] = useState('Pemrograman Berorientasi Objek');
   const [postMeetingNo, setPostMeetingNo] = useState(() => Number(propMeetingNo || 1));
   const [filterMeetingNo, setFilterMeetingNo] = useState('all');
   const [activeReplyId, setActiveReplyId] = useState(null);
   const [replyInputs, setReplyInputs] = useState({});
   const [posting, setPosting] = useState(false);
   const [deleteConfirm, setDeleteConfirm] = useState(null);
-
-  const loading = loadedKey !== currentKey;
-  const effectiveMeetingNo = propMeetingNo ? Number(propMeetingNo) : Number(postMeetingNo || 1);
-  const effectiveClassId = propClassId || TOPIC_TO_CLASS_ID[selectedTopic] || 'subj_pbo';
-  const effectiveSubject = propClassId ? classNameTitle || 'Kelas Smartsa' : selectedTopic;
+  const classReqIdRef = useRef(0);
 
   useEffect(() => {
+    let mounted = true;
+    const reqId = ++classReqIdRef.current;
+
+    const resetTransientDiscussionInputs = () => {
+      setQuestionInput('');
+      setReplyInputs({});
+      setActiveReplyId(null);
+      setDeleteConfirm(null);
+      setFilterMeetingNo('all');
+      if (propMeetingNo) {
+        setPostMeetingNo(Number(propMeetingNo));
+      }
+    };
+
+    if (propClassId) {
+      Promise.resolve().then(() => {
+        if (!mounted || reqId !== classReqIdRef.current) return;
+        resetTransientDiscussionInputs();
+        setClassesLoaded(true);
+      });
+      return () => {
+        mounted = false;
+      };
+    }
+
+    if (!currentUser?.uid) {
+      Promise.resolve().then(() => {
+        if (!mounted || reqId !== classReqIdRef.current) return;
+        setAvailableClasses([]);
+        setSelectedClassId('');
+        resetTransientDiscussionInputs();
+        setClassesLoaded(true);
+      });
+      return () => {
+        mounted = false;
+      };
+    }
+
+    fetchClassesForUser({ uid: currentUser.uid, role })
+      .then((res) => {
+        if (!mounted || reqId !== classReqIdRef.current) return;
+        const list = res.classes || [];
+        setAvailableClasses(list);
+        setSelectedClassId((prev) =>
+          prev && list.some((c) => c.id === prev) ? prev : list[0]?.id || ''
+        );
+        resetTransientDiscussionInputs();
+      })
+      .finally(() => {
+        if (mounted && reqId === classReqIdRef.current) setClassesLoaded(true);
+      });
+    return () => {
+      mounted = false;
+    };
+  }, [propClassId, propMeetingNo, currentUser?.uid, role]);
+
+  const effectiveClassId = propClassId || selectedClassId || '';
+  const selectedClassObj = availableClasses.find((c) => c.id === effectiveClassId) || null;
+  const availableMeetings =
+    Array.isArray(selectedClassObj?.meetings) && selectedClassObj.meetings.length > 0
+      ? selectedClassObj.meetings
+      : [];
+  const currentKey = `${currentUser?.uid || 'demo'}_${effectiveClassId || 'none'}_${propMeetingNo || 'all'}`;
+  const loading = !classesLoaded || (Boolean(effectiveClassId) && loadedKey !== currentKey);
+  const effectiveMeetingNo = propMeetingNo ? Number(propMeetingNo) : Number(postMeetingNo || 1);
+  const effectiveSubject = propClassId
+    ? classNameTitle || 'Kelas Smartsa'
+    : selectedClassObj?.name || selectedClassObj?.title || '';
+
+  useEffect(() => {
+    if (!classesLoaded || !effectiveClassId) return undefined;
+
     const unsubscribe = subscribeDiscussions(
       (res) => {
         setDiscussions(res.discussions || []);
         setErrorMsg(res.error || null);
         setLoadedKey(currentKey);
       },
-      propClassId || null,
+      effectiveClassId,
       propClassId && propMeetingNo ? Number(propMeetingNo) : null
     );
     return () => unsubscribe();
-  }, [currentKey, propClassId, propMeetingNo]);
+  }, [classesLoaded, currentKey, effectiveClassId, propClassId, propMeetingNo]);
 
   const activeAuthorName =
     userProfile?.displayName ||
     currentUser?.displayName ||
-    (language === 'en' ? 'Demo Student' : 'Mahasiswa Demo');
+    (language === 'en' ? 'Smartsa User' : 'Pengguna Smartsa');
 
   const activeAvatar = userProfile?.photoURL || currentUser?.photoURL || '';
 
   const handlePostQuestion = async (e) => {
     e.preventDefault();
+    if (!effectiveClassId) {
+      setErrorMsg(
+        language === 'en'
+          ? 'Join or create a class before starting a discussion topic.'
+          : 'Buat atau gabung kelas terlebih dahulu sebelum membuat topik diskusi.'
+      );
+      return;
+    }
     if (!questionInput.trim() || posting) return;
     setErrorMsg(null);
 
@@ -259,11 +328,12 @@ export default function DiscussionTab({
     }
   };
 
+  const scopedDiscussions = effectiveClassId ? discussions : [];
   const visibleDiscussions = embedded
-    ? discussions
+    ? scopedDiscussions
     : filterMeetingNo === 'all'
-    ? discussions
-    : discussions.filter((d) => Number(d.meetingNo || 1) === Number(filterMeetingNo));
+    ? scopedDiscussions
+    : scopedDiscussions.filter((d) => Number(d.meetingNo || 1) === Number(filterMeetingNo));
 
   return (
     <div className="space-y-6 font-sans">
@@ -331,47 +401,79 @@ export default function DiscussionTab({
           {!embedded && (
             <div className="flex flex-wrap items-center gap-2">
               <select
-                value={selectedTopic}
-                onChange={(e) => setSelectedTopic(e.target.value)}
+                value={selectedClassId}
+                onChange={(e) => {
+                  const nextId = e.target.value;
+                  setSelectedClassId(nextId);
+                  const nextCls = availableClasses.find((c) => c.id === nextId);
+                  const firstOrder = Number(nextCls?.meetings?.[0]?.order || 1);
+                  setPostMeetingNo(firstOrder);
+                }}
+                disabled={availableClasses.length === 0}
                 aria-label={language === 'en' ? 'Select Course' : 'Pilih Mata Kuliah'}
-                className="text-xs border border-slate-300 dark:border-slate-700 rounded-lg px-2.5 py-1.5 bg-slate-50 dark:bg-[#18212e] text-slate-900 dark:text-slate-200 focus:outline-none focus:border-[#f59e0b] font-mono"
+                className="text-xs border border-slate-300 dark:border-slate-700 rounded-lg px-2.5 py-1.5 bg-slate-50 dark:bg-[#18212e] text-slate-900 dark:text-slate-200 focus:outline-none focus:border-[#f59e0b] font-mono disabled:opacity-50"
               >
-                <option value="Pemrograman Berorientasi Objek">PBO</option>
-                <option value="Basis Data">Basis Data</option>
-                <option value="Pemrograman Web dan Perangkat Bergerak">PWPB</option>
-                <option value="Pemrograman Dasar & Algoritma">Algoritma</option>
-                <option value="Desain Industri & UI/UX">UI/UX</option>
-                <option value="Pemodelan Perangkat Lunak">PPL</option>
+                {availableClasses.length === 0 ? (
+                  <option value="">
+                    {language === 'en' ? 'No classes available' : 'Belum ada kelas'}
+                  </option>
+                ) : (
+                  availableClasses.map((cls) => (
+                    <option key={cls.id} value={cls.id}>
+                      {cls.name || cls.title} ({cls.code})
+                    </option>
+                  ))
+                )}
               </select>
               <select
                 value={postMeetingNo}
                 onChange={(e) => setPostMeetingNo(Number(e.target.value))}
+                disabled={availableClasses.length === 0}
                 aria-label={language === 'en' ? 'Select Meeting' : 'Pilih Pertemuan'}
-                className="text-xs border border-slate-300 dark:border-slate-700 rounded-lg px-2.5 py-1.5 bg-slate-50 dark:bg-[#18212e] text-slate-900 dark:text-slate-200 focus:outline-none focus:border-[#f59e0b] font-mono"
+                className="text-xs border border-slate-300 dark:border-slate-700 rounded-lg px-2.5 py-1.5 bg-slate-50 dark:bg-[#18212e] text-slate-900 dark:text-slate-200 focus:outline-none focus:border-[#f59e0b] font-mono disabled:opacity-50"
               >
-                {Array.from({ length: 16 }, (_, idx) => idx + 1).map((num) => (
-                  <option key={num} value={num}>
-                    {language === 'en' ? 'Meeting' : 'Pertemuan'} {num < 10 ? `0${num}` : num}
-                  </option>
-                ))}
+                {availableMeetings.length > 0 ? (
+                  availableMeetings.map((m) => (
+                    <option key={m.order} value={m.order}>
+                      P{m.order < 10 ? `0${m.order}` : m.order}: {m.title}
+                    </option>
+                  ))
+                ) : (
+                  <option value={1}>{language === 'en' ? 'Meeting 01' : 'Pertemuan 01'}</option>
+                )}
               </select>
             </div>
           )}
         </div>
 
+        {!embedded && classesLoaded && availableClasses.length === 0 && (
+          <div className="p-3 rounded-xl bg-slate-50 dark:bg-[#0b0f17] border border-dashed border-slate-300 dark:border-slate-700 text-xs text-slate-500 dark:text-slate-400">
+            {language === 'en'
+              ? 'No classes found in your account. Join or create a class before posting discussion topics.'
+              : 'Belum ada kelas tersedia untuk forum diskusi. Buat atau ikuti kelas terlebih dahulu untuk membuat topik.'}
+          </div>
+        )}
+
         <form onSubmit={handlePostQuestion} className="space-y-3">
           <textarea
             rows="2"
-            placeholder={t('comment_placeholder')}
+            disabled={!effectiveClassId}
+            placeholder={
+              !effectiveClassId
+                ? language === 'en'
+                  ? 'Select or join a class first...'
+                  : 'Buat atau pilih kelas terlebih dahulu...'
+                : t('comment_placeholder')
+            }
             value={questionInput}
             onChange={(e) => setQuestionInput(e.target.value)}
-            className="w-full text-xs sm:text-sm p-3 border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-[#0b0f17] rounded-xl text-slate-900 dark:text-slate-100 placeholder-slate-400 dark:placeholder-slate-600 focus:outline-none focus:border-[#f59e0b]"
+            className="w-full text-xs sm:text-sm p-3 border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-[#0b0f17] rounded-xl text-slate-900 dark:text-slate-100 placeholder-slate-400 dark:placeholder-slate-600 focus:outline-none focus:border-[#f59e0b] disabled:opacity-50"
           />
 
           <div className="flex justify-end">
             <button
               type="submit"
-              disabled={!questionInput.trim() || posting}
+              disabled={!effectiveClassId || !questionInput.trim() || posting}
               className="bg-[#f59e0b] hover:bg-[#d97706] text-black text-xs font-bold px-4 py-2 rounded-xl transition flex items-center gap-1.5 disabled:opacity-50 cursor-pointer shadow-md"
             >
               <Send className="w-3.5 h-3.5" />

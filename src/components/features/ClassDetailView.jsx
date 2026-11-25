@@ -10,12 +10,15 @@ import {
   fetchClassSubmissionsForGrading,
   fetchInstructorAnswerKey,
   fetchLearningProgressByClass,
+  fetchMeetingExam,
   fetchUserClassExamAttempts,
   createAssignmentInFirestore,
   gradeSubmissionInFirestore,
   joinClassWithToken,
+  saveMeetingExamByInstructor,
   submitAssignmentToFirestore,
   cancelSubmissionInFirestore,
+  updateClassDetailsInFirestore,
   updateClassMeetingsInFirestore,
   upsertLearningProgress,
 } from '../../services/lmsFirestoreService';
@@ -62,82 +65,71 @@ import {
   TrendingUp,
 } from 'lucide-react';
 
-const EXAM_QUESTIONS = [
-  {
-    id: 'q1',
-    question:
-      'Apa fungsi utama lapisan Repository dalam Clean Architecture pada arsitektur perangkat lunak modern?',
-    options: [
-      'Mengatur tampilan antarmuka pengguna pada komponen React/Flutter',
-      'Menyediakan abstraksi akses data independen dari framework database atau API eksternal',
-      'Menjalankan kompresi media gambar secara otomatis di Cloudinary',
-      'Mengirimkan token verifikasi email OTP menggunakan Firebase Auth',
-    ],
-  },
-  {
-    id: 'q2',
-    question:
-      'Mengapa kunci jawaban pretest dan post-test dilarang keras disimpan pada dokumen Firestore sisi klien?',
-    options: [
-      'Karena Firestore tidak mendukung tipe data array pilihan ganda',
-      'Karena akan memperlambat waktu rendering komponen antarmuka web',
-      'Karena dapat diinspeksi oleh pengguna melalui network request atau local storage (risiko kebocoran ujian)',
-      'Karena Firebase Admin SDK mewajibkan penyimpanan di file Excel',
-    ],
-  },
-  {
-    id: 'q3',
-    question:
-      'Kapan asisten kecerdasan buatan (Learning Assistant AI) wajib dikunci secara otomatis oleh sistem Smartsa LMS?',
-    options: [
-      'Saat kuota internet gawai pengguna di bawah 10%',
-      'Saat pengguna sedang dalam sesi aktif mengerjakan ujian pretest atau post-test',
-      'Hanya pada malam hari di luar jam perkuliahan',
-      'Saat pengguna belum melakukan bookmark pada modul materi',
-    ],
-  },
-  {
-    id: 'q4',
-    question:
-      'Apa format penyimpanan materi teks yang digunakan pada Smartsa LMS untuk menghindari risiko serangan XSS?',
-    options: [
-      'Format HTML mentah dengan tag script aktif',
-      'Format Delta JSON (flutter_quill / Quill standard)',
-      'Format Dokumen Microsoft Word .docx terkompresi',
-      'Format file teks biner tanpa pemformatan',
-    ],
-  },
-];
-
-function computeLocalDevScore(answersMap) {
-  if (import.meta.env.DEV) {
-    const devOnlyKey = { q1: 1, q2: 2, q3: 1, q4: 1 };
-    const qIds = Object.keys(devOnlyKey);
-    let correct = 0;
-    for (const qId of qIds) {
-      if (answersMap?.[qId] === devOnlyKey[qId]) correct += 1;
+function deltaToEditableText(delta) {
+  if (!delta || !Array.isArray(delta.ops)) return '';
+  const chunks = [];
+  let lineBuffer = '';
+  for (const op of delta.ops) {
+    if (typeof op?.insert !== 'string') continue;
+    if (op.insert === '\n') {
+      const cleanLine = lineBuffer.trim();
+      if (cleanLine) {
+        if (op.attributes?.header) {
+          chunks.push(`# ${cleanLine}`);
+        } else if (op.attributes?.list === 'bullet') {
+          chunks.push(`- ${cleanLine}`);
+        } else {
+          chunks.push(cleanLine);
+        }
+      }
+      lineBuffer = '';
+    } else {
+      lineBuffer += op.insert;
     }
-    return Math.round((correct / qIds.length) * 100);
   }
-  return 0;
+  if (lineBuffer.trim()) {
+    chunks.push(lineBuffer.trim());
+  }
+  return chunks.join('\n');
 }
 
-function buildFallbackMeetingsList(classData) {
-  if (Array.isArray(classData?.meetings) && classData.meetings.length > 0) {
-    return classData.meetings;
+function plainTextToDelta(rawText) {
+  const lines = String(rawText || '')
+    .split(/\r?\n/)
+    .map((line) => line.trimEnd());
+  const nonEmpty = lines.some((l) => l.trim().length > 0);
+  if (!nonEmpty) return null;
+
+  const ops = [];
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed) {
+      ops.push({ insert: '\n' });
+      continue;
+    }
+    if (trimmed.startsWith('# ')) {
+      ops.push({ insert: trimmed.slice(2).trim(), attributes: { bold: true } });
+      ops.push({ insert: '\n', attributes: { header: 2 } });
+    } else if (trimmed.startsWith('- ') || trimmed.startsWith('* ')) {
+      ops.push({ insert: trimmed.slice(2).trim() });
+      ops.push({ insert: '\n', attributes: { list: 'bullet' } });
+    } else {
+      ops.push({ insert: `${trimmed}\n` });
+    }
   }
-  return Array.from({ length: 16 }, (_, i) => {
-    const order = i + 1;
-    return {
-      id: `${classData?.id || 'cls'}_m${order}`,
-      order,
-      title: `Pertemuan ${order < 10 ? `0${order}` : order}: Topik Pembelajaran ${order}`,
-      date: `${classData?.day || 'Senin'}, ${classData?.time || '08.00–10.30'}`,
-      status: order <= 3 ? 'in_progress' : 'locked',
-      pretestDone: false,
-      posttestDone: false,
-    };
-  });
+  return ops.length > 0 ? { ops } : null;
+}
+
+function createEmptyExamQuestion(nextIndex = 1) {
+  return {
+    id: `q${nextIndex}`,
+    question: '',
+    options: ['', '', '', ''],
+  };
+}
+
+function getClassMeetingsList(classData) {
+  return Array.isArray(classData?.meetings) ? classData.meetings : [];
 }
 
 function resolveSafeVideoSource(rawUrl) {
@@ -196,16 +188,29 @@ export default function ClassDetailView({
   const isPreviewMode = Boolean(currentUser && role === ROLES.STUDENT && isMember === false);
 
   const [activeTab, setActiveTab] = useState('meetings');
-  const [meetingsList, setMeetingsList] = useState(() => buildFallbackMeetingsList(classData));
+  const [meetingsList, setMeetingsList] = useState(() => getClassMeetingsList(classData));
   const [selectedMeeting, setSelectedMeeting] = useState(
-    () => buildFallbackMeetingsList(classData)[0] || null
+    () => getClassMeetingsList(classData)[0] || null
   );
 
   // Syllabus Preview Join State
   const [joiningClass, setJoiningClass] = useState(false);
   const [joinFeedback, setJoinFeedback] = useState(null);
 
+  // Instructor Class Info Edit State
+  const [isEditingClassInfo, setIsEditingClassInfo] = useState(false);
+  const [editClassName, setEditClassName] = useState('');
+  const [editClassDesc, setEditClassDesc] = useState('');
+  const [editClassDay, setEditClassDay] = useState('');
+  const [editClassTime, setEditClassTime] = useState('');
+  const [savingClassInfo, setSavingClassInfo] = useState(false);
+  const [classInfoFeedback, setClassInfoFeedback] = useState(null);
+
   // Instructor Meetings Editor State
+  const [newMeetingTitle, setNewMeetingTitle] = useState('');
+  const [newMeetingDate, setNewMeetingDate] = useState('');
+  const [newMeetingStatus, setNewMeetingStatus] = useState('open');
+  const [deleteMeetingTarget, setDeleteMeetingTarget] = useState(null);
   const [editingMeetingId, setEditingMeetingId] = useState(null);
   const [editMeetingTitle, setEditMeetingTitle] = useState('');
   const [editMeetingDate, setEditMeetingDate] = useState('');
@@ -238,15 +243,38 @@ export default function ClassDetailView({
   const [creatingTask, setCreatingTask] = useState(false);
   const [createTaskNotice, setCreateTaskNotice] = useState(null);
 
-  // Instructor Exam Keys & Analytics State
+  // Instructor Per-Meeting Material, Video & PDF CRUD State
+  const [materialEditOpen, setMaterialEditOpen] = useState(false);
+  const [materialTextInput, setMaterialTextInput] = useState('');
+  const [savingMaterial, setSavingMaterial] = useState(false);
+  const [materialFeedback, setMaterialFeedback] = useState(null);
+
+  const [videoUrlInput, setVideoUrlInput] = useState('');
+  const [savingVideo, setSavingVideo] = useState(false);
+  const [videoFeedback, setVideoFeedback] = useState(null);
+
+  const [pdfUrlInput, setPdfUrlInput] = useState('');
+  const [pdfUploading, setPdfUploading] = useState(false);
+  const [savingPdf, setSavingPdf] = useState(false);
+  const [pdfFeedback, setPdfFeedback] = useState(null);
+
+  // Instructor Exam Keys, Questions CRUD & Analytics State
   const [evalKeyType, setEvalKeyType] = useState('pretest');
   const [instructorKeyMap, setInstructorKeyMap] = useState(null);
   const [instructorKeySource, setInstructorKeySource] = useState('');
   const [classExamAttempts, setClassExamAttempts] = useState([]);
   const [evalAnalyticsLoading, setEvalAnalyticsLoading] = useState(false);
   const [evalAnalyticsError, setEvalAnalyticsError] = useState('');
+  const [showExamEditor, setShowExamEditor] = useState(false);
+  const [examDraftTitle, setExamDraftTitle] = useState('');
+  const [examDraftQuestions, setExamDraftQuestions] = useState([]);
+  const [examDraftAnswerKey, setExamDraftAnswerKey] = useState({});
+  const [savingExam, setSavingExam] = useState(false);
+  const [examSaveFeedback, setExamSaveFeedback] = useState(null);
 
-  // Learning Progress & Exam State (Per-Meeting)
+  // Dynamic Per-Meeting Exam Bank & Attempt State
+  const [meetingExams, setMeetingExams] = useState({ pretest: null, posttest: null });
+  const [meetingExamsLoading, setMeetingExamsLoading] = useState(false);
   const [learningProgressMap, setLearningProgressMap] = useState({});
   const [progressSaving, setProgressSaving] = useState(false);
   const [progressFeedback, setProgressFeedback] = useState(null);
@@ -260,14 +288,25 @@ export default function ClassDetailView({
   const [examSubmitting, setExamSubmitting] = useState(false);
   const [examError, setExamError] = useState(null);
   const [examNote, setExamNote] = useState('');
-  const [downloadSuccess, setDownloadSuccess] = useState(false);
-  const [videoActivated, setVideoActivated] = useState(false);
 
   const examEndTimeRef = useRef(null);
   const selectedAnswersRef = useRef({});
   const examTypeRef = useRef('pretest');
-  const classIdRef = useRef(classData?.id || 'subj_pbo');
+  const classIdRef = useRef(classData?.id || '');
   const meetingNoRef = useRef(1);
+  const mountedRef = useRef(true);
+  const attReqIdRef = useRef(0);
+  const gradingReqIdRef = useRef(0);
+  const examsReqIdRef = useRef(0);
+  const evalReqIdRef = useRef(0);
+  const prevClassIdRef = useRef(classData?.id || null);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
 
   // Task Submission State
   const [taskSubmissions, setTaskSubmissions] = useState([]);
@@ -288,10 +327,39 @@ export default function ClassDetailView({
   }, [currentMeetingNo]);
 
   useEffect(() => {
-    classIdRef.current = classData?.id || 'subj_pbo';
-    const nextMeetings = buildFallbackMeetingsList(classData);
+    const nextClassId = classData?.id || '';
+    const switchedClass = prevClassIdRef.current !== null && prevClassIdRef.current !== nextClassId;
+    prevClassIdRef.current = nextClassId;
+    classIdRef.current = nextClassId;
+    const nextMeetings = getClassMeetingsList(classData);
     setMeetingsList(nextMeetings);
-    setSelectedMeeting(nextMeetings[0] || null);
+    if (switchedClass) {
+      setActiveTab('meetings');
+      setProgressFeedback(null);
+      setExamActive(false);
+      setExamFinished(false);
+      setExamScore(null);
+      setExamError(null);
+      setExamNote('');
+      setSelectedAnswers({});
+      setTaskFeedback(null);
+      setCreateTaskNotice(null);
+      setAttFeedback(null);
+      setGradingNotice(null);
+      setEditingMeetingId(null);
+      setExamSaveFeedback(null);
+      setMaterialFeedback(null);
+      setVideoFeedback(null);
+      setPdfFeedback(null);
+      setSelectedMeeting(nextMeetings[0] || null);
+      return;
+    }
+    setSelectedMeeting((prev) => {
+      if (prev && nextMeetings.some((m) => m.id === prev.id)) {
+        return nextMeetings.find((m) => m.id === prev.id) || nextMeetings[0] || null;
+      }
+      return nextMeetings[0] || null;
+    });
   }, [classData]);
 
   useEffect(() => {
@@ -305,18 +373,27 @@ export default function ClassDetailView({
     };
   }, [onExamStateChange]);
 
+  const extrasReqIdRef = useRef(0);
+
   useEffect(() => {
-    let mounted = true;
+    const reqId = ++extrasReqIdRef.current;
+    const targetClassId = classData?.id || '';
     const loadClassExtras = async () => {
       setTasksLoading(true);
       try {
-        if (currentUser && classData?.id) {
+        if (currentUser && targetClassId) {
           const [taskRes, attempts, progressList] = await Promise.all([
-            fetchAssignmentsWithUserSubmissions({ classId: classData.id }),
-            fetchUserClassExamAttempts(classData.id, currentUser.uid),
-            fetchLearningProgressByClass(classData.id, currentUser.uid),
+            fetchAssignmentsWithUserSubmissions({ classId: targetClassId }),
+            fetchUserClassExamAttempts(targetClassId, currentUser.uid),
+            fetchLearningProgressByClass(targetClassId, currentUser.uid),
           ]);
-          if (!mounted) return;
+          if (
+            !mountedRef.current ||
+            reqId !== extrasReqIdRef.current ||
+            classIdRef.current !== targetClassId
+          ) {
+            return;
+          }
           setTaskSubmissions(taskRes.assignments || []);
           setUserExamAttempts(attempts || []);
           const nextMap = {};
@@ -329,49 +406,39 @@ export default function ClassDetailView({
           });
           setLearningProgressMap(nextMap);
         } else {
-          if (!mounted) return;
-          setTaskSubmissions([
-            {
-              id: `demo_${classData?.id || 'subj_pbo'}_task01`,
-              classId: classData?.id || 'subj_pbo',
-              meetingNo: 1,
-              title: `Tugas Praktikum 01: ${classData?.name || 'Modul Kelas'}`,
-              deadline: '20 Nov 2026, 23:59 WIB',
-              isOverdue: false,
-              status: 'pending',
-              submittedFile: null,
-              note: 'Susun laporan teknis atau tautan repositori proyek dalam format PDF / ZIP atau URL eksternal.',
-              maxSize: '15 MB',
-              allowedFormats: '.pdf, .zip, .docx',
-            },
-          ]);
+          if (!mountedRef.current || reqId !== extrasReqIdRef.current) return;
+          setTaskSubmissions([]);
           setUserExamAttempts([]);
           setLearningProgressMap({});
         }
       } finally {
-        if (mounted) setTasksLoading(false);
+        if (mountedRef.current && reqId === extrasReqIdRef.current) setTasksLoading(false);
       }
     };
 
     void loadClassExtras();
-    return () => {
-      mounted = false;
-    };
   }, [classData?.id, classData?.name, currentUser]);
 
   const loadInstructorAttendance = useCallback(
     async (meetingFilter = attendeesFilterMeeting) => {
       if (!classData?.id) return;
+      const reqId = ++attReqIdRef.current;
+      const targetClassId = classData.id;
       setAttLoading(true);
       try {
         const [sess, list] = await Promise.all([
-          getClassAttendanceSession(classData.id),
-          fetchMeetingAttendees(classData.id, meetingFilter ? Number(meetingFilter) : null),
+          getClassAttendanceSession(targetClassId),
+          fetchMeetingAttendees(targetClassId, meetingFilter ? Number(meetingFilter) : null),
         ]);
+        if (!mountedRef.current || reqId !== attReqIdRef.current || classIdRef.current !== targetClassId) {
+          return;
+        }
         setAttSession(sess);
         setAttendees(list);
       } finally {
-        setAttLoading(false);
+        if (mountedRef.current && reqId === attReqIdRef.current) {
+          setAttLoading(false);
+        }
       }
     },
     [classData?.id, attendeesFilterMeeting]
@@ -379,9 +446,14 @@ export default function ClassDetailView({
 
   const loadInstructorGrading = useCallback(async () => {
     if (!classData?.id) return;
+    const reqId = ++gradingReqIdRef.current;
+    const targetClassId = classData.id;
     setGradingLoading(true);
     try {
-      const subs = await fetchClassSubmissionsForGrading(classData.id);
+      const subs = await fetchClassSubmissionsForGrading(targetClassId);
+      if (!mountedRef.current || reqId !== gradingReqIdRef.current || classIdRef.current !== targetClassId) {
+        return;
+      }
       setClassSubmissions(subs);
       const initialGrades = {};
       const initialFeedbacks = {};
@@ -392,30 +464,132 @@ export default function ClassDetailView({
       setGradeInputs(initialGrades);
       setFeedbackInputs(initialFeedbacks);
     } finally {
-      setGradingLoading(false);
+      if (mountedRef.current && reqId === gradingReqIdRef.current) {
+        setGradingLoading(false);
+      }
     }
   }, [classData?.id]);
 
+  const loadMeetingExams = useCallback(async (targetClassId, targetMeetingNo) => {
+    if (!targetClassId || !targetMeetingNo) {
+      setMeetingExams({ pretest: null, posttest: null });
+      return { pretest: null, posttest: null };
+    }
+    const reqId = ++examsReqIdRef.current;
+    setMeetingExamsLoading(true);
+    try {
+      const [preRes, postRes] = await Promise.all([
+        fetchMeetingExam({ classId: targetClassId, meetingNo: targetMeetingNo, examType: 'pretest' }),
+        fetchMeetingExam({ classId: targetClassId, meetingNo: targetMeetingNo, examType: 'posttest' }),
+      ]);
+      const nextExams = {
+        pretest: preRes?.isConfigured ? preRes.exam : null,
+        posttest: postRes?.isConfigured ? postRes.exam : null,
+      };
+      if (
+        mountedRef.current &&
+        reqId === examsReqIdRef.current &&
+        classIdRef.current === targetClassId
+      ) {
+        setMeetingExams(nextExams);
+      }
+      return nextExams;
+    } catch {
+      if (mountedRef.current && reqId === examsReqIdRef.current) {
+        setMeetingExams({ pretest: null, posttest: null });
+      }
+      return { pretest: null, posttest: null };
+    } finally {
+      if (mountedRef.current && reqId === examsReqIdRef.current) {
+        setMeetingExamsLoading(false);
+      }
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!classData?.id || meetingsList.length === 0) {
+      setMeetingExams({ pretest: null, posttest: null });
+      return;
+    }
+    void loadMeetingExams(classData.id, currentMeetingNo);
+  }, [classData?.id, currentMeetingNo, currentUser, meetingsList.length, loadMeetingExams]);
+
+  useEffect(() => {
+    setMaterialTextInput(deltaToEditableText(selectedMeeting?.deltaContent));
+    setMaterialEditOpen(false);
+    setMaterialFeedback(null);
+    setVideoUrlInput(selectedMeeting?.videoUrl ?? '');
+    setVideoFeedback(null);
+    setPdfUrlInput(selectedMeeting?.pdfUrl ?? '');
+    setPdfFeedback(null);
+  }, [selectedMeeting?.id, selectedMeeting?.deltaContent, selectedMeeting?.videoUrl, selectedMeeting?.pdfUrl]);
+
   const loadInstructorEvalAnalytics = useCallback(
-    async (targetExamType = evalKeyType) => {
+    async (targetExamType = evalKeyType, targetMeetingNo = currentMeetingNo) => {
       if (!classData?.id) return;
+      const reqId = ++evalReqIdRef.current;
+      const targetClassId = classData.id;
       setEvalAnalyticsLoading(true);
       setEvalAnalyticsError('');
       try {
-        const [keyRes, attempts] = await Promise.all([
-          fetchInstructorAnswerKey({ classId: classData.id, examType: targetExamType }),
-          fetchClassExamAttempts(classData.id),
+        const [keyRes, examRes, attempts] = await Promise.all([
+          fetchInstructorAnswerKey({
+            classId: targetClassId,
+            meetingNo: targetMeetingNo,
+            examType: targetExamType,
+          }),
+          fetchMeetingExam({
+            classId: targetClassId,
+            meetingNo: targetMeetingNo,
+            examType: targetExamType,
+          }),
+          fetchClassExamAttempts(targetClassId),
         ]);
-        setInstructorKeyMap(keyRes.answerKey || {});
+        if (!mountedRef.current || reqId !== evalReqIdRef.current || classIdRef.current !== targetClassId) {
+          return;
+        }
+        const loadedKeyMap = keyRes.answerKey || {};
+        const loadedExam = examRes?.isConfigured ? examRes.exam : null;
+        setInstructorKeyMap(loadedKeyMap);
         setInstructorKeySource(keyRes.source || 'server');
+        setMeetingExams((prev) => ({
+          ...prev,
+          [targetExamType]: loadedExam,
+        }));
         setClassExamAttempts(attempts || []);
+
+        const existingQuestions = Array.isArray(loadedExam?.questions) ? loadedExam.questions : [];
+        if (existingQuestions.length > 0) {
+          setExamDraftTitle(
+            loadedExam.title ||
+              `${targetExamType === 'posttest' ? 'Post-test' : 'Pretest'} Pertemuan ${targetMeetingNo}`
+          );
+          setExamDraftQuestions(
+            existingQuestions.map((q) => ({
+              id: q.id,
+              question: q.question || '',
+              options: Array.isArray(q.options) ? [...q.options] : ['', '', '', ''],
+            }))
+          );
+          setExamDraftAnswerKey({ ...loadedKeyMap });
+        } else {
+          setExamDraftTitle(
+            `${targetExamType === 'posttest' ? 'Post-test' : 'Pretest'} Pertemuan ${targetMeetingNo}`
+          );
+          setExamDraftQuestions([createEmptyExamQuestion(1)]);
+          setExamDraftAnswerKey({ q1: 0 });
+        }
       } catch (err) {
-        setEvalAnalyticsError(err.message || 'Gagal memuat kunci evaluasi dan statistik kelas.');
+        if (mountedRef.current && reqId === evalReqIdRef.current) {
+          setEvalAnalyticsError(err.message || 'Gagal memuat kunci evaluasi dan statistik kelas.');
+        }
       } finally {
-        setEvalAnalyticsLoading(false);
+        if (mountedRef.current && reqId === evalReqIdRef.current) {
+          setEvalAnalyticsLoading(false);
+        }
       }
     },
-    [classData?.id, evalKeyType]
+    [classData?.id, evalKeyType, currentMeetingNo]
   );
 
   useEffect(() => {
@@ -425,18 +599,26 @@ export default function ClassDetailView({
     } else if (activeTab === 'grading') {
       void loadInstructorGrading();
     } else if (activeTab === 'exam_insights') {
-      void loadInstructorEvalAnalytics(evalKeyType);
+      void loadInstructorEvalAnalytics(evalKeyType, currentMeetingNo);
     }
   }, [
     isEducatorOrAdmin,
     activeTab,
     evalKeyType,
+    currentMeetingNo,
     loadInstructorAttendance,
     loadInstructorGrading,
     loadInstructorEvalAnalytics,
   ]);
 
-  const examQuestions = EXAM_QUESTIONS;
+  const activeStudentExam = meetingExams[examType] || null;
+  const activeInstructorExam = meetingExams[evalKeyType] || null;
+  const examQuestions = Array.isArray(activeStudentExam?.questions)
+    ? activeStudentExam.questions
+    : [];
+  const instructorExamQuestions = Array.isArray(activeInstructorExam?.questions)
+    ? activeInstructorExam.questions
+    : [];
 
   const getMeetingCycleStatus = useCallback(
     (mNo) => {
@@ -514,9 +696,9 @@ export default function ClassDetailView({
   };
 
   const handleMarkProgress = async (field) => {
-    if (isEducatorOrAdmin || progressSaving) return;
+    if (isEducatorOrAdmin || progressSaving || !classData?.id) return;
     const targetNo = currentMeetingNo;
-    const targetClassId = classData?.id || 'subj_pbo';
+    const targetClassId = classData.id;
     setProgressSaving(true);
     setProgressFeedback(null);
 
@@ -564,28 +746,17 @@ export default function ClassDetailView({
     const targetMeetingNo = meetingNoRef.current || 1;
 
     if (!auth?.currentUser) {
-      const demoScore = computeLocalDevScore(answersToGrade);
       setLocalExamSession({
         classId: targetClassId,
         meetingNo: targetMeetingNo,
         examType: typeToGrade,
         active: false,
       });
-      upsertLocalAttempt({
-        id: `${targetClassId}_m${targetMeetingNo}_${typeToGrade}_demo`,
-        classId: targetClassId,
-        meetingNo: targetMeetingNo,
-        examType: typeToGrade,
-        score: demoScore,
-        status: 'submitted',
-      });
-      setExamScore(demoScore);
-      setExamNote(
+      setExamError(
         language === 'en'
-          ? 'Demo Mode: Score calculated locally (sign in with Firebase to sync /api/grade).'
-          : 'Mode Demo: Nilai disimulasikan di perangkat (masuk dengan Firebase untuk sinkronisasi /api/grade).'
+          ? 'Sign in with Firebase to submit assessments to /api/grade.'
+          : 'Masuk dengan akun Firebase untuk menyerahkan lembar evaluasi ke server /api/grade.'
       );
-      setExamFinished(true);
       setExamActive(false);
       return;
     }
@@ -634,29 +805,11 @@ export default function ClassDetailView({
         return;
       }
 
-      const devScore = computeLocalDevScore(answersToGrade);
-      setLocalExamSession({
-        classId: targetClassId,
-        meetingNo: targetMeetingNo,
-        examType: typeToGrade,
-        active: false,
-      });
-      upsertLocalAttempt({
-        id: `${targetClassId}_m${targetMeetingNo}_${typeToGrade}_local`,
-        classId: targetClassId,
-        meetingNo: targetMeetingNo,
-        examType: typeToGrade,
-        score: devScore,
-        status: 'submitted',
-      });
-      setExamScore(devScore);
-      setExamNote(
+      throw new Error(
         language === 'en'
-          ? 'Local Dev Mode: /api/grade is active on Vercel deployment; score evaluated locally.'
-          : 'Mode Dev Lokal: Endpoint /api/grade hanya aktif di Vercel deployment; skor dievaluasi secara lokal.'
+          ? 'Server assessment endpoint /api/grade is unavailable in this environment.'
+          : 'Endpoint evaluasi server /api/grade tidak aktif di lingkungan ini.'
       );
-      setExamFinished(true);
-      setExamActive(false);
     } catch (err) {
       setExamError(err.message || 'Gagal mengirim lembar ujian ke server.');
     } finally {
@@ -701,6 +854,16 @@ export default function ClassDetailView({
 
   const handleStartExam = async (type) => {
     const cycle = getMeetingCycleStatus(currentMeetingNo);
+    const targetExam = meetingExams[type];
+    if (!targetExam || !Array.isArray(targetExam.questions) || targetExam.questions.length === 0) {
+      setExamError(
+        language === 'en'
+          ? 'This assessment has not been configured by the lecturer yet.'
+          : 'Evaluasi untuk pertemuan ini belum dibuat oleh dosen.'
+      );
+      return;
+    }
+
     if (type === 'pretest' && cycle.pretestDone) {
       setExamError(
         language === 'en'
@@ -717,9 +880,54 @@ export default function ClassDetailView({
       );
       return;
     }
+    if (!auth?.currentUser) {
+      setExamError(
+        language === 'en'
+          ? 'Sign in with Firebase to start a verified exam session.'
+          : 'Masuk dengan akun Firebase untuk memulai sesi ujian.'
+      );
+      return;
+    }
 
-    const targetClassId = classData?.id || 'subj_pbo';
+    const targetClassId = classData?.id || '';
     const targetMeetingNo = currentMeetingNo;
+    setExamError(null);
+    setExamNote('');
+
+    try {
+      const token = await auth.currentUser.getIdToken();
+      const res = await fetch('/api/grade', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({
+          action: 'start',
+          classId: targetClassId,
+          meetingNo: targetMeetingNo,
+          examType: type,
+        }),
+      });
+      const isJson = res.headers.get('content-type')?.includes('application/json');
+      if (isJson && !res.ok) {
+        const errData = await res.json().catch(() => ({}));
+        setExamError(errData.error || 'Gagal memulai sesi evaluasi di server.');
+        return;
+      }
+      if (!isJson) {
+        setExamError(
+          language === 'en'
+            ? 'Server assessment endpoint /api/grade is unavailable in this environment.'
+            : 'Endpoint evaluasi server /api/grade tidak aktif di lingkungan ini.'
+        );
+        return;
+      }
+    } catch (err) {
+      setExamError(err.message || 'Gagal memulai sesi evaluasi di server.');
+      return;
+    }
+
     meetingNoRef.current = targetMeetingNo;
     examEndTimeRef.current = Date.now() + 900 * 1000;
     selectedAnswersRef.current = {};
@@ -730,8 +938,6 @@ export default function ClassDetailView({
     setExamTimer(900);
     setExamFinished(false);
     setExamScore(null);
-    setExamError(null);
-    setExamNote('');
     setSelectedAnswers({});
     setActiveTab('exam');
 
@@ -742,32 +948,6 @@ export default function ClassDetailView({
       active: true,
       durationMs: 900 * 1000,
     });
-
-    if (auth?.currentUser) {
-      try {
-        const token = await auth.currentUser.getIdToken();
-        const res = await fetch('/api/grade', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            Authorization: `Bearer ${token}`,
-          },
-          body: JSON.stringify({
-            action: 'start',
-            classId: targetClassId,
-            meetingNo: targetMeetingNo,
-            examType: type,
-          }),
-        });
-        const isJson = res.headers.get('content-type')?.includes('application/json');
-        if (isJson && !res.ok) {
-          const errData = await res.json().catch(() => ({}));
-          console.warn('[ClassDetailView] /api/grade start warning:', errData.error);
-        }
-      } catch (err) {
-        console.warn('[ClassDetailView] Gagal sinkronisasi start exam ke server:', err.message);
-      }
-    }
   };
 
   const handleAnswerSelect = (qId, optionIdx) => {
@@ -784,36 +964,407 @@ export default function ClassDetailView({
     return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
   };
 
-  const safePdfUrl = getSafePdfUrl(classData?.pdfUrl);
-  const videoSource = resolveSafeVideoSource(classData?.videoUrl);
+  const activeMeetingVideoUrl =
+    selectedMeeting?.videoUrl !== undefined ? selectedMeeting.videoUrl : classData?.videoUrl || '';
+  const activeMeetingPdfUrl =
+    selectedMeeting?.pdfUrl !== undefined ? selectedMeeting.pdfUrl : classData?.pdfUrl || '';
+  const safePdfUrl = getSafePdfUrl(activeMeetingPdfUrl);
+  const videoSource = resolveSafeVideoSource(activeMeetingVideoUrl);
 
-  const handleDownloadPdf = () => {
-    if (safePdfUrl) {
-      window.open(safePdfUrl, '_blank', 'noopener,noreferrer');
-    } else {
-      const summaryContent = [
-        `SMARTSA LMS - MANUAL BOOK & RINGKASAN MODUL`,
-        `Kelas: ${classData?.name || classData?.title || 'Smartsa Module'} (${classData?.code || '-'})`,
-        `Instruktur: ${classData?.instructor || classData?.lecturer || '-'}`,
-        ``,
-        `Deskripsi:`,
-        classData?.description || '-',
-        ``,
-        `Silabus Pertemuan:`,
-        ...(classData?.meetings || []).map((m) => `- Pertemuan ${m.order}: ${m.title} (${m.date})`),
-      ].join('\n');
-      const blob = new Blob([summaryContent], { type: 'text/plain;charset=utf-8' });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = `Manual_Book_${(classData?.code || 'Smartsa').replace(/[^a-zA-Z0-9_-]/g, '_')}.txt`;
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      URL.revokeObjectURL(url);
+  const saveMeetingContentPatch = async (targetMeeting, patch) => {
+    const nextMeetings = meetingsList.map((m) =>
+      m.id === targetMeeting.id ? { ...m, ...patch } : m
+    );
+    const result = await updateClassMeetingsInFirestore(classData.id, nextMeetings);
+    const savedMeetings = result.meetings || nextMeetings;
+    setMeetingsList(savedMeetings);
+    const updatedSelected = savedMeetings.find((m) => m.id === targetMeeting.id) || null;
+    if (selectedMeeting?.id === targetMeeting.id && updatedSelected) {
+      setSelectedMeeting(updatedSelected);
     }
-    setDownloadSuccess(true);
-    setTimeout(() => setDownloadSuccess(false), 3500);
+    onClassUpdated?.({
+      ...classData,
+      meetings: savedMeetings,
+      meetingsCount: result.meetingsCount ?? savedMeetings.length,
+      materialsCount: result.materialsCount,
+    });
+    return result;
+  };
+
+  const handleSaveMeetingDelta = async (e) => {
+    e.preventDefault();
+    if (!isEducatorOrAdmin || !selectedMeeting || savingMaterial || !classData?.id) return;
+    const nextDelta = plainTextToDelta(materialTextInput);
+    if (!nextDelta) {
+      setMaterialFeedback({
+        type: 'error',
+        text:
+          language === 'en'
+            ? 'Material text cannot be empty. Use Clear Material to remove.'
+            : 'Teks materi tidak boleh kosong. Gunakan Hapus Materi untuk mengosongkan.',
+      });
+      return;
+    }
+
+    setSavingMaterial(true);
+    setMaterialFeedback(null);
+    try {
+      await saveMeetingContentPatch(selectedMeeting, { deltaContent: nextDelta });
+      setMaterialEditOpen(false);
+      setMaterialFeedback({
+        type: 'success',
+        text:
+          language === 'en'
+            ? `Reading material for Meeting ${selectedMeeting.order} saved.`
+            : `Materi bacaan Pertemuan ${selectedMeeting.order} berhasil disimpan.`,
+      });
+    } catch (err) {
+      setMaterialFeedback({
+        type: 'error',
+        text: err.message || 'Gagal menyimpan materi pertemuan.',
+      });
+    } finally {
+      setSavingMaterial(false);
+    }
+  };
+
+  const handleClearMeetingDelta = async () => {
+    if (!isEducatorOrAdmin || !selectedMeeting || savingMaterial || !classData?.id) return;
+    setSavingMaterial(true);
+    setMaterialFeedback(null);
+    try {
+      await saveMeetingContentPatch(selectedMeeting, { deltaContent: null });
+      setMaterialTextInput('');
+      setMaterialEditOpen(false);
+      setMaterialFeedback({
+        type: 'success',
+        text:
+          language === 'en'
+            ? `Reading material for Meeting ${selectedMeeting.order} cleared.`
+            : `Materi bacaan Pertemuan ${selectedMeeting.order} telah dihapus.`,
+      });
+    } catch (err) {
+      setMaterialFeedback({
+        type: 'error',
+        text: err.message || 'Gagal menghapus materi pertemuan.',
+      });
+    } finally {
+      setSavingMaterial(false);
+    }
+  };
+
+  const handleSaveMeetingVideo = async (e) => {
+    e.preventDefault();
+    if (!isEducatorOrAdmin || !selectedMeeting || savingVideo || !classData?.id) return;
+    const trimmed = videoUrlInput.trim();
+    if (!trimmed) {
+      setVideoFeedback({
+        type: 'error',
+        text:
+          language === 'en'
+            ? 'Enter a valid https:// video URL or click Clear Video.'
+            : 'Masukkan tautan video https:// yang valid atau klik Hapus Video.',
+      });
+      return;
+    }
+    if (!isValidExternalUrl(trimmed) || !resolveSafeVideoSource(trimmed)) {
+      setVideoFeedback({
+        type: 'error',
+        text:
+          language === 'en'
+            ? 'Invalid video URL. Only https:// or http:// URLs are allowed.'
+            : 'URL video tidak valid. Hanya tautan https:// atau http:// yang diperbolehkan.',
+      });
+      return;
+    }
+
+    setSavingVideo(true);
+    setVideoFeedback(null);
+    try {
+      await saveMeetingContentPatch(selectedMeeting, {
+        videoUrl: trimmed,
+        hasVideo: true,
+      });
+      setVideoFeedback({
+        type: 'success',
+        text:
+          language === 'en'
+            ? `Video URL saved for Meeting ${selectedMeeting.order}.`
+            : `Tautan video Pertemuan ${selectedMeeting.order} berhasil disimpan.`,
+      });
+    } catch (err) {
+      setVideoFeedback({
+        type: 'error',
+        text: err.message || 'Gagal menyimpan URL video pertemuan.',
+      });
+    } finally {
+      setSavingVideo(false);
+    }
+  };
+
+  const handleClearMeetingVideo = async () => {
+    if (!isEducatorOrAdmin || !selectedMeeting || savingVideo || !classData?.id) return;
+    setSavingVideo(true);
+    setVideoFeedback(null);
+    try {
+      await saveMeetingContentPatch(selectedMeeting, {
+        videoUrl: '',
+        hasVideo: false,
+      });
+      setVideoUrlInput('');
+      setVideoFeedback({
+        type: 'success',
+        text:
+          language === 'en'
+            ? `Video removed from Meeting ${selectedMeeting.order}.`
+            : `Video Pertemuan ${selectedMeeting.order} berhasil dihapus.`,
+      });
+    } catch (err) {
+      setVideoFeedback({
+        type: 'error',
+        text: err.message || 'Gagal menghapus video pertemuan.',
+      });
+    } finally {
+      setSavingVideo(false);
+    }
+  };
+
+  const handleSaveMeetingPdf = async (e) => {
+    e.preventDefault();
+    if (!isEducatorOrAdmin || !selectedMeeting || savingPdf || !classData?.id) return;
+    const trimmed = pdfUrlInput.trim();
+    if (!trimmed) {
+      setPdfFeedback({
+        type: 'error',
+        text:
+          language === 'en'
+            ? 'Enter a valid https:// PDF URL or upload a PDF document.'
+            : 'Masukkan tautan PDF https:// atau unggah dokumen PDF terlebih dahulu.',
+      });
+      return;
+    }
+    if (!isValidExternalUrl(trimmed)) {
+      setPdfFeedback({
+        type: 'error',
+        text:
+          language === 'en'
+            ? 'Invalid PDF URL. Only https:// or http:// URLs are allowed.'
+            : 'URL PDF tidak valid. Hanya tautan https:// atau http:// yang diperbolehkan.',
+      });
+      return;
+    }
+
+    setSavingPdf(true);
+    setPdfFeedback(null);
+    try {
+      await saveMeetingContentPatch(selectedMeeting, {
+        pdfUrl: trimmed,
+        hasPdf: true,
+      });
+      setPdfFeedback({
+        type: 'success',
+        text:
+          language === 'en'
+            ? `PDF module saved for Meeting ${selectedMeeting.order}.`
+            : `Modul PDF Pertemuan ${selectedMeeting.order} berhasil disimpan.`,
+      });
+    } catch (err) {
+      setPdfFeedback({
+        type: 'error',
+        text: err.message || 'Gagal menyimpan URL PDF pertemuan.',
+      });
+    } finally {
+      setSavingPdf(false);
+    }
+  };
+
+  const handleUploadMeetingPdfFile = async (file) => {
+    if (!file || !isEducatorOrAdmin || !selectedMeeting || pdfUploading || savingPdf || !classData?.id) {
+      return;
+    }
+    setPdfUploading(true);
+    setPdfFeedback(null);
+    try {
+      const uploadResult = await uploadMediaFile(file, 'document');
+      if (uploadResult.isLive && uploadResult.url && isValidExternalUrl(uploadResult.url)) {
+        setPdfUrlInput(uploadResult.url);
+        await saveMeetingContentPatch(selectedMeeting, {
+          pdfUrl: uploadResult.url,
+          hasPdf: true,
+        });
+        setPdfFeedback({
+          type: 'success',
+          text:
+            language === 'en'
+              ? `PDF "${file.name}" uploaded and saved to Meeting ${selectedMeeting.order}.`
+              : `PDF "${file.name}" berhasil diunggah dan disimpan ke Pertemuan ${selectedMeeting.order}.`,
+        });
+      } else {
+        setPdfFeedback({
+          type: 'error',
+          text:
+            uploadResult.note ||
+            (language === 'en'
+              ? 'Cloudinary upload is not active. Paste a valid https:// PDF URL below.'
+              : 'Unggah Cloudinary tidak aktif; silakan tempel tautan PDF https:// di kolom URL.'),
+        });
+      }
+    } catch (err) {
+      setPdfFeedback({
+        type: 'error',
+        text: err.message || 'Gagal mengunggah berkas PDF.',
+      });
+    } finally {
+      setPdfUploading(false);
+    }
+  };
+
+  const handleClearMeetingPdf = async () => {
+    if (!isEducatorOrAdmin || !selectedMeeting || savingPdf || !classData?.id) return;
+    setSavingPdf(true);
+    setPdfFeedback(null);
+    try {
+      await saveMeetingContentPatch(selectedMeeting, {
+        pdfUrl: '',
+        hasPdf: false,
+      });
+      setPdfUrlInput('');
+      setPdfFeedback({
+        type: 'success',
+        text:
+          language === 'en'
+            ? `PDF module removed from Meeting ${selectedMeeting.order}.`
+            : `Dokumen PDF Pertemuan ${selectedMeeting.order} telah dihapus.`,
+      });
+    } catch (err) {
+      setPdfFeedback({
+        type: 'error',
+        text: err.message || 'Gagal menghapus dokumen PDF.',
+      });
+    } finally {
+      setSavingPdf(false);
+    }
+  };
+
+  const handleAddDraftQuestion = () => {
+    setExamDraftQuestions((prev) => {
+      const usedNums = prev.map((q) => Number(String(q.id || '').replace(/\D+/g, '')) || 0);
+      const nextNum = (usedNums.length > 0 ? Math.max(...usedNums) : prev.length) + 1;
+      const newQ = createEmptyExamQuestion(nextNum);
+      setExamDraftAnswerKey((prevKey) => ({ ...prevKey, [newQ.id]: 0 }));
+      return [...prev, newQ];
+    });
+  };
+
+  const handleRemoveDraftQuestion = (qId) => {
+    setExamDraftQuestions((prev) => prev.filter((q) => q.id !== qId));
+    setExamDraftAnswerKey((prev) => {
+      const next = { ...prev };
+      delete next[qId];
+      return next;
+    });
+  };
+
+  const handleUpdateDraftQuestionText = (qId, text) => {
+    setExamDraftQuestions((prev) =>
+      prev.map((q) => (q.id === qId ? { ...q, question: text } : q))
+    );
+  };
+
+  const handleUpdateDraftOption = (qId, optIdx, value) => {
+    setExamDraftQuestions((prev) =>
+      prev.map((q) => {
+        if (q.id !== qId) return q;
+        const nextOpts = [...(q.options || ['', '', '', ''])];
+        nextOpts[optIdx] = value;
+        return { ...q, options: nextOpts };
+      })
+    );
+  };
+
+  const handleUpdateDraftAnswerKey = (qId, optionIdx) => {
+    setExamDraftAnswerKey((prev) => ({
+      ...prev,
+      [qId]: Number(optionIdx),
+    }));
+  };
+
+  const handleSaveMeetingExam = async (e) => {
+    e.preventDefault();
+    if (!isEducatorOrAdmin || savingExam || !classData?.id || !selectedMeeting) return;
+
+    const cleanQuestions = examDraftQuestions.map((q) => ({
+      id: String(q.id || '').trim(),
+      question: String(q.question || '').trim(),
+      options: (Array.isArray(q.options) ? q.options : []).map((opt) => String(opt || '').trim()),
+    }));
+
+    if (cleanQuestions.length === 0) {
+      setExamSaveFeedback({
+        type: 'error',
+        text: language === 'en' ? 'Add at least 1 question.' : 'Tambahkan minimal 1 soal evaluasi.',
+      });
+      return;
+    }
+
+    for (let i = 0; i < cleanQuestions.length; i += 1) {
+      const q = cleanQuestions[i];
+      if (!q.question || q.options.length < 2 || q.options.some((opt) => !opt)) {
+        setExamSaveFeedback({
+          type: 'error',
+          text:
+            language === 'en'
+              ? `Question ${i + 1} requires question text and all non-empty options.`
+              : `Soal ${i + 1} wajib memiliki teks pertanyaan dan seluruh opsi terisi.`,
+        });
+        return;
+      }
+      const selectedIdx = Number(examDraftAnswerKey?.[q.id]);
+      if (!Number.isInteger(selectedIdx) || selectedIdx < 0 || selectedIdx >= q.options.length) {
+        setExamSaveFeedback({
+          type: 'error',
+          text:
+            language === 'en'
+              ? `Select a valid reference answer for Question ${i + 1}.`
+              : `Pilih kunci jawaban referensi yang valid untuk Soal ${i + 1}.`,
+        });
+        return;
+      }
+    }
+
+    const cleanAnswerKey = {};
+    cleanQuestions.forEach((q) => {
+      cleanAnswerKey[q.id] = Number(examDraftAnswerKey[q.id]);
+    });
+
+    setSavingExam(true);
+    setExamSaveFeedback(null);
+    try {
+      await saveMeetingExamByInstructor({
+        classId: classData.id,
+        meetingNo: currentMeetingNo,
+        examType: evalKeyType,
+        title: examDraftTitle.trim(),
+        questions: cleanQuestions,
+        answerKey: cleanAnswerKey,
+      });
+      setShowExamEditor(false);
+      await loadInstructorEvalAnalytics(evalKeyType, currentMeetingNo);
+      setExamSaveFeedback({
+        type: 'success',
+        text:
+          language === 'en'
+            ? `${evalKeyType.toUpperCase()} for Meeting ${currentMeetingNo} saved securely to server.`
+            : `Soal & kunci ${evalKeyType.toUpperCase()} Pertemuan ${currentMeetingNo} berhasil disimpan ke server.`,
+      });
+    } catch (err) {
+      setExamSaveFeedback({
+        type: 'error',
+        text: err.message || 'Gagal menyimpan soal dan kunci evaluasi ke server.',
+      });
+    } finally {
+      setSavingExam(false);
+    }
   };
 
   const handleTaskFileSubmit = async (e) => {
@@ -962,6 +1513,20 @@ export default function ClassDetailView({
     }
   };
 
+  const effectiveAttMeetingNo =
+    meetingsList.length > 0
+      ? meetingsList.some((m) => Number(m.order) === Number(attMeetingNo))
+        ? Number(attMeetingNo)
+        : Number(meetingsList[0].order)
+      : Number(attMeetingNo || 1);
+
+  const effectiveNewTaskMeetingNo =
+    meetingsList.length > 0
+      ? meetingsList.some((m) => Number(m.order) === Number(newTaskMeetingNo))
+        ? Number(newTaskMeetingNo)
+        : Number(meetingsList[0].order)
+      : Number(newTaskMeetingNo || 1);
+
   const handleCreateMeetingTask = async (e) => {
     e.preventDefault();
     if (!isEducatorOrAdmin || creatingTask) return;
@@ -973,12 +1538,13 @@ export default function ClassDetailView({
       return;
     }
 
+    if (!classData?.id) return;
     setCreatingTask(true);
     setCreateTaskNotice(null);
     try {
       const created = await createAssignmentInFirestore({
-        classId: classData?.id || 'subj_pbo',
-        meetingNo: Number(newTaskMeetingNo || 1),
+        classId: classData.id,
+        meetingNo: effectiveNewTaskMeetingNo,
         title: newTaskTitle.trim(),
         subject: classData?.name || classData?.title || 'Mata Kuliah Smartsa',
         subjectCode: classData?.code || 'CLS',
@@ -1030,6 +1596,167 @@ export default function ClassDetailView({
     }
   };
 
+  const handleStartEditClassInfo = () => {
+    setEditClassName(classData?.name || classData?.title || '');
+    setEditClassDesc(classData?.description || '');
+    setEditClassDay(classData?.day || '');
+    setEditClassTime(classData?.time || '');
+    setClassInfoFeedback(null);
+    setIsEditingClassInfo(true);
+  };
+
+  const handleSaveClassInfo = async (e) => {
+    e.preventDefault();
+    if (!isEducatorOrAdmin || savingClassInfo || !classData?.id) return;
+    const cleanName = editClassName.trim();
+    if (!cleanName) {
+      setClassInfoFeedback({
+        type: 'error',
+        text: language === 'en' ? 'Class name cannot be empty.' : 'Nama kelas tidak boleh kosong.',
+      });
+      return;
+    }
+
+    setSavingClassInfo(true);
+    setClassInfoFeedback(null);
+    try {
+      const updated = await updateClassDetailsInFirestore(classData.id, {
+        name: cleanName,
+        description: editClassDesc.trim(),
+        day: editClassDay,
+        time: editClassTime.trim(),
+      });
+      onClassUpdated?.({
+        ...classData,
+        name: updated.name || cleanName,
+        title: updated.title || cleanName,
+        description: typeof updated.description === 'string' ? updated.description : editClassDesc.trim(),
+        day: typeof updated.day === 'string' ? updated.day : editClassDay,
+        time: typeof updated.time === 'string' ? updated.time : editClassTime.trim(),
+      });
+      setIsEditingClassInfo(false);
+      setClassInfoFeedback({
+        type: 'success',
+        text:
+          language === 'en'
+            ? 'Class information saved to Firestore.'
+            : 'Informasi kelas berhasil diperbarui di Firestore.',
+      });
+    } catch (err) {
+      setClassInfoFeedback({
+        type: 'error',
+        text: err.message || 'Gagal memperbarui informasi kelas.',
+      });
+    } finally {
+      setSavingClassInfo(false);
+    }
+  };
+
+  const handleAddMeeting = async (e) => {
+    e.preventDefault();
+    if (!isEducatorOrAdmin || savingMeetings || !classData?.id) return;
+    const cleanTitle = newMeetingTitle.trim();
+    if (!cleanTitle) {
+      setMeetingsFeedback({
+        type: 'error',
+        text: language === 'en' ? 'Meeting title is required.' : 'Judul pertemuan wajib diisi.',
+      });
+      return;
+    }
+
+    // Stabilitas meetingNo: selalu max(order) + 1 agar tidak bentrok dengan dokumen _m{order}_
+    const maxOrder = meetingsList.reduce(
+      (max, m) => Math.max(max, Number(m.order || 0)),
+      0
+    );
+    const nextOrder = maxOrder + 1;
+    const defaultSchedule = [classData?.day, classData?.time].filter(Boolean).join(', ');
+    const newMeeting = {
+      id: `${classData.id}_m${nextOrder}`,
+      order: nextOrder,
+      title: cleanTitle,
+      date:
+        newMeetingDate.trim() ||
+        defaultSchedule ||
+        (language === 'en' ? 'Schedule not set' : 'Jadwal belum diatur'),
+      status: newMeetingStatus === 'locked' ? 'locked' : 'open',
+      hasVideo: false,
+      hasPdf: false,
+    };
+
+    const nextMeetings = [...meetingsList, newMeeting];
+    const previousMeetings = meetingsList;
+    setMeetingsList(nextMeetings);
+    if (!selectedMeeting) {
+      setSelectedMeeting(newMeeting);
+    }
+    setSavingMeetings(true);
+    setMeetingsFeedback(null);
+    try {
+      await updateClassMeetingsInFirestore(classData.id, nextMeetings);
+      onClassUpdated?.({
+        ...classData,
+        meetings: nextMeetings,
+        meetingsCount: nextMeetings.length,
+      });
+      setNewMeetingTitle('');
+      setNewMeetingDate('');
+      setNewMeetingStatus('open');
+      setMeetingsFeedback({
+        type: 'success',
+        text:
+          language === 'en'
+            ? `Meeting ${nextOrder} added (Total: ${nextMeetings.length}).`
+            : `Pertemuan ${nextOrder} berhasil ditambahkan (Total: ${nextMeetings.length}).`,
+      });
+    } catch (err) {
+      setMeetingsList(previousMeetings);
+      setMeetingsFeedback({
+        type: 'error',
+        text: err.message || 'Gagal menambahkan pertemuan baru.',
+      });
+    } finally {
+      setSavingMeetings(false);
+    }
+  };
+
+  const executeDeleteMeeting = async (targetMeeting) => {
+    if (!isEducatorOrAdmin || !targetMeeting || savingMeetings || !classData?.id) return;
+    // Pertahankan nomor urut pertemuan tersisa (TANPA re-numbering) agar ID dokumen _m{order}_ tetap utuh
+    const nextMeetings = meetingsList.filter((m) => m.id !== targetMeeting.id);
+    const previousMeetings = meetingsList;
+    setMeetingsList(nextMeetings);
+    if (selectedMeeting?.id === targetMeeting.id) {
+      setSelectedMeeting(nextMeetings[0] || null);
+    }
+    setSavingMeetings(true);
+    setMeetingsFeedback(null);
+    try {
+      await updateClassMeetingsInFirestore(classData.id, nextMeetings);
+      onClassUpdated?.({
+        ...classData,
+        meetings: nextMeetings,
+        meetingsCount: nextMeetings.length,
+      });
+      setMeetingsFeedback({
+        type: 'success',
+        text:
+          language === 'en'
+            ? `Meeting ${targetMeeting.order} deleted. Remaining meeting numbers preserved.`
+            : `Pertemuan ${targetMeeting.order} dihapus. Nomor urut pertemuan tersisa tetap dipertahankan.`,
+      });
+    } catch (err) {
+      setMeetingsList(previousMeetings);
+      setMeetingsFeedback({
+        type: 'error',
+        text: err.message || 'Gagal menghapus pertemuan.',
+      });
+    } finally {
+      setSavingMeetings(false);
+      setDeleteMeetingTarget(null);
+    }
+  };
+
   const handleToggleMeetingLock = async (targetMeeting) => {
     if (!isEducatorOrAdmin || savingMeetings) return;
     const nextStatus = targetMeeting.status === 'locked' ? 'in_progress' : 'locked';
@@ -1041,7 +1768,11 @@ export default function ClassDetailView({
     setMeetingsFeedback(null);
     try {
       await updateClassMeetingsInFirestore(classData.id, nextMeetings);
-      onClassUpdated?.({ ...classData, meetings: nextMeetings });
+      onClassUpdated?.({
+        ...classData,
+        meetings: nextMeetings,
+        meetingsCount: nextMeetings.length,
+      });
       setMeetingsFeedback({
         type: 'success',
         text:
@@ -1078,7 +1809,11 @@ export default function ClassDetailView({
     setMeetingsFeedback(null);
     try {
       await updateClassMeetingsInFirestore(classData.id, nextMeetings);
-      onClassUpdated?.({ ...classData, meetings: nextMeetings });
+      onClassUpdated?.({
+        ...classData,
+        meetings: nextMeetings,
+        meetingsCount: nextMeetings.length,
+      });
       if (selectedMeeting?.id === targetMeeting.id) {
         setSelectedMeeting({ ...targetMeeting, title: cleanTitle, date: cleanDate });
       }
@@ -1105,7 +1840,7 @@ export default function ClassDetailView({
       const opened = await openAttendanceSession({
         classId: classData.id,
         classCode: classData.code || 'CLS',
-        meetingNo: attMeetingNo,
+        meetingNo: effectiveAttMeetingNo,
         durationMinutes: attDurationMins,
         customCode: attCustomCode,
       });
@@ -1234,6 +1969,76 @@ export default function ClassDetailView({
         },
       ];
 
+  const handleSelectMeetingSafe = (targetMeeting) => {
+    if (!targetMeeting || examActive) return;
+    setSelectedMeeting(targetMeeting);
+    setProgressFeedback(null);
+    setExamFinished(false);
+    setExamScore(null);
+    setExamError(null);
+    setExamNote('');
+    setSelectedAnswers({});
+    setTaskFeedback(null);
+    setCreateTaskNotice(null);
+    setAttFeedback(null);
+    setGradingNotice(null);
+    setEditingMeetingId(null);
+    setExamSaveFeedback(null);
+    setMaterialFeedback(null);
+    setVideoFeedback(null);
+    setPdfFeedback(null);
+  };
+
+  const renderEducatorMeetingToolbar = (labelId) => {
+    if (!isEducatorOrAdmin) return null;
+    if (meetingsList.length === 0) {
+      return (
+        <div className="p-3.5 rounded-lg bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-500/40 flex flex-wrap items-center justify-between gap-2 font-mono text-xs">
+          <span className="text-amber-800 dark:text-amber-300">
+            {language === 'en'
+              ? 'Create at least one meeting in Syllabus & Edit before configuring content for it.'
+              : 'Buat pertemuan pertama di tab SILABUS & KELOLA sebelum mengisi konten pertemuan.'}
+          </span>
+          <button
+            type="button"
+            onClick={() => setActiveTab('meetings')}
+            className="bg-[#f59e0b] hover:bg-[#d97706] text-black font-bold px-3 py-1.5 rounded text-[11px]"
+          >
+            {language === 'en' ? 'Go to Syllabus' : 'Ke Tab Silabus'}
+          </button>
+        </div>
+      );
+    }
+
+    return (
+      <div className="flex flex-wrap items-center justify-between gap-2 p-3 rounded-lg bg-slate-50 dark:bg-[#0a0f18] border border-slate-200 dark:border-[#1e2a3f] font-mono">
+        <label
+          htmlFor={labelId}
+          className="text-[11px] font-bold text-slate-700 dark:text-slate-300 uppercase"
+        >
+          {language === 'en' ? 'Active Meeting Target:' : 'Pertemuan Dikelola:'}
+        </label>
+        <select
+          id={labelId}
+          aria-label={language === 'en' ? 'Select target meeting' : 'Pilih pertemuan yang dikelola'}
+          disabled={examActive}
+          value={currentMeetingNo}
+          onChange={(e) => {
+            const target = meetingsList.find((m) => Number(m.order) === Number(e.target.value));
+            if (target) handleSelectMeetingSafe(target);
+          }}
+          className="px-2.5 py-1.5 text-xs rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-[#121822] text-slate-900 dark:text-slate-100 disabled:opacity-50"
+        >
+          {meetingsList.map((m) => (
+            <option key={m.id} value={m.order}>
+              P{m.order < 10 ? `0${m.order}` : m.order}: {m.title}
+            </option>
+          ))}
+        </select>
+      </div>
+    );
+  };
+
   return (
     <div className="space-y-5">
       <AccessibleDialog
@@ -1245,6 +2050,23 @@ export default function ClassDetailView({
         cancelLabel={t('dialog_cancel')}
         onConfirm={() => withdrawConfirmTaskId && executeCancelTask(withdrawConfirmTaskId)}
         onClose={() => setWithdrawConfirmTaskId(null)}
+      />
+
+      <AccessibleDialog
+        isOpen={Boolean(deleteMeetingTarget)}
+        variant="danger"
+        title={language === 'en' ? 'Delete Meeting' : 'Hapus Pertemuan'}
+        message={
+          deleteMeetingTarget
+            ? language === 'en'
+              ? `Delete Meeting ${deleteMeetingTarget.order} ("${deleteMeetingTarget.title}")? Remaining meeting numbers will NOT be renumbered.`
+              : `Hapus Pertemuan ${deleteMeetingTarget.order} ("${deleteMeetingTarget.title}")? Nomor urut pertemuan lain tidak akan diubah.`
+            : ''
+        }
+        confirmLabel={language === 'en' ? 'Delete' : 'Hapus'}
+        cancelLabel={t('dialog_cancel')}
+        onConfirm={() => deleteMeetingTarget && executeDeleteMeeting(deleteMeetingTarget)}
+        onClose={() => setDeleteMeetingTarget(null)}
       />
 
       {/* Top Header Card */}
@@ -1277,31 +2099,151 @@ export default function ClassDetailView({
 
         <div className="flex flex-col md:flex-row md:items-center justify-between gap-3">
           <div>
-            <div className="flex items-center gap-2">
+            <div className="flex flex-wrap items-center gap-2">
               <span className="text-[9px] font-mono font-bold text-sky-700 dark:text-[#00e5ff] bg-sky-50 dark:bg-[#00e5ff]/10 border border-sky-200 dark:border-[#00e5ff]/30 px-2 py-0.5 rounded-xs uppercase">
                 {classData.category}
               </span>
               <span className="text-[10px] font-mono font-bold text-amber-700 dark:text-[#f59e0b] bg-amber-50 dark:bg-[#141d2c] border border-amber-200 dark:border-[#f59e0b]/30 px-2 py-0.5 rounded-xs">
                 {language === 'en' ? 'CODE' : 'KODE'}: {classData.code}
               </span>
+              {(classData.day || classData.time) && (
+                <span className="text-[10px] font-mono text-slate-600 dark:text-slate-300 bg-slate-100 dark:bg-[#18212e] border border-slate-200 dark:border-[#232f42] px-2 py-0.5 rounded-xs">
+                  {[classData.day, classData.time].filter(Boolean).join(', ')}
+                </span>
+              )}
             </div>
             <h2 className="text-lg sm:text-xl font-black text-slate-900 dark:text-slate-100 mt-2 font-mono">
               {classData.name || classData.title}
             </h2>
             <p className="text-xs text-slate-600 dark:text-slate-400 mt-1 font-sans">
-              {classData.description}
+              {classData.description || (
+                <span className="italic opacity-75">
+                  {language === 'en' ? 'No syllabus description yet.' : 'Belum ada deskripsi silabus.'}
+                </span>
+              )}
             </p>
           </div>
 
-          <div className="text-left md:text-right pt-2 md:pt-0 border-t md:border-t-0 border-slate-200 dark:border-[#1c2638]">
-            <span className="text-[10px] font-mono text-slate-500 dark:text-slate-400 block">
-              {language === 'en' ? '// LEAD INSTRUCTOR' : '// INSTRUKTUR PENANGGUNG JAWAB'}
-            </span>
-            <span className="text-xs font-mono font-bold text-amber-700 dark:text-[#f59e0b]">
-              {classData.instructor || classData.lecturer}
-            </span>
+          <div className="text-left md:text-right pt-2 md:pt-0 border-t md:border-t-0 border-slate-200 dark:border-[#1c2638] space-y-1.5">
+            <div>
+              <span className="text-[10px] font-mono text-slate-500 dark:text-slate-400 block">
+                {language === 'en' ? '// LEAD INSTRUCTOR' : '// INSTRUKTUR PENANGGUNG JAWAB'}
+              </span>
+              <span className="text-xs font-mono font-bold text-amber-700 dark:text-[#f59e0b]">
+                {classData.instructor || classData.lecturer}
+              </span>
+            </div>
+            {isEducatorOrAdmin && !isEditingClassInfo && (
+              <button
+                type="button"
+                onClick={handleStartEditClassInfo}
+                className="inline-flex items-center gap-1 text-[10px] font-mono font-bold px-2.5 py-1 rounded border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-[#18212e] hover:bg-slate-100 dark:hover:bg-[#232f42] text-slate-700 dark:text-slate-200 transition"
+              >
+                <Edit3 className="w-3 h-3" />
+                {language === 'en' ? 'Edit Class Info' : 'Ubah Info Kelas'}
+              </button>
+            )}
           </div>
         </div>
+
+        {classInfoFeedback && (
+          <div
+            className={`mt-3 p-2.5 rounded-lg text-xs font-mono flex items-center gap-2 border ${
+              classInfoFeedback.type === 'success'
+                ? 'bg-emerald-50 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-300 border-emerald-200 dark:border-emerald-500/40'
+                : 'bg-rose-50 dark:bg-rose-950/40 text-rose-700 dark:text-rose-300 border-rose-200 dark:border-rose-500/40'
+            }`}
+          >
+            {classInfoFeedback.type === 'success' ? (
+              <CheckCircle2 className="w-4 h-4 shrink-0" />
+            ) : (
+              <AlertTriangle className="w-4 h-4 shrink-0" />
+            )}
+            <span>{classInfoFeedback.text}</span>
+          </div>
+        )}
+
+        {isEducatorOrAdmin && isEditingClassInfo && (
+          <form
+            onSubmit={handleSaveClassInfo}
+            className="mt-4 p-4 rounded-xl bg-slate-50 dark:bg-[#0a0f18] border border-slate-200 dark:border-[#1e2a3f] space-y-3 font-mono"
+          >
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
+              <div className="sm:col-span-1">
+                <label className="block text-[10px] font-bold text-slate-600 dark:text-slate-400 mb-1 uppercase">
+                  {language === 'en' ? 'Class Name' : 'Nama Kelas'}
+                </label>
+                <input
+                  type="text"
+                  required
+                  value={editClassName}
+                  onChange={(e) => setEditClassName(e.target.value)}
+                  className="w-full px-2.5 py-1.5 text-xs rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-[#121822] text-slate-900 dark:text-slate-100"
+                />
+              </div>
+              <div>
+                <label className="block text-[10px] font-bold text-slate-600 dark:text-slate-400 mb-1 uppercase">
+                  {language === 'en' ? 'Day' : 'Hari'}
+                </label>
+                <select
+                  value={editClassDay}
+                  onChange={(e) => setEditClassDay(e.target.value)}
+                  className="w-full px-2.5 py-1.5 text-xs rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-[#121822] text-slate-900 dark:text-slate-100"
+                >
+                  <option value="">{language === 'en' ? '-- Not set --' : '-- Belum diatur --'}</option>
+                  <option value="Senin">Senin</option>
+                  <option value="Selasa">Selasa</option>
+                  <option value="Rabu">Rabu</option>
+                  <option value="Kamis">Kamis</option>
+                  <option value="Jumat">Jumat</option>
+                  <option value="Sabtu">Sabtu</option>
+                </select>
+              </div>
+              <div>
+                <label className="block text-[10px] font-bold text-slate-600 dark:text-slate-400 mb-1 uppercase">
+                  {language === 'en' ? 'Time' : 'Jam'}
+                </label>
+                <input
+                  type="text"
+                  placeholder="08.00–10.30"
+                  value={editClassTime}
+                  onChange={(e) => setEditClassTime(e.target.value)}
+                  className="w-full px-2.5 py-1.5 text-xs rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-[#121822] text-slate-900 dark:text-slate-100"
+                />
+              </div>
+            </div>
+            <div>
+              <label className="block text-[10px] font-bold text-slate-600 dark:text-slate-400 mb-1 uppercase">
+                {language === 'en' ? 'Description' : 'Deskripsi Silabus'}
+              </label>
+              <textarea
+                rows="2"
+                value={editClassDesc}
+                onChange={(e) => setEditClassDesc(e.target.value)}
+                className="w-full px-2.5 py-1.5 text-xs rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-[#121822] text-slate-900 dark:text-slate-100"
+              />
+            </div>
+            <div className="flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setIsEditingClassInfo(false)}
+                className="px-3 py-1 text-[11px] font-bold rounded bg-slate-200 dark:bg-slate-800 text-slate-700 dark:text-slate-300"
+              >
+                {t('dialog_cancel')}
+              </button>
+              <button
+                type="submit"
+                disabled={savingClassInfo}
+                className="px-3 py-1 text-[11px] font-bold rounded bg-emerald-600 hover:bg-emerald-500 text-white flex items-center gap-1 disabled:opacity-50"
+              >
+                <Save className="w-3 h-3" />
+                {savingClassInfo
+                  ? language === 'en' ? 'Saving...' : 'Menyimpan...'
+                  : language === 'en' ? 'Save Info' : 'Simpan Info'}
+              </button>
+            </div>
+          </form>
+        )}
 
         {/* Tab Navigation (hidden in Syllabus Preview Mode for non-enrolled signed-in students) */}
         {!isPreviewMode && (
@@ -1334,7 +2276,15 @@ export default function ClassDetailView({
       </div>
 
       {/* PER-MEETING LEARNING CYCLE STEPPER (Active Student View) */}
-      {!isPreviewMode && !isEducatorOrAdmin && (
+      {!isPreviewMode && !isEducatorOrAdmin && meetingsList.length === 0 && (
+        <div className="bg-white dark:bg-[#121822] p-4 rounded-xl border border-dashed border-slate-300 dark:border-[#232f42] text-center text-xs font-mono text-slate-500 dark:text-slate-400">
+          {language === 'en'
+            ? 'No meetings have been added to this class yet. Please check back once your lecturer publishes the syllabus.'
+            : 'Belum ada pertemuan di kelas ini. Siklus belajar akan muncul setelah dosen menambahkan pertemuan pertama.'}
+        </div>
+      )}
+
+      {!isPreviewMode && !isEducatorOrAdmin && meetingsList.length > 0 && (
         <div className="bg-white dark:bg-[#121822] p-4 rounded-xl border border-slate-200 dark:border-[#232f42] space-y-3 shadow-xs">
           <div className="flex flex-wrap items-center justify-between gap-2">
             <div className="min-w-0">
@@ -1348,12 +2298,13 @@ export default function ClassDetailView({
             <div className="flex items-center gap-2 font-mono">
               <select
                 aria-label={language === 'en' ? 'Select active meeting' : 'Pilih pertemuan aktif'}
+                disabled={examActive}
                 value={currentMeetingNo}
                 onChange={(e) => {
                   const target = meetingsList.find((m) => Number(m.order) === Number(e.target.value));
-                  if (target) setSelectedMeeting(target);
+                  if (target) handleSelectMeetingSafe(target);
                 }}
-                className="px-2.5 py-1 text-[11px] rounded border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-[#0a0f18] text-slate-800 dark:text-slate-200"
+                className="px-2.5 py-1 text-[11px] rounded border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-[#0a0f18] text-slate-800 dark:text-slate-200 disabled:opacity-50"
               >
                 {meetingsList.map((m) => (
                   <option key={m.id} value={m.order} disabled={!isEducatorOrAdmin && m.status === 'locked'}>
@@ -1496,8 +2447,8 @@ export default function ClassDetailView({
                 <BookOpen className="w-4 h-4" />
                 <span>
                   {language === 'en'
-                    ? '// READ-ONLY SYLLABUS OUTLINE (16 SESSIONS)'
-                    : '// RANGKAIAN SILABUS PERTEMUAN (1–16)'}
+                    ? '// READ-ONLY SYLLABUS OUTLINE'
+                    : '// RANGKAIAN SILABUS PERTEMUAN'}
                 </span>
               </h3>
               <span className="text-[10px] font-mono text-slate-500 dark:text-slate-400">
@@ -1505,29 +2456,37 @@ export default function ClassDetailView({
               </span>
             </div>
 
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-2.5">
-              {meetingsList.map((meet) => (
-                <div
-                  key={meet.id}
-                  className="p-3 rounded-lg border border-slate-200 dark:border-[#1b2538] bg-slate-50 dark:bg-[#0b101a] flex items-center justify-between gap-3"
-                >
-                  <div className="flex items-center gap-3 min-w-0">
-                    <span className="w-7 h-7 rounded-xs bg-slate-200 dark:bg-[#1e293d] text-slate-700 dark:text-slate-300 font-mono font-bold text-xs flex items-center justify-center shrink-0">
-                      {meet.order < 10 ? `0${meet.order}` : meet.order}
-                    </span>
-                    <div className="min-w-0">
-                      <p className="text-xs font-mono font-bold text-slate-800 dark:text-slate-200 truncate">
-                        {meet.title}
-                      </p>
-                      <p className="text-[10px] font-mono text-slate-500 dark:text-slate-400">
-                        {meet.date}
-                      </p>
+            {meetingsList.length === 0 ? (
+              <div className="py-8 text-center bg-slate-50 dark:bg-[#0b101a] rounded-lg border border-dashed border-slate-200 dark:border-[#1b2538] text-xs font-mono text-slate-500 dark:text-slate-400">
+                {language === 'en'
+                  ? 'No syllabus meetings have been published by the lecturer yet.'
+                  : 'Dosen belum menambahkan pertemuan pada silabus kelas ini.'}
+              </div>
+            ) : (
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-2.5">
+                {meetingsList.map((meet) => (
+                  <div
+                    key={meet.id}
+                    className="p-3 rounded-lg border border-slate-200 dark:border-[#1b2538] bg-slate-50 dark:bg-[#0b101a] flex items-center justify-between gap-3"
+                  >
+                    <div className="flex items-center gap-3 min-w-0">
+                      <span className="w-7 h-7 rounded-xs bg-slate-200 dark:bg-[#1e293d] text-slate-700 dark:text-slate-300 font-mono font-bold text-xs flex items-center justify-center shrink-0">
+                        {meet.order < 10 ? `0${meet.order}` : meet.order}
+                      </span>
+                      <div className="min-w-0">
+                        <p className="text-xs font-mono font-bold text-slate-800 dark:text-slate-200 truncate">
+                          {meet.title}
+                        </p>
+                        <p className="text-[10px] font-mono text-slate-500 dark:text-slate-400">
+                          {meet.date}
+                        </p>
+                      </div>
                     </div>
+                    <Lock className="w-3.5 h-3.5 text-slate-400 shrink-0" />
                   </div>
-                  <Lock className="w-3.5 h-3.5 text-slate-400 shrink-0" />
-                </div>
-              ))}
-            </div>
+                ))}
+              </div>
+            )}
           </div>
         </div>
       )}
@@ -1541,8 +2500,8 @@ export default function ClassDetailView({
               <span>
                 {isEducatorOrAdmin
                   ? language === 'en'
-                    ? '// MANAGE CLASS SESSIONS (1–16)'
-                    : '// KELOLA PERTEMUAN & SILABUS (1–16)'
+                    ? '// MANAGE CLASS SESSIONS'
+                    : '// KELOLA PERTEMUAN & SILABUS'
                   : language === 'en'
                     ? '// CLASS SESSIONS & SYLLABUS'
                     : '// DAFTAR PERTEMUAN KELAS'}
@@ -1552,6 +2511,83 @@ export default function ClassDetailView({
               {meetingsList.length} {language === 'en' ? 'SESSIONS' : 'PERTEMUAN'}
             </span>
           </div>
+
+          {isEducatorOrAdmin && (
+            <form
+              onSubmit={handleAddMeeting}
+              className="p-4 rounded-xl bg-slate-50 dark:bg-[#0a0f18] border border-slate-200 dark:border-[#1e2a3f] space-y-3 font-mono"
+            >
+              <div className="flex items-center justify-between gap-2">
+                <h4 className="text-xs font-bold text-amber-700 dark:text-[#f59e0b] uppercase flex items-center gap-1.5">
+                  <Plus className="w-4 h-4" />
+                  {language === 'en' ? 'Add New Meeting' : 'Tambah Pertemuan Baru'}
+                </h4>
+                <span className="text-[10px] text-slate-500 dark:text-slate-400">
+                  {language === 'en' ? 'Next Meeting No:' : 'Nomor Berikutnya:'} P
+                  {(() => {
+                    const nextOrd =
+                      meetingsList.reduce((max, m) => Math.max(max, Number(m.order || 0)), 0) + 1;
+                    return nextOrd < 10 ? `0${nextOrd}` : nextOrd;
+                  })()}
+                </span>
+              </div>
+              <div className="grid grid-cols-1 sm:grid-cols-4 gap-2.5 items-end">
+                <div className="sm:col-span-2">
+                  <label className="block text-[10px] font-bold text-slate-600 dark:text-slate-400 mb-1 uppercase">
+                    {language === 'en' ? 'Meeting Title' : 'Judul Pertemuan'}
+                  </label>
+                  <input
+                    type="text"
+                    required
+                    value={newMeetingTitle}
+                    onChange={(e) => setNewMeetingTitle(e.target.value)}
+                    placeholder={
+                      language === 'en'
+                        ? 'e.g. Introduction & Course Contract'
+                        : 'Contoh: Kontrak Kuliah & Pengenalan Konsep'
+                    }
+                    className="w-full px-2.5 py-2 text-xs rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-[#121822] text-slate-900 dark:text-slate-100"
+                  />
+                </div>
+                <div>
+                  <label className="block text-[10px] font-bold text-slate-600 dark:text-slate-400 mb-1 uppercase">
+                    {language === 'en' ? 'Schedule / Date (Optional)' : 'Jadwal / Tanggal (Opsional)'}
+                  </label>
+                  <input
+                    type="text"
+                    value={newMeetingDate}
+                    onChange={(e) => setNewMeetingDate(e.target.value)}
+                    placeholder={
+                      [classData?.day, classData?.time].filter(Boolean).join(', ') ||
+                      'Senin, 08.00–10.30'
+                    }
+                    className="w-full px-2.5 py-2 text-xs rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-[#121822] text-slate-900 dark:text-slate-100"
+                  />
+                </div>
+                <div className="flex gap-2">
+                  <select
+                    aria-label={language === 'en' ? 'Initial meeting status' : 'Status awal pertemuan'}
+                    value={newMeetingStatus}
+                    onChange={(e) => setNewMeetingStatus(e.target.value)}
+                    className="px-2 py-2 text-xs rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-[#121822] text-slate-900 dark:text-slate-100"
+                  >
+                    <option value="open">{language === 'en' ? 'Open' : 'Terbuka'}</option>
+                    <option value="locked">{language === 'en' ? 'Locked' : 'Terkunci'}</option>
+                  </select>
+                  <button
+                    type="submit"
+                    disabled={savingMeetings || !newMeetingTitle.trim()}
+                    className="flex-1 bg-[#f59e0b] hover:bg-[#d97706] text-black text-xs font-bold px-3 py-2 rounded-lg transition flex items-center justify-center gap-1 disabled:opacity-50 whitespace-nowrap"
+                  >
+                    <Plus className="w-3.5 h-3.5" />
+                    {savingMeetings
+                      ? language === 'en' ? 'Adding...' : 'Menyimpan...'
+                      : language === 'en' ? 'Add' : 'Tambah'}
+                  </button>
+                </div>
+              </div>
+            </form>
+          )}
 
           {meetingsFeedback && (
             <div
@@ -1570,8 +2606,25 @@ export default function ClassDetailView({
             </div>
           )}
 
-          <div className="space-y-2.5">
-            {meetingsList.map((meet) => {
+          {meetingsList.length === 0 ? (
+            <div className="py-10 text-center bg-slate-50 dark:bg-[#0b101a] rounded-xl border border-dashed border-slate-300 dark:border-[#232f42] space-y-1.5 font-mono">
+              <BookOpen className="w-7 h-7 text-amber-500 mx-auto" />
+              <p className="text-xs font-bold text-slate-800 dark:text-slate-200">
+                {language === 'en' ? 'No Meetings Created Yet' : 'Belum Ada Pertemuan di Kelas Ini'}
+              </p>
+              <p className="text-[11px] text-slate-500 dark:text-slate-400 max-w-md mx-auto">
+                {isEducatorOrAdmin
+                  ? language === 'en'
+                    ? 'Use the "Add New Meeting" form above to create the first session for this class.'
+                    : 'Gunakan formulir "Tambah Pertemuan Baru" di atas untuk menambahkan pertemuan pertama kelas ini.'
+                  : language === 'en'
+                    ? 'Your lecturer has not published any meeting sessions for this class yet.'
+                    : 'Dosen pengampu belum menambahkan pertemuan pada kelas ini.'}
+              </p>
+            </div>
+          ) : (
+            <div className="space-y-2.5">
+              {meetingsList.map((meet) => {
               const isCurrent = meet.status === 'in_progress';
               const isLockedForStudent = !isEducatorOrAdmin && meet.status === 'locked';
               const isEditingThis = editingMeetingId === meet.id;
@@ -1732,6 +2785,16 @@ export default function ClassDetailView({
                           <Edit3 className="w-3 h-3" />
                           {language === 'en' ? 'Edit' : 'Ubah'}
                         </button>
+                        <button
+                          type="button"
+                          onClick={() => setDeleteMeetingTarget(meet)}
+                          disabled={savingMeetings}
+                          aria-label={language === 'en' ? `Delete meeting ${meet.order}` : `Hapus pertemuan ${meet.order}`}
+                          className="bg-rose-50 dark:bg-rose-950/40 hover:bg-rose-100 dark:hover:bg-rose-900/60 text-rose-700 dark:text-rose-300 border border-rose-200 dark:border-rose-500/40 text-[10px] font-bold px-2.5 py-1.5 rounded-xs transition flex items-center gap-1 disabled:opacity-50"
+                        >
+                          <Trash2 className="w-3 h-3" />
+                          {language === 'en' ? 'Delete' : 'Hapus'}
+                        </button>
                       </>
                     )}
 
@@ -1742,11 +2805,12 @@ export default function ClassDetailView({
                     ) : (
                       <button
                         type="button"
+                        disabled={examActive}
                         onClick={() => {
-                          setSelectedMeeting(meet);
+                          handleSelectMeetingSafe(meet);
                           setActiveTab('material');
                         }}
-                        className="bg-white dark:bg-[#1c2432] hover:bg-slate-100 dark:hover:bg-[#253245] text-slate-800 dark:text-slate-200 border border-slate-300 dark:border-slate-700 text-[10px] font-bold px-3 py-1.5 rounded-xs transition uppercase"
+                        className="bg-white dark:bg-[#1c2432] hover:bg-slate-100 dark:hover:bg-[#253245] text-slate-800 dark:text-slate-200 border border-slate-300 dark:border-slate-700 text-[10px] font-bold px-3 py-1.5 rounded-xs transition uppercase disabled:opacity-50"
                       >
                         {language === 'en' ? 'Open Module' : 'Buka Modul'}
                       </button>
@@ -1755,7 +2819,8 @@ export default function ClassDetailView({
                 </div>
               );
             })}
-          </div>
+            </div>
+          )}
         </div>
       )}
 
@@ -1768,25 +2833,130 @@ export default function ClassDetailView({
                 // QUILL DELTA JSON PROTOCOL (PURE REACT RENDERER)
               </span>
               <h3 className="text-base font-mono font-bold text-slate-900 dark:text-slate-100 mt-0.5">
-                {selectedMeeting ? selectedMeeting.title : 'Pertemuan 01: Dasar Perangkat Lunak'}
+                {selectedMeeting
+                  ? `P${selectedMeeting.order < 10 ? `0${selectedMeeting.order}` : selectedMeeting.order}: ${selectedMeeting.title}`
+                  : language === 'en'
+                    ? 'No Meeting Selected'
+                    : 'Belum Ada Pertemuan'}
               </h3>
             </div>
-            <button
-              type="button"
-              onClick={() => onNavigateAI?.()}
-              className="bg-amber-50 dark:bg-[#172133] hover:bg-amber-100 dark:hover:bg-[#202f48] text-amber-800 dark:text-[#f59e0b] border border-amber-300 dark:border-[#f59e0b]/40 text-xs font-mono font-bold px-3 py-1.5 rounded-xs transition flex items-center gap-1.5"
-            >
-              <Sparkles className="w-3.5 h-3.5 text-amber-600 dark:text-[#f59e0b]" />
-              {language === 'en' ? 'AI CONSULT' : 'KONSULTASI AI'}
-            </button>
+            <div className="flex items-center gap-2">
+              {isEducatorOrAdmin && selectedMeeting && (
+                <button
+                  type="button"
+                  onClick={() => setMaterialEditOpen((prev) => !prev)}
+                  className="bg-slate-100 dark:bg-[#1c2432] hover:bg-slate-200 dark:hover:bg-[#253245] text-slate-800 dark:text-slate-200 border border-slate-300 dark:border-slate-700 text-xs font-mono font-bold px-3 py-1.5 rounded-xs transition flex items-center gap-1.5"
+                >
+                  <Edit3 className="w-3.5 h-3.5" />
+                  {materialEditOpen
+                    ? language === 'en'
+                      ? 'Close Editor'
+                      : 'Tutup Editor'
+                    : language === 'en'
+                      ? 'Edit Reading Material'
+                      : 'Kelola Materi'}
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={() => onNavigateAI?.()}
+                className="bg-amber-50 dark:bg-[#172133] hover:bg-amber-100 dark:hover:bg-[#202f48] text-amber-800 dark:text-[#f59e0b] border border-amber-300 dark:border-[#f59e0b]/40 text-xs font-mono font-bold px-3 py-1.5 rounded-xs transition flex items-center gap-1.5"
+              >
+                <Sparkles className="w-3.5 h-3.5 text-amber-600 dark:text-[#f59e0b]" />
+                {language === 'en' ? 'AI CONSULT' : 'KONSULTASI AI'}
+              </button>
+            </div>
           </div>
 
+          {renderEducatorMeetingToolbar('educator-material-meeting')}
+
+          {isEducatorOrAdmin && selectedMeeting && (materialEditOpen || !selectedMeeting.deltaContent) && (
+            <form
+              onSubmit={handleSaveMeetingDelta}
+              className="p-4 rounded-xl bg-slate-50 dark:bg-[#0a0f18] border border-slate-200 dark:border-[#1e2a3f] space-y-3 font-mono"
+            >
+              <div className="flex items-center justify-between gap-2">
+                <h4 className="text-xs font-bold text-amber-700 dark:text-[#f59e0b] uppercase">
+                  {language === 'en'
+                    ? `Manage Meeting ${selectedMeeting.order} Material`
+                    : `Kelola Materi Pertemuan ${selectedMeeting.order}`}
+                </h4>
+                <span className="text-[10px] text-slate-500 dark:text-slate-400">
+                  {language === 'en'
+                    ? 'Use "# " for headings and "- " for bullet lists.'
+                    : 'Gunakan "# " untuk subbab dan "- " untuk daftar poin.'}
+                </span>
+              </div>
+              <textarea
+                rows={5}
+                aria-label={language === 'en' ? 'Meeting reading material text' : 'Teks materi pertemuan'}
+                value={materialTextInput}
+                onChange={(e) => setMaterialTextInput(e.target.value)}
+                placeholder={
+                  language === 'en'
+                    ? '# Topic Heading\nWrite structured reading material here...\n- Key takeaway 1'
+                    : '# Judul Materi Pertemuan\nTuliskan pembahasan materi terstruktur di sini...\n- Poin penting 1'
+                }
+                className="w-full px-3 py-2 text-xs rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-[#121822] text-slate-900 dark:text-slate-100"
+              />
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  type="submit"
+                  disabled={savingMaterial}
+                  className="bg-[#f59e0b] hover:bg-[#d97706] text-black text-xs font-bold px-3.5 py-1.5 rounded flex items-center gap-1.5 disabled:opacity-50"
+                >
+                  <Save className="w-3.5 h-3.5" />
+                  {savingMaterial
+                    ? language === 'en'
+                      ? 'Saving...'
+                      : 'Menyimpan...'
+                    : language === 'en'
+                      ? 'Save Material'
+                      : 'Simpan Materi'}
+                </button>
+                {selectedMeeting.deltaContent && (
+                  <button
+                    type="button"
+                    disabled={savingMaterial}
+                    onClick={() => void handleClearMeetingDelta()}
+                    className="bg-rose-50 dark:bg-rose-950/40 hover:bg-rose-100 text-rose-700 dark:text-rose-300 border border-rose-200 dark:border-rose-500/40 text-xs font-bold px-3 py-1.5 rounded flex items-center gap-1.5 disabled:opacity-50"
+                  >
+                    <Trash2 className="w-3.5 h-3.5" />
+                    {language === 'en' ? 'Delete Material' : 'Hapus Materi'}
+                  </button>
+                )}
+              </div>
+            </form>
+          )}
+
+          {materialFeedback && (
+            <div
+              className={`p-3 rounded-lg text-xs font-mono flex items-center gap-2 border ${
+                materialFeedback.type === 'success'
+                  ? 'bg-emerald-50 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-300 border-emerald-200 dark:border-emerald-500/40'
+                  : 'bg-rose-50 dark:bg-rose-950/40 text-rose-700 dark:text-rose-300 border-rose-200 dark:border-rose-500/40'
+              }`}
+            >
+              {materialFeedback.type === 'success' ? (
+                <CheckCircle2 className="w-4 h-4 shrink-0" />
+              ) : (
+                <AlertTriangle className="w-4 h-4 shrink-0" />
+              )}
+              <span>{materialFeedback.text}</span>
+            </div>
+          )}
+
           <DeltaContentRenderer
-            delta={selectedMeeting?.deltaContent || classData?.deltaContent}
-            fallbackText={classData?.description || ''}
+            delta={selectedMeeting ? selectedMeeting.deltaContent || null : classData?.deltaContent || null}
+            fallbackText={selectedMeeting ? '' : classData?.description || ''}
+            emptyMessage={
+              language === 'en'
+                ? 'No reading material has been added for this meeting yet.'
+                : 'Belum ada materi bacaan untuk pertemuan ini.'
+            }
           />
 
-          {!isEducatorOrAdmin && (
+          {!isEducatorOrAdmin && selectedMeeting && (
             <div className="pt-4 border-t border-slate-200 dark:border-[#1b263b] flex flex-wrap items-center justify-between gap-3 font-mono">
               <div className="text-[11px] text-slate-600 dark:text-slate-400">
                 {activeCycle.materialDone
@@ -1839,18 +3009,92 @@ export default function ClassDetailView({
         <div className="bg-white dark:bg-[#121822] p-5 rounded-xl border border-slate-200 dark:border-[#232f42] space-y-4">
           <div className="flex items-center justify-between border-b border-slate-200 dark:border-[#1b263b] pb-3">
             <h3 className="text-xs font-mono font-bold text-amber-700 dark:text-[#f59e0b] uppercase tracking-wider">
-              // VIDEO STREAM PLAYER — PERTEMUAN {currentMeetingNo < 10 ? `0${currentMeetingNo}` : currentMeetingNo}
+              // VIDEO STREAM PLAYER —{' '}
+              {selectedMeeting
+                ? `PERTEMUAN ${currentMeetingNo < 10 ? `0${currentMeetingNo}` : currentMeetingNo}`
+                : language === 'en'
+                  ? 'NO MEETING SELECTED'
+                  : 'BELUM ADA PERTEMUAN'}
             </h3>
-            <span className="text-[10px] font-mono text-sky-700 dark:text-[#00e5ff]">
-              {videoSource?.kind === 'iframe' ? 'EMBEDDED STREAM' : 'HTML5 MEDIA PLAYER'}
-            </span>
+            {videoSource && (
+              <span className="text-[10px] font-mono text-sky-700 dark:text-[#00e5ff]">
+                {videoSource.kind === 'iframe' ? 'EMBEDDED STREAM' : 'HTML5 MEDIA PLAYER'}
+              </span>
+            )}
           </div>
+
+          {renderEducatorMeetingToolbar('educator-video-meeting')}
+
+          {isEducatorOrAdmin && selectedMeeting && (
+            <form
+              onSubmit={handleSaveMeetingVideo}
+              className="p-4 rounded-xl bg-slate-50 dark:bg-[#0a0f18] border border-slate-200 dark:border-[#1e2a3f] space-y-3 font-mono"
+            >
+              <h4 className="text-xs font-bold text-amber-700 dark:text-[#f59e0b] uppercase">
+                {language === 'en'
+                  ? `Set Video URL for Meeting ${selectedMeeting.order}`
+                  : `Kelola Video Pembelajaran Pertemuan ${selectedMeeting.order}`}
+              </h4>
+              <div className="flex flex-col sm:flex-row gap-2">
+                <input
+                  type="text"
+                  aria-label={language === 'en' ? 'Meeting video URL' : 'URL video pembelajaran pertemuan'}
+                  value={videoUrlInput}
+                  onChange={(e) => setVideoUrlInput(e.target.value)}
+                  placeholder="https://www.youtube.com/watch?v=... atau https://.../video.mp4"
+                  className="flex-1 px-3 py-2 text-xs rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-[#121822] text-slate-900 dark:text-slate-100"
+                />
+                <button
+                  type="submit"
+                  disabled={savingVideo}
+                  className="bg-[#f59e0b] hover:bg-[#d97706] text-black text-xs font-bold px-3.5 py-2 rounded flex items-center justify-center gap-1.5 disabled:opacity-50"
+                >
+                  <Save className="w-3.5 h-3.5" />
+                  {savingVideo
+                    ? language === 'en'
+                      ? 'Saving...'
+                      : 'Menyimpan...'
+                    : language === 'en'
+                      ? 'Save Video'
+                      : 'Simpan Video'}
+                </button>
+                {videoSource && (
+                  <button
+                    type="button"
+                    disabled={savingVideo}
+                    onClick={() => void handleClearMeetingVideo()}
+                    className="bg-rose-50 dark:bg-rose-950/40 hover:bg-rose-100 text-rose-700 dark:text-rose-300 border border-rose-200 dark:border-rose-500/40 text-xs font-bold px-3 py-2 rounded flex items-center justify-center gap-1.5 disabled:opacity-50"
+                  >
+                    <Trash2 className="w-3.5 h-3.5" />
+                    {language === 'en' ? 'Delete Video' : 'Hapus Video'}
+                  </button>
+                )}
+              </div>
+            </form>
+          )}
+
+          {videoFeedback && (
+            <div
+              className={`p-3 rounded-lg text-xs font-mono flex items-center gap-2 border ${
+                videoFeedback.type === 'success'
+                  ? 'bg-emerald-50 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-300 border-emerald-200 dark:border-emerald-500/40'
+                  : 'bg-rose-50 dark:bg-rose-950/40 text-rose-700 dark:text-rose-300 border-rose-200 dark:border-rose-500/40'
+              }`}
+            >
+              {videoFeedback.type === 'success' ? (
+                <CheckCircle2 className="w-4 h-4 shrink-0" />
+              ) : (
+                <AlertTriangle className="w-4 h-4 shrink-0" />
+              )}
+              <span>{videoFeedback.text}</span>
+            </div>
+          )}
 
           {videoSource ? (
             videoSource.kind === 'iframe' ? (
               <div className="aspect-video rounded-lg overflow-hidden border border-slate-200 dark:border-[#1e2a3f] bg-black">
                 <iframe
-                  title={classData?.name || 'Video Pembelajaran'}
+                  title={selectedMeeting?.title || classData?.name || 'Video Pembelajaran'}
                   src={videoSource.src}
                   className="w-full h-full"
                   allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
@@ -1872,45 +3116,27 @@ export default function ClassDetailView({
                 />
               </div>
             )
-          ) : videoActivated ? (
-            <div className="aspect-video rounded-lg overflow-hidden border border-slate-200 dark:border-[#1e2a3f] bg-black">
-              <video
-                controls
-                autoPlay
-                poster={classData?.coverImage}
-                src="https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerBlazes.mp4"
-                onEnded={() => {
-                  if (!isEducatorOrAdmin && !activeCycle.videoDone) {
-                    void handleMarkProgress('videoCompleted');
-                  }
-                }}
-                className="w-full h-full object-contain"
-              />
-            </div>
           ) : (
-            <div className="aspect-video bg-slate-900 border border-slate-200 dark:border-[#1e2a3f] rounded-lg overflow-hidden relative flex items-center justify-center text-white">
-              <div className="text-center p-6">
-                <button
-                  type="button"
-                  onClick={() => setVideoActivated(true)}
-                  aria-label={language === 'en' ? 'Play instructional video' : 'Putar video pembelajaran'}
-                  className="mx-auto mb-3 inline-flex items-center justify-center rounded-full hover:scale-110 transition"
-                >
-                  <PlayCircle className="w-14 h-14 text-[#f59e0b] drop-shadow-md" />
-                </button>
-                <p className="text-xs sm:text-sm font-mono font-bold text-slate-100">
-                  {selectedMeeting?.title || classData?.name || 'Video Pembelajaran Modul'}
-                </p>
-                <p className="text-[10px] font-mono text-slate-400 mt-1">
-                  {language === 'en'
-                    ? 'Click play to load adaptive HTML5 stream'
-                    : 'Klik tombol putar untuk memuat pemutar video HTML5'}
-                </p>
-              </div>
+            <div className="py-10 px-6 text-center bg-slate-50 dark:bg-[#0b101a] rounded-xl border border-dashed border-slate-300 dark:border-[#232f42] space-y-1.5 font-mono">
+              <PlayCircle className="w-8 h-8 text-amber-500 mx-auto" />
+              <p className="text-xs font-bold text-slate-800 dark:text-slate-200">
+                {language === 'en'
+                  ? 'No Instructional Video Available'
+                  : 'Belum Ada Video Pembelajaran untuk Pertemuan Ini'}
+              </p>
+              <p className="text-[11px] text-slate-500 dark:text-slate-400">
+                {isEducatorOrAdmin
+                  ? language === 'en'
+                    ? 'Paste a YouTube, Vimeo, or HTTPS MP4 video URL in the form above.'
+                    : 'Masukkan tautan video YouTube, Vimeo, atau file MP4 https:// melalui formulir di atas.'
+                  : language === 'en'
+                    ? 'The lecturer has not uploaded a video URL for this meeting yet.'
+                    : 'Dosen belum menambahkan tautan video pembelajaran untuk pertemuan ini.'}
+              </p>
             </div>
           )}
 
-          {!isEducatorOrAdmin && (
+          {!isEducatorOrAdmin && selectedMeeting && (
             <div className="pt-3 border-t border-slate-200 dark:border-[#1b263b] flex flex-wrap items-center justify-between gap-3 font-mono">
               <div className="text-[11px] text-slate-600 dark:text-slate-400">
                 {activeCycle.videoDone
@@ -1955,12 +3181,12 @@ export default function ClassDetailView({
               </h3>
               <p className="text-[10px] font-mono text-slate-500 dark:text-slate-400">
                 {language === 'en'
-                  ? 'Preview or download manual book for offline study.'
-                  : 'Pratinjau atau unduh dokumen untuk akses offline tanpa koneksi internet.'}
+                  ? 'Preview or open external PDF module configured for this meeting.'
+                  : 'Pratinjau atau buka dokumen PDF resmi yang ditambahkan dosen untuk pertemuan ini.'}
               </p>
             </div>
-            <div className="flex items-center gap-2">
-              {safePdfUrl && (
+            {safePdfUrl && (
+              <div className="flex items-center gap-2">
                 <a
                   href={safePdfUrl}
                   target="_blank"
@@ -1970,24 +3196,107 @@ export default function ClassDetailView({
                   <ExternalLink className="w-3.5 h-3.5" />
                   {language === 'en' ? 'OPEN PDF' : 'BUKA PDF'}
                 </a>
-              )}
-              <button
-                type="button"
-                onClick={handleDownloadPdf}
-                className="bg-[#f59e0b] hover:bg-[#d97706] text-black text-xs font-mono font-bold px-3 py-1.5 rounded-xs transition flex items-center gap-1.5"
-              >
-                <Download className="w-3.5 h-3.5" />
-                {language === 'en' ? 'DOWNLOAD OFFLINE' : 'UNDUH OFFLINE'}
-              </button>
-            </div>
+                <a
+                  href={safePdfUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  download
+                  className="bg-[#f59e0b] hover:bg-[#d97706] text-black text-xs font-mono font-bold px-3 py-1.5 rounded-xs transition flex items-center gap-1.5"
+                >
+                  <Download className="w-3.5 h-3.5" />
+                  {language === 'en' ? 'DOWNLOAD PDF' : 'UNDUH PDF'}
+                </a>
+              </div>
+            )}
           </div>
 
-          {downloadSuccess && (
-            <div className="p-3 bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-200 dark:border-emerald-500/40 text-emerald-700 dark:text-emerald-300 rounded-xs text-xs font-mono flex items-center gap-2">
-              <CheckCircle2 className="w-4 h-4 text-emerald-500 dark:text-emerald-400" />
-              {language === 'en'
-                ? 'Manual Book saved to your local downloads!'
-                : 'Dokumen Manual Book berhasil diunduh ke penyimpanan perangkat Anda!'}
+          {renderEducatorMeetingToolbar('educator-pdf-meeting')}
+
+          {isEducatorOrAdmin && selectedMeeting && (
+            <form
+              onSubmit={handleSaveMeetingPdf}
+              className="p-4 rounded-xl bg-slate-50 dark:bg-[#0a0f18] border border-slate-200 dark:border-[#1e2a3f] space-y-3 font-mono"
+            >
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <h4 className="text-xs font-bold text-amber-700 dark:text-[#f59e0b] uppercase">
+                  {language === 'en'
+                    ? `Manage PDF Module for Meeting ${selectedMeeting.order}`
+                    : `Kelola Dokumen PDF Pertemuan ${selectedMeeting.order}`}
+                </h4>
+                <label className="cursor-pointer bg-slate-200 dark:bg-[#1c2432] hover:bg-slate-300 dark:hover:bg-[#253245] text-slate-800 dark:text-slate-200 text-[11px] font-bold px-2.5 py-1 rounded inline-flex items-center gap-1.5">
+                  <Upload className="w-3.5 h-3.5" />
+                  {pdfUploading
+                    ? language === 'en'
+                      ? 'Uploading...'
+                      : 'Mengunggah...'
+                    : language === 'en'
+                      ? 'Upload PDF'
+                      : 'Unggah Berkas PDF'}
+                  <input
+                    type="file"
+                    accept="application/pdf,.pdf"
+                    disabled={pdfUploading || savingPdf}
+                    onChange={(e) => {
+                      const file = e.target.files?.[0];
+                      if (file) void handleUploadMeetingPdfFile(file);
+                      e.target.value = '';
+                    }}
+                    className="hidden"
+                  />
+                </label>
+              </div>
+              <div className="flex flex-col sm:flex-row gap-2">
+                <input
+                  type="text"
+                  aria-label={language === 'en' ? 'Meeting PDF URL' : 'URL PDF pertemuan'}
+                  value={pdfUrlInput}
+                  onChange={(e) => setPdfUrlInput(e.target.value)}
+                  placeholder="https://.../manual-book-pertemuan.pdf"
+                  className="flex-1 px-3 py-2 text-xs rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-[#121822] text-slate-900 dark:text-slate-100"
+                />
+                <button
+                  type="submit"
+                  disabled={savingPdf || pdfUploading}
+                  className="bg-[#f59e0b] hover:bg-[#d97706] text-black text-xs font-bold px-3.5 py-2 rounded flex items-center justify-center gap-1.5 disabled:opacity-50"
+                >
+                  <Save className="w-3.5 h-3.5" />
+                  {savingPdf
+                    ? language === 'en'
+                      ? 'Saving...'
+                      : 'Menyimpan...'
+                    : language === 'en'
+                      ? 'Save PDF'
+                      : 'Simpan PDF'}
+                </button>
+                {safePdfUrl && (
+                  <button
+                    type="button"
+                    disabled={savingPdf || pdfUploading}
+                    onClick={() => void handleClearMeetingPdf()}
+                    className="bg-rose-50 dark:bg-rose-950/40 hover:bg-rose-100 text-rose-700 dark:text-rose-300 border border-rose-200 dark:border-rose-500/40 text-xs font-bold px-3 py-2 rounded flex items-center justify-center gap-1.5 disabled:opacity-50"
+                  >
+                    <Trash2 className="w-3.5 h-3.5" />
+                    {language === 'en' ? 'Delete PDF' : 'Hapus PDF'}
+                  </button>
+                )}
+              </div>
+            </form>
+          )}
+
+          {pdfFeedback && (
+            <div
+              className={`p-3 rounded-lg text-xs font-mono flex items-center gap-2 border ${
+                pdfFeedback.type === 'success'
+                  ? 'bg-emerald-50 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-300 border-emerald-200 dark:border-emerald-500/40'
+                  : 'bg-rose-50 dark:bg-rose-950/40 text-rose-700 dark:text-rose-300 border-rose-200 dark:border-rose-500/40'
+              }`}
+            >
+              {pdfFeedback.type === 'success' ? (
+                <CheckCircle2 className="w-4 h-4 shrink-0" />
+              ) : (
+                <AlertTriangle className="w-4 h-4 shrink-0" />
+              )}
+              <span>{pdfFeedback.text}</span>
             </div>
           )}
 
@@ -1998,15 +3307,21 @@ export default function ClassDetailView({
               className="w-full h-96 rounded-lg border border-slate-200 dark:border-[#1e2a3f] bg-slate-50 dark:bg-[#070b12]"
             />
           ) : (
-            <div className="border border-slate-200 dark:border-[#1e2a3f] rounded-lg p-6 text-center bg-slate-50 dark:bg-[#070b12]">
-              <FileText className="w-10 h-10 text-sky-600 dark:text-[#00e5ff] mx-auto mb-2" />
-              <h4 className="text-xs font-mono font-bold text-slate-900 dark:text-slate-200">
-                Buku_Panduan_Praktikum_{classData?.code || 'Smartsa'}_2026.txt
-              </h4>
-              <p className="text-[10px] font-mono text-slate-500 dark:text-slate-400 mt-1">
+            <div className="border border-dashed border-slate-300 dark:border-[#1e2a3f] rounded-lg p-8 text-center bg-slate-50 dark:bg-[#070b12] font-mono space-y-1.5">
+              <FileText className="w-9 h-9 text-amber-500 mx-auto" />
+              <h4 className="text-xs font-bold text-slate-900 dark:text-slate-200">
                 {language === 'en'
-                  ? 'Click DOWNLOAD OFFLINE above to export the syllabus & study manual for offline reading.'
-                  : 'Klik UNDUH OFFLINE di atas untuk mengekspor ringkasan silabus & panduan praktikum.'}
+                  ? 'No PDF Document Available'
+                  : 'Belum Ada Dokumen PDF untuk Pertemuan Ini'}
+              </h4>
+              <p className="text-[11px] text-slate-500 dark:text-slate-400">
+                {isEducatorOrAdmin
+                  ? language === 'en'
+                    ? 'Upload a PDF file or save an https:// PDF URL using the form above.'
+                    : 'Unggah berkas PDF atau simpan tautan PDF https:// melalui formulir di atas.'
+                  : language === 'en'
+                    ? 'Your lecturer has not attached a PDF manual book for this meeting yet.'
+                    : 'Dosen pengampu belum menambahkan dokumen PDF untuk pertemuan ini.'}
               </p>
             </div>
           )}
@@ -2022,7 +3337,11 @@ export default function ClassDetailView({
                 <HelpCircle className="w-6 h-6" />
               </div>
               <span className="text-[10px] font-bold text-sky-700 dark:text-[#00e5ff] bg-sky-50 dark:bg-[#00e5ff]/10 border border-sky-200 dark:border-[#00e5ff]/30 px-2.5 py-0.5 rounded-xs inline-block">
-                PERTEMUAN {currentMeetingNo < 10 ? `0${currentMeetingNo}` : currentMeetingNo}
+                {selectedMeeting
+                  ? `PERTEMUAN ${currentMeetingNo < 10 ? `0${currentMeetingNo}` : currentMeetingNo}`
+                  : language === 'en'
+                    ? 'NO MEETING'
+                    : 'BELUM ADA PERTEMUAN'}
               </span>
               <h3 className="text-base font-bold text-slate-900 dark:text-slate-100">
                 // {language === 'en' ? 'COMPETENCY EVALUATION SESSION' : 'SESI EVALUASI KOMPETENSI'}
@@ -2090,6 +3409,14 @@ export default function ClassDetailView({
                 )}
               </div>
 
+              {!meetingExamsLoading && !meetingExams.pretest && !meetingExams.posttest && (
+                <div className="p-3.5 rounded-lg bg-slate-50 dark:bg-[#0b101a] border border-dashed border-slate-300 dark:border-[#232f42] text-xs text-slate-600 dark:text-slate-400">
+                  {language === 'en'
+                    ? 'Evaluations for this meeting have not been configured by the lecturer yet.'
+                    : 'Evaluasi untuk pertemuan ini belum dibuat oleh dosen.'}
+                </div>
+              )}
+
               {examError && (
                 <div className="p-3 bg-rose-50 dark:bg-rose-950/50 border border-rose-200 dark:border-rose-500/40 text-rose-700 dark:text-rose-300 rounded-xs text-xs flex items-center gap-2 text-left">
                   <AlertTriangle className="w-4 h-4 text-rose-500 shrink-0" />
@@ -2098,42 +3425,62 @@ export default function ClassDetailView({
               )}
 
               <div className="flex flex-wrap justify-center gap-2.5 pt-2">
-                <button
-                  type="button"
-                  onClick={() => handleStartExam('pretest')}
-                  disabled={activeCycle.pretestDone}
-                  className={`text-xs font-bold px-4 py-2 rounded-xs shadow-md transition flex items-center gap-1.5 ${
-                    activeCycle.pretestDone
-                      ? 'bg-slate-200 dark:bg-slate-800 text-slate-500 dark:text-slate-400 cursor-not-allowed'
-                      : 'bg-[#f59e0b] hover:bg-[#d97706] text-black'
-                  }`}
-                >
-                  {activeCycle.pretestDone ? (
+                {(() => {
+                  const hasPretestQuestions = Boolean(meetingExams.pretest?.questions?.length);
+                  const hasPosttestQuestions = Boolean(meetingExams.posttest?.questions?.length);
+                  const pretestDisabled =
+                    activeCycle.pretestDone || !hasPretestQuestions || !selectedMeeting;
+                  const posttestDisabled =
+                    !activeCycle.canStartPosttest || !hasPosttestQuestions || !selectedMeeting;
+                  return (
                     <>
-                      <Lock className="w-3.5 h-3.5" />
-                      {language === 'en'
-                        ? `PRETEST LOCKED (${activeCycle.pretestAttempt?.score})`
-                        : `PRETEST SELESAI (BASELINE: ${activeCycle.pretestAttempt?.score})`}
+                      <button
+                        type="button"
+                        onClick={() => void handleStartExam('pretest')}
+                        disabled={pretestDisabled}
+                        className={`text-xs font-bold px-4 py-2 rounded-xs shadow-md transition flex items-center gap-1.5 ${
+                          pretestDisabled
+                            ? 'bg-slate-200 dark:bg-slate-800 text-slate-500 dark:text-slate-400 cursor-not-allowed'
+                            : 'bg-[#f59e0b] hover:bg-[#d97706] text-black'
+                        }`}
+                      >
+                        {activeCycle.pretestDone ? (
+                          <>
+                            <Lock className="w-3.5 h-3.5" />
+                            {language === 'en'
+                              ? `PRETEST LOCKED (${activeCycle.pretestAttempt?.score})`
+                              : `PRETEST SELESAI (BASELINE: ${activeCycle.pretestAttempt?.score})`}
+                          </>
+                        ) : !hasPretestQuestions ? (
+                          language === 'en' ? 'PRETEST UNAVAILABLE' : 'PRETEST BELUM TERSEDIA'
+                        ) : language === 'en' ? (
+                          'START PRETEST'
+                        ) : (
+                          'MULAI PRETEST'
+                        )}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => void handleStartExam('posttest')}
+                        disabled={posttestDisabled}
+                        className={`text-xs font-bold px-4 py-2 rounded-xs shadow-md transition flex items-center gap-1.5 ${
+                          !posttestDisabled
+                            ? 'bg-sky-600 dark:bg-[#00e5ff] hover:bg-sky-500 dark:hover:bg-[#33ebff] text-white dark:text-black'
+                            : 'bg-slate-200 dark:bg-slate-800 text-slate-500 dark:text-slate-400 cursor-not-allowed'
+                        }`}
+                      >
+                        {posttestDisabled && <Lock className="w-3.5 h-3.5" />}
+                        {!hasPosttestQuestions
+                          ? language === 'en'
+                            ? 'POST-TEST UNAVAILABLE'
+                            : 'POST-TEST BELUM TERSEDIA'
+                          : language === 'en'
+                            ? 'START POST-TEST'
+                            : 'MULAI POST-TEST'}
+                      </button>
                     </>
-                  ) : language === 'en' ? (
-                    'START PRETEST'
-                  ) : (
-                    'MULAI PRETEST'
-                  )}
-                </button>
-                <button
-                  type="button"
-                  onClick={() => handleStartExam('posttest')}
-                  disabled={!activeCycle.canStartPosttest}
-                  className={`text-xs font-bold px-4 py-2 rounded-xs shadow-md transition flex items-center gap-1.5 ${
-                    activeCycle.canStartPosttest
-                      ? 'bg-sky-600 dark:bg-[#00e5ff] hover:bg-sky-500 dark:hover:bg-[#33ebff] text-white dark:text-black'
-                      : 'bg-slate-200 dark:bg-slate-800 text-slate-500 dark:text-slate-400 cursor-not-allowed'
-                  }`}
-                >
-                  {!activeCycle.canStartPosttest && <Lock className="w-3.5 h-3.5" />}
-                  {language === 'en' ? 'START POST-TEST' : 'MULAI POST-TEST'}
-                </button>
+                  );
+                })()}
               </div>
             </div>
           )}
@@ -2530,16 +3877,19 @@ export default function ClassDetailView({
             >
               <div>
                 <label className="block text-[10px] font-bold text-slate-600 dark:text-slate-400 mb-1 uppercase">
-                  {language === 'en' ? 'Meeting (1–16)' : 'Pertemuan (1–16)'}
+                  {language === 'en' ? 'Meeting' : 'Pertemuan'}
                 </label>
                 <select
-                  value={attMeetingNo}
+                  value={effectiveAttMeetingNo}
                   onChange={(e) => setAttMeetingNo(Number(e.target.value))}
                   className="w-full px-2.5 py-2 text-xs rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-[#121822] text-slate-900 dark:text-slate-100"
                 >
-                  {meetingsList.map((m) => (
-                    <option key={m.id} value={m.order}>
-                      Pertemuan {m.order < 10 ? `0${m.order}` : m.order}
+                  {(meetingsList.length > 0
+                    ? meetingsList.map((m) => m.order)
+                    : Array.from({ length: 16 }, (_, idx) => idx + 1)
+                  ).map((num) => (
+                    <option key={num} value={num}>
+                      Pertemuan {num < 10 ? `0${num}` : num}
                     </option>
                   ))}
                 </select>
@@ -2689,13 +4039,16 @@ export default function ClassDetailView({
                   Pertemuan
                 </label>
                 <select
-                  value={newTaskMeetingNo}
+                  value={effectiveNewTaskMeetingNo}
                   onChange={(e) => setNewTaskMeetingNo(Number(e.target.value))}
                   className="w-full px-2.5 py-2 text-xs rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-[#121822] text-slate-900 dark:text-slate-100"
                 >
-                  {meetingsList.map((m) => (
-                    <option key={m.id} value={m.order}>
-                      Pertemuan {m.order < 10 ? `0${m.order}` : m.order}
+                  {(meetingsList.length > 0
+                    ? meetingsList.map((m) => m.order)
+                    : Array.from({ length: 16 }, (_, idx) => idx + 1)
+                  ).map((num) => (
+                    <option key={num} value={num}>
+                      Pertemuan {num < 10 ? `0${num}` : num}
                     </option>
                   ))}
                 </select>
@@ -2903,7 +4256,7 @@ export default function ClassDetailView({
         </div>
       )}
 
-      {/* INSTRUCTOR / ADMIN TAB: Server-Fetched Reference Keys & Class Exam Statistics */}
+      {/* INSTRUCTOR / ADMIN TAB: Question CRUD, Server Reference Keys & Exam Statistics */}
       {!isPreviewMode && isEducatorOrAdmin && activeTab === 'exam_insights' && (
         <div className="bg-white dark:bg-[#121822] p-5 rounded-xl border border-slate-200 dark:border-[#232f42] space-y-5">
           <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-200 dark:border-[#1b263b] pb-3">
@@ -2912,17 +4265,17 @@ export default function ClassDetailView({
                 <BarChart3 className="w-4 h-4" />
                 <span>
                   {language === 'en'
-                    ? '// EVALUATION REFERENCE KEYS & EXAM STATISTICS'
-                    : '// KUNCI EVALUASI SERVER & STATISTIK UJIAN KELAS'}
+                    ? '// EVALUATION QUESTIONS CRUD, KEYS & STATS'
+                    : '// KELOLA SOAL, KUNCI EVALUASI & STATISTIK KELAS'}
                 </span>
               </h3>
               <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-0.5">
                 {language === 'en'
-                  ? 'Reference keys are retrieved exclusively from /api/grade for authorized instructors/admins.'
-                  : 'Kunci jawaban referensi diambil langsung dari server /api/grade khusus Dosen & Admin.'}
+                  ? 'Questions are stored in exams/{examId}; reference keys live server-only in /api/grade.'
+                  : 'Soal disimpan tanpa kunci ke Firestore (exams), sementara kunci jawaban disimpan 100% server-side di /api/grade.'}
               </p>
             </div>
-            <div className="flex items-center gap-1.5 font-mono">
+            <div className="flex flex-wrap items-center gap-1.5 font-mono">
               {['pretest', 'posttest'].map((et) => (
                 <button
                   key={et}
@@ -2937,14 +4290,171 @@ export default function ClassDetailView({
                   {et}
                 </button>
               ))}
+              {selectedMeeting && (
+                <button
+                  type="button"
+                  onClick={() => setShowExamEditor((prev) => !prev)}
+                  className="px-3 py-1.5 rounded-xs text-[10px] font-bold uppercase border border-sky-300 dark:border-[#00e5ff]/40 bg-sky-50 dark:bg-[#00e5ff]/10 text-sky-700 dark:text-[#00e5ff] flex items-center gap-1"
+                >
+                  <Edit3 className="w-3 h-3" />
+                  {showExamEditor
+                    ? language === 'en'
+                      ? 'Hide Exam Editor'
+                      : 'Tutup Editor Soal'
+                    : language === 'en'
+                      ? 'Create / Edit Exam'
+                      : 'Buat / Edit Soal & Kunci'}
+                </button>
+              )}
             </div>
           </div>
+
+          {renderEducatorMeetingToolbar('educator-exam-meeting')}
+
+          {examSaveFeedback && (
+            <div
+              className={`p-3 rounded-lg text-xs font-mono flex items-center gap-2 border ${
+                examSaveFeedback.type === 'success'
+                  ? 'bg-emerald-50 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-300 border-emerald-200 dark:border-emerald-500/40'
+                  : 'bg-rose-50 dark:bg-rose-950/40 text-rose-700 dark:text-rose-300 border-rose-200 dark:border-rose-500/40'
+              }`}
+            >
+              {examSaveFeedback.type === 'success' ? (
+                <CheckCircle2 className="w-4 h-4 shrink-0" />
+              ) : (
+                <AlertTriangle className="w-4 h-4 shrink-0" />
+              )}
+              <span>{examSaveFeedback.text}</span>
+            </div>
+          )}
 
           {evalAnalyticsError && (
             <div className="p-3 rounded-lg bg-rose-50 dark:bg-rose-950/50 border border-rose-200 dark:border-rose-500/40 text-rose-700 dark:text-rose-300 text-xs font-mono flex items-center gap-2">
               <AlertTriangle className="w-4 h-4 shrink-0" />
               <span>{evalAnalyticsError}</span>
             </div>
+          )}
+
+          {selectedMeeting && (showExamEditor || instructorExamQuestions.length === 0) && (
+            <form
+              onSubmit={handleSaveMeetingExam}
+              className="p-4 rounded-xl bg-slate-50 dark:bg-[#0a0f18] border border-slate-200 dark:border-[#1e2a3f] space-y-4 font-mono"
+            >
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <h4 className="text-xs font-bold text-amber-700 dark:text-[#f59e0b] uppercase">
+                  {language === 'en'
+                    ? `Manage ${evalKeyType.toUpperCase()} Questions (Meeting ${currentMeetingNo})`
+                    : `Kelola Soal & Kunci ${evalKeyType.toUpperCase()} — Pertemuan ${currentMeetingNo}`}
+                </h4>
+                <button
+                  type="button"
+                  onClick={handleAddDraftQuestion}
+                  className="bg-slate-200 dark:bg-[#1c2432] hover:bg-slate-300 dark:hover:bg-[#253245] text-slate-800 dark:text-slate-200 text-[11px] font-bold px-2.5 py-1 rounded flex items-center gap-1"
+                >
+                  <Plus className="w-3.5 h-3.5" />
+                  {language === 'en' ? 'Add Question' : 'Tambah Soal'}
+                </button>
+              </div>
+
+              <div>
+                <label className="block text-[10px] font-bold text-slate-600 dark:text-slate-400 mb-1 uppercase">
+                  {language === 'en' ? 'Assessment Title' : 'Judul Evaluasi'}
+                </label>
+                <input
+                  type="text"
+                  aria-label={language === 'en' ? 'Assessment title' : 'Judul evaluasi'}
+                  value={examDraftTitle}
+                  onChange={(e) => setExamDraftTitle(e.target.value)}
+                  placeholder={`${evalKeyType === 'posttest' ? 'Post-test' : 'Pretest'} Pertemuan ${currentMeetingNo}`}
+                  className="w-full px-3 py-2 text-xs rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-[#121822] text-slate-900 dark:text-slate-100"
+                />
+              </div>
+
+              <div className="space-y-3">
+                {examDraftQuestions.map((q, qIdx) => (
+                  <div
+                    key={q.id}
+                    className="p-3.5 rounded-lg bg-white dark:bg-[#121822] border border-slate-200 dark:border-[#232f42] space-y-2.5"
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="text-[11px] font-bold text-sky-700 dark:text-[#00e5ff]">
+                        SOAL {qIdx + 1} ({q.id})
+                      </span>
+                      {examDraftQuestions.length > 1 && (
+                        <button
+                          type="button"
+                          onClick={() => handleRemoveDraftQuestion(q.id)}
+                          aria-label={`Hapus Soal ${qIdx + 1}`}
+                          className="text-rose-600 hover:text-rose-700 text-[11px] font-bold flex items-center gap-1"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                          {language === 'en' ? 'Remove' : 'Hapus'}
+                        </button>
+                      )}
+                    </div>
+                    <input
+                      type="text"
+                      required
+                      aria-label={`Teks Soal ${qIdx + 1}`}
+                      value={q.question}
+                      onChange={(e) => handleUpdateDraftQuestionText(q.id, e.target.value)}
+                      placeholder={
+                        language === 'en' ? 'Enter question text...' : 'Tuliskan teks pertanyaan...'
+                      }
+                      className="w-full px-2.5 py-1.5 text-xs rounded border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-[#0a0f18] text-slate-900 dark:text-slate-100"
+                    />
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                      {(q.options || []).map((opt, optIdx) => (
+                        <input
+                          key={optIdx}
+                          type="text"
+                          required
+                          aria-label={`Soal ${qIdx + 1} Opsi ${optIdx + 1}`}
+                          value={opt}
+                          onChange={(e) => handleUpdateDraftOption(q.id, optIdx, e.target.value)}
+                          placeholder={`Opsi ${String.fromCharCode(65 + optIdx)}`}
+                          className="w-full px-2.5 py-1.5 text-xs rounded border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-[#0a0f18] text-slate-900 dark:text-slate-100"
+                        />
+                      ))}
+                    </div>
+                    <div className="flex items-center justify-between gap-2 pt-1">
+                      <label className="text-[10px] font-bold text-emerald-700 dark:text-emerald-400 uppercase">
+                        {language === 'en' ? 'Server Reference Key:' : 'Kunci Jawaban Referensi:'}
+                      </label>
+                      <select
+                        aria-label={`Kunci Jawaban Soal ${qIdx + 1}`}
+                        value={examDraftAnswerKey?.[q.id] ?? 0}
+                        onChange={(e) => handleUpdateDraftAnswerKey(q.id, e.target.value)}
+                        className="px-2.5 py-1 text-xs rounded border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-[#0a0f18] text-slate-900 dark:text-slate-100"
+                      >
+                        {(q.options || []).map((_, optIdx) => (
+                          <option key={optIdx} value={optIdx}>
+                            Opsi {String.fromCharCode(65 + optIdx)}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  </div>
+                ))}
+              </div>
+
+              <div className="flex justify-end">
+                <button
+                  type="submit"
+                  disabled={savingExam}
+                  className="bg-[#f59e0b] hover:bg-[#d97706] text-black text-xs font-bold px-4 py-2 rounded flex items-center gap-1.5 disabled:opacity-50"
+                >
+                  <Save className="w-3.5 h-3.5" />
+                  {savingExam
+                    ? language === 'en'
+                      ? 'Saving to Server...'
+                      : 'Menyimpan ke Server...'
+                    : language === 'en'
+                      ? 'Save Questions & Keys'
+                      : 'Simpan Soal & Kunci ke Server'}
+                </button>
+              </div>
+            </form>
           )}
 
           {/* Class Exam Statistics Summary */}
@@ -2993,7 +4503,7 @@ export default function ClassDetailView({
               <h4 className="text-xs font-mono font-bold text-slate-800 dark:text-slate-200 flex items-center gap-1.5">
                 <KeyRound className="w-4 h-4 text-amber-600 dark:text-[#f59e0b]" />
                 {language === 'en' ? 'Reference Answer Key' : 'Kunci Jawaban Referensi'} (
-                {evalKeyType.toUpperCase()})
+                {evalKeyType.toUpperCase()} — P{currentMeetingNo})
               </h4>
               {instructorKeySource && (
                 <span className="text-[10px] font-mono text-sky-700 dark:text-[#00e5ff] bg-sky-50 dark:bg-[#00e5ff]/10 px-2 py-0.5 rounded border border-sky-200 dark:border-[#00e5ff]/30">
@@ -3004,11 +4514,17 @@ export default function ClassDetailView({
 
             {evalAnalyticsLoading ? (
               <div className="py-6 text-center text-xs font-mono text-slate-400">
-                Memuat kunci evaluasi dari server...
+                Memuat soal &amp; kunci evaluasi dari server...
+              </div>
+            ) : instructorExamQuestions.length === 0 ? (
+              <div className="py-6 text-center text-xs font-mono text-slate-500 dark:text-slate-400 bg-slate-50 dark:bg-[#0a0f18] rounded-lg border border-dashed border-slate-300 dark:border-[#1e2a3f]">
+                {language === 'en'
+                  ? `No ${evalKeyType} questions configured for Meeting ${currentMeetingNo} yet.`
+                  : `Belum ada soal & kunci ${evalKeyType.toUpperCase()} untuk Pertemuan ${currentMeetingNo}. Gunakan editor di atas untuk menambahkan.`}
               </div>
             ) : (
               <div className="space-y-2.5">
-                {examQuestions.map((q, idx) => {
+                {instructorExamQuestions.map((q, idx) => {
                   const refOptionIdx = instructorKeyMap?.[q.id];
                   return (
                     <div
@@ -3091,10 +4607,10 @@ export default function ClassDetailView({
       )}
 
       {/* TAB: Contextual Discussion per Class & Meeting */}
-      {!isPreviewMode && activeTab === 'discussion' && (
+      {!isPreviewMode && activeTab === 'discussion' && classData?.id && (
         <DiscussionTab
           embedded
-          classId={classData?.id || 'subj_pbo'}
+          classId={classData.id}
           classNameTitle={classData?.name || classData?.title || ''}
           meetingNo={currentMeetingNo}
           meetingTitle={selectedMeeting?.title || ''}

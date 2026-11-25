@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import { useAuth } from '../../context/useAuth';
 import { useLanguage } from '../../context/useLanguage';
 import { ROLES } from '../../constants/roles';
@@ -8,7 +8,7 @@ import {
   recordMeetingAttendance,
 } from '../../services/attendanceService';
 import {
-  fetchClasses,
+  fetchClassesForUser,
   fetchUserExamAttempts,
   fetchUserLearningProgress,
 } from '../../services/lmsFirestoreService';
@@ -37,7 +37,7 @@ import {
 } from 'lucide-react';
 
 export default function StudentDashboard({ onNavigateTab, onSelectActivity }) {
-  const { userProfile, currentUser, role, isDemoMode } = useAuth();
+  const { userProfile, currentUser, role } = useAuth();
   const { t, language, getRoleLabel } = useLanguage();
 
   // State Data Firestore
@@ -45,6 +45,7 @@ export default function StudentDashboard({ onNavigateTab, onSelectActivity }) {
   const [loadingClasses, setLoadingClasses] = useState(true);
   const [examAttempts, setExamAttempts] = useState([]);
   const [learningProgress, setLearningProgress] = useState([]);
+  const [renderNowMs, setRenderNowMs] = useState(() => Date.now());
 
   // State Modals Interaktif
   const [isLainnyaOpen, setIsLainnyaOpen] = useState(false);
@@ -66,7 +67,17 @@ export default function StudentDashboard({ onNavigateTab, onSelectActivity }) {
   const [semesterAttendance, setSemesterAttendance] = useState({
     progress: 0,
     attended: 0,
+    totalMeetings: 0,
   });
+  const loadReqIdRef = useRef(0);
+  const mountedRef = useRef(true);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
 
   useEffect(() => {
     const hourInterval = setInterval(() => {
@@ -104,38 +115,55 @@ export default function StudentDashboard({ onNavigateTab, onSelectActivity }) {
     return () => window.removeEventListener('keydown', onKeyDown);
   }, [isUjianModalOpen, isLainnyaOpen, scanModalSubject, isFocusOpen]);
 
-  const loadDashboardData = async () => {
+  const loadDashboardData = useCallback(async () => {
+    const reqId = ++loadReqIdRef.current;
     setLoadingClasses(true);
     try {
-      const [classRes, summary, attempts, progressList] = await Promise.all([
-        fetchClasses(),
-        getSemesterAttendanceSummary(currentUser?.uid),
-        currentUser ? fetchUserExamAttempts(currentUser.uid) : Promise.resolve([]),
-        currentUser ? fetchUserLearningProgress(currentUser.uid) : Promise.resolve([]),
+      if (!currentUser?.uid) {
+        if (!mountedRef.current || reqId !== loadReqIdRef.current) return;
+        setClasses([]);
+        setSemesterAttendance({ progress: 0, attended: 0, totalMeetings: 0 });
+        setExamAttempts([]);
+        setLearningProgress([]);
+        setScanModalSubject(null);
+        setIsUjianModalOpen(false);
+        return;
+      }
+
+      const classRes = await fetchClassesForUser({ uid: currentUser.uid, role });
+      if (!mountedRef.current || reqId !== loadReqIdRef.current) return;
+      const loadedClasses = classRes.classes || [];
+      setClasses(loadedClasses);
+
+      const activeClassIds = new Set(loadedClasses.map((c) => c.id).filter(Boolean));
+      const [summary, attempts, progressList] = await Promise.all([
+        getSemesterAttendanceSummary(currentUser.uid, loadedClasses),
+        activeClassIds.size > 0 ? fetchUserExamAttempts(currentUser.uid) : Promise.resolve([]),
+        activeClassIds.size > 0 ? fetchUserLearningProgress(currentUser.uid) : Promise.resolve([]),
       ]);
-      setClasses(classRes.classes || []);
-      setSemesterAttendance(summary || { progress: 0, attended: 0 });
-      setExamAttempts(attempts || []);
-      setLearningProgress(progressList || []);
+      if (!mountedRef.current || reqId !== loadReqIdRef.current) return;
+
+      setSemesterAttendance(summary || { progress: 0, attended: 0, totalMeetings: 0 });
+      setExamAttempts((attempts || []).filter((a) => activeClassIds.has(a.classId)));
+      setLearningProgress((progressList || []).filter((p) => activeClassIds.has(p.classId)));
+      setRenderNowMs(Date.now());
     } finally {
-      setLoadingClasses(false);
+      if (mountedRef.current && reqId === loadReqIdRef.current) {
+        setLoadingClasses(false);
+      }
     }
-  };
+  }, [currentUser?.uid, role]);
 
   useEffect(() => {
-    void loadDashboardData();
+    Promise.resolve().then(() => {
+      if (mountedRef.current) void loadDashboardData();
+    });
     const handleAttendanceUpdate = () => {
-      void getSemesterAttendanceSummary(currentUser?.uid).then((summary) => {
-        if (summary) setSemesterAttendance(summary);
-      });
-      void fetchClasses().then((res) => {
-        setClasses(res.classes || []);
-      });
+      void loadDashboardData();
     };
     window.addEventListener('smartsa_attendance_updated', handleAttendanceUpdate);
     return () => window.removeEventListener('smartsa_attendance_updated', handleAttendanceUpdate);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [currentUser?.uid]);
+  }, [loadDashboardData]);
 
   const toggleFocusTimer = () => {
     if (!focusActive && focusSeconds === 0) {
@@ -169,7 +197,7 @@ export default function StudentDashboard({ onNavigateTab, onSelectActivity }) {
   const activeDisplayName =
     userProfile?.displayName ||
     currentUser?.displayName ||
-    (isDemoMode ? t('demo_student_name') : t('default_user_name'));
+    t('default_user_name');
 
   const firstName = activeDisplayName.trim().split(' ')[0] || activeDisplayName;
   const fullName = activeDisplayName.toUpperCase();
@@ -178,12 +206,13 @@ export default function StudentDashboard({ onNavigateTab, onSelectActivity }) {
     userProfile?.nim ||
     userProfile?.nidn ||
     userProfile?.nip ||
-    (isDemoMode ? '25050974001' : t('not_set'));
+    t('not_set');
 
   const userPhoto = userProfile?.photoURL || currentUser?.photoURL || null;
 
   const activeInstitution =
-    userProfile?.institution || 'Universitas Negeri Surabaya';
+    userProfile?.institution ||
+    (currentUser ? 'Universitas Negeri Surabaya' : t('not_set', 'Belum diisi'));
 
   const roleLabel = getRoleLabel(role);
 
@@ -384,10 +413,10 @@ export default function StudentDashboard({ onNavigateTab, onSelectActivity }) {
             </div>
             <div>
               <div className="text-xl font-black text-slate-900 dark:text-slate-100 leading-none">
-                {classes.length * 3 || 18}
+                {classes.length * 3}
               </div>
               <div className="text-[11px] text-slate-500 dark:text-slate-400 font-medium mt-1">
-                {language === 'en' ? 'Total Credits' : 'Total SKS'}
+                {language === 'en' ? 'Estimated Credits' : 'Estimasi SKS'}
               </div>
             </div>
           </div>
@@ -476,8 +505,8 @@ export default function StudentDashboard({ onNavigateTab, onSelectActivity }) {
             </p>
             <p className="text-[11px] text-slate-500 dark:text-slate-400">
               {language === 'en'
-                ? 'Join a class using a class code or seed sample data.'
-                : 'Gabung kelas dengan kode atau jalankan seed-firestore.mjs.'}
+                ? 'Join a class using an enrollment code from your lecturer.'
+                : 'Gabung kelas menggunakan kode kelas dari dosen pengampu.'}
             </p>
           </div>
         ) : (
@@ -485,7 +514,7 @@ export default function StudentDashboard({ onNavigateTab, onSelectActivity }) {
             {todayClasses.map((subj) => {
               const sess = subj.activeAttendanceSession;
               const sessionOpen = Boolean(
-                sess?.isOpen && (!sess.expiresAt || sess.expiresAt > Date.now())
+                sess?.isOpen && (!sess.expiresAt || sess.expiresAt > renderNowMs)
               );
 
               return (
@@ -526,7 +555,8 @@ export default function StudentDashboard({ onNavigateTab, onSelectActivity }) {
                         {subj.lecturer}
                       </p>
                       <p className="text-[11px] font-mono text-slate-500 dark:text-slate-400 mt-0.5">
-                        {subj.day}, {subj.time} • {language === 'en' ? 'Computer Lab 03' : 'Ruang Lab Komputer 03'}
+                        {[subj.day, subj.time].filter(Boolean).join(', ') ||
+                          (language === 'en' ? 'Schedule not set' : 'Jadwal belum diatur')}
                       </p>
                     </div>
                   </div>
@@ -538,7 +568,7 @@ export default function StudentDashboard({ onNavigateTab, onSelectActivity }) {
                       className="bg-amber-50 dark:bg-[#182232] hover:bg-amber-100 dark:hover:bg-[#202d42] text-amber-700 dark:text-[#f59e0b] border border-amber-300 dark:border-[#f59e0b]/40 hover:border-amber-500 dark:hover:border-[#f59e0b] px-3 py-1.5 rounded-xl font-bold text-[11px] transition flex items-center gap-1.5 cursor-pointer shadow-xs"
                     >
                       <QrCode className="w-3.5 h-3.5 text-amber-600 dark:text-[#f59e0b]" />
-                      <span>{language === 'en' ? 'Check-in (+6%)' : 'Presensi Sesi (+6%)'}</span>
+                      <span>{language === 'en' ? 'Check-in' : 'Presensi Sesi'}</span>
                     </button>
 
                     <button
@@ -567,7 +597,8 @@ export default function StudentDashboard({ onNavigateTab, onSelectActivity }) {
             </span>
           </div>
           <span className="text-[10px] font-mono font-bold text-sky-700 dark:text-[#00e5ff] bg-sky-50 dark:bg-[#00e5ff]/15 px-2 py-0.5 rounded border border-sky-200 dark:border-[#00e5ff]/30">
-            {semesterAttendance.progress}% {language === 'en' ? 'RECORDED (+6%/SESSION)' : 'TERDATA (+6%/SESI)'}
+            {semesterAttendance.progress}% ({semesterAttendance.attended}/{semesterAttendance.totalMeetings || 0}{' '}
+            {language === 'en' ? 'SESSIONS' : 'SESI'})
           </span>
         </div>
 
@@ -575,12 +606,13 @@ export default function StudentDashboard({ onNavigateTab, onSelectActivity }) {
           <div className="w-full bg-slate-200 dark:bg-[#18212e] h-2 rounded-full overflow-hidden">
             <div
               className="bg-gradient-to-r from-[#00897b] to-[#00e5ff] h-full rounded-full transition-all duration-500 shadow-sm"
-              style={{ width: `${Math.max(4, semesterAttendance.progress)}%` }}
+              style={{ width: `${semesterAttendance.progress > 0 ? Math.max(4, semesterAttendance.progress) : 0}%` }}
             />
           </div>
           <div className="flex items-center justify-between text-[10px] font-mono text-slate-500 dark:text-slate-400">
             <span>
-              {semesterAttendance.attended} {language === 'en' ? 'Meetings Attended (+6% per session)' : 'Pertemuan Hadir (+6% per sesi)'}
+              {semesterAttendance.attended} / {semesterAttendance.totalMeetings || 0}{' '}
+              {language === 'en' ? 'Active Meetings Attended' : 'Pertemuan Kelas Diikuti'}
             </span>
             <span>
               {classes.length} {language === 'en' ? 'Active Courses' : 'Mata Kuliah Aktif'}
@@ -650,77 +682,61 @@ export default function StudentDashboard({ onNavigateTab, onSelectActivity }) {
             </div>
 
             <div className="p-4 space-y-4 max-h-[75vh] overflow-y-auto">
-              <div className="grid grid-cols-2 gap-2 text-xs font-mono">
-                <div className="p-3 rounded-xl bg-blue-50 dark:bg-[#162030] border border-blue-200 dark:border-blue-500/30">
-                  <span className="text-[10px] text-blue-600 dark:text-blue-400 block font-bold">UTS (Week 8-9)</span>
-                  <span className="text-slate-900 dark:text-slate-100 font-bold block mt-0.5">17–28 Nov 2026</span>
-                  <span className="text-[9px] text-emerald-600 dark:text-emerald-400 mt-1 block">● {language === 'en' ? 'Scheduled' : 'Terjadwal'}</span>
-                </div>
-                <div className="p-3 rounded-xl bg-rose-50 dark:bg-[#162030] border border-rose-200 dark:border-rose-500/30">
-                  <span className="text-[10px] text-rose-600 dark:text-rose-400 block font-bold">UAS (Week 16)</span>
-                  <span className="text-slate-900 dark:text-slate-100 font-bold block mt-0.5">05–16 Jan 2027</span>
-                  <span className="text-[9px] text-amber-600 dark:text-amber-400 mt-1 block">● {language === 'en' ? 'Upcoming' : 'Persiapan'}</span>
-                </div>
-              </div>
-
               <div className="space-y-2">
                 <h4 className="text-xs font-bold text-slate-700 dark:text-slate-200 font-mono uppercase tracking-wider">
-                  {language === 'en' ? 'Active Module Assessments' : 'Ujian & Evaluasi Modul Aktif'}
+                  {language === 'en' ? 'Recorded Evaluation Attempts' : 'Riwayat Evaluasi & Ujian Kelas'}
                 </h4>
 
-                <div className="p-3 rounded-xl bg-slate-50 dark:bg-[#162030] border border-slate-200 dark:border-slate-700/80 flex items-center justify-between gap-2">
-                  <div>
-                    <span className="text-[9px] font-mono font-bold text-blue-700 dark:text-blue-400 bg-blue-100 dark:bg-blue-900/40 px-1.5 py-0.5 rounded border border-blue-200 dark:border-blue-500/30">
-                      PRETEST MODUL 01
-                    </span>
-                    <h5 className="text-xs font-bold text-slate-900 dark:text-slate-100 mt-1">
-                      Konsep Dasar & Clean Architecture
-                    </h5>
-                    <p className="text-[10px] text-slate-500 dark:text-slate-400 font-mono">
-                      15 {language === 'en' ? 'Mins' : 'Menit'} •{' '}
-                      {latestPretest
-                        ? `${language === 'en' ? 'Last Score' : 'Nilai Terakhir'}: ${latestPretest.score} / 100`
-                        : language === 'en' ? 'Not attempted yet' : 'Belum dikerjakan'}
+                {examAttempts.length === 0 ? (
+                  <div className="p-5 rounded-xl bg-slate-50 dark:bg-[#162030] border border-dashed border-slate-300 dark:border-slate-700 text-center space-y-2">
+                    <p className="text-xs font-semibold text-slate-700 dark:text-slate-200">
+                      {language === 'en'
+                        ? 'No Exam Attempts Recorded Yet'
+                        : 'Belum Ada Riwayat Ujian atau Jadwal Terpublikasi'}
+                    </p>
+                    <p className="text-[11px] text-slate-500 dark:text-slate-400">
+                      {language === 'en'
+                        ? 'Open a class and select a meeting with published Pretest or Post-test evaluations.'
+                        : 'Buka salah satu kelas Anda untuk mengerjakan pretest atau post-test yang telah disiapkan dosen.'}
                     </p>
                   </div>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setIsUjianModalOpen(false);
-                      onSelectActivity('pretest');
-                    }}
-                    className="px-2.5 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-500 text-white font-mono text-[10px] font-bold shrink-0 cursor-pointer transition shadow-xs"
-                  >
-                    {latestPretest ? (language === 'en' ? 'View Result' : 'Buka Hasil') : (language === 'en' ? 'Start Exam' : 'Buka Ujian')}
-                  </button>
-                </div>
-
-                <div className="p-3 rounded-xl bg-amber-50/70 dark:bg-[#162030] border border-amber-300 dark:border-[#f59e0b]/40 flex items-center justify-between gap-2">
-                  <div>
-                    <span className="text-[9px] font-mono font-bold text-amber-700 dark:text-[#f59e0b] bg-amber-100 dark:bg-[#f59e0b]/15 px-1.5 py-0.5 rounded border border-amber-300 dark:border-[#f59e0b]/30">
-                      POSTTEST EVALUASI 01
-                    </span>
-                    <h5 className="text-xs font-bold text-slate-900 dark:text-slate-100 mt-1">
-                      Evaluasi Firestore & Keamanan API
-                    </h5>
-                    <p className="text-[10px] text-slate-500 dark:text-slate-400 font-mono">
-                      15 {language === 'en' ? 'Mins' : 'Menit'} •{' '}
-                      {latestPosttest
-                        ? `${language === 'en' ? 'Last Score' : 'Nilai Terakhir'}: ${latestPosttest.score} / 100`
-                        : language === 'en' ? '4 Multiple Choice' : '4 Soal Pilihan Ganda'}
-                    </p>
-                  </div>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setIsUjianModalOpen(false);
-                      onSelectActivity('posttest');
-                    }}
-                    className="px-2.5 py-1.5 rounded-lg bg-[#f59e0b] hover:bg-[#d97706] text-black font-mono text-[10px] font-bold shrink-0 cursor-pointer transition shadow-xs"
-                  >
-                    {language === 'en' ? 'Start Exam' : 'Mulai Ujian'}
-                  </button>
-                </div>
+                ) : (
+                  examAttempts.slice(0, 6).map((att) => {
+                    const matchedCls = classes.find((c) => c.id === att.classId);
+                    return (
+                      <div
+                        key={att.id}
+                        className="p-3 rounded-xl bg-slate-50 dark:bg-[#162030] border border-slate-200 dark:border-slate-700/80 flex items-center justify-between gap-2"
+                      >
+                        <div className="min-w-0">
+                          <span className="text-[9px] font-mono font-bold text-amber-700 dark:text-[#f59e0b] bg-amber-100 dark:bg-[#f59e0b]/15 px-1.5 py-0.5 rounded border border-amber-300 dark:border-[#f59e0b]/30 uppercase">
+                            {att.examType || 'pretest'} • P{att.meetingNo || 1}
+                          </span>
+                          <h5 className="text-xs font-bold text-slate-900 dark:text-slate-100 mt-1 truncate">
+                            {matchedCls?.name || matchedCls?.title || att.classId}
+                          </h5>
+                          <p className="text-[10px] text-slate-500 dark:text-slate-400 font-mono">
+                            {typeof att.score === 'number'
+                              ? `${language === 'en' ? 'Score' : 'Skor'}: ${att.score} / 100`
+                              : language === 'en'
+                                ? 'In Progress'
+                                : 'Sedang Berlangsung'}
+                          </p>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setIsUjianModalOpen(false);
+                            onSelectActivity?.(att.examType || 'pretest');
+                          }}
+                          className="px-2.5 py-1.5 rounded-lg bg-[#f59e0b] hover:bg-[#d97706] text-black font-mono text-[10px] font-bold shrink-0 cursor-pointer transition shadow-xs"
+                        >
+                          {language === 'en' ? 'Open Class' : 'Buka Kelas'}
+                        </button>
+                      </div>
+                    );
+                  })
+                )}
               </div>
 
               <div className="pt-2">

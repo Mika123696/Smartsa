@@ -427,4 +427,316 @@ describe('Backend API Dispatcher (api/index.js)', () => {
     expect(lecRes.statusCode).toBe(200);
     expect(lecRes.json().answerKey).toEqual({ q1: 1, q2: 2, q3: 1, q4: 1 });
   });
+
+  it('enforces class ownership on POST /api/grade action save_exam and writes exams + exam_keys atomically', async () => {
+    // 1. Student cannot call save_exam
+    mockVerifyIdToken.mockResolvedValueOnce({ uid: 'student_01', role: 'student' });
+    mockCollection.mockImplementation((name) => {
+      if (name === 'users') {
+        return {
+          doc: vi.fn(() => ({
+            get: vi.fn(async () => ({ exists: true, data: () => ({ role: 'student' }) })),
+          })),
+        };
+      }
+      return {};
+    });
+
+    const studentRes = createMockRes();
+    await handler(
+      {
+        method: 'POST',
+        url: '/api/grade',
+        headers: { authorization: 'Bearer valid-token' },
+        body: {
+          action: 'save_exam',
+          classId: 'cls_custom_01',
+          meetingNo: 2,
+          examType: 'pretest',
+          questions: [{ id: 'q1', question: 'Q1?', options: ['A', 'B'] }],
+          answerKey: { q1: 0 },
+        },
+      },
+      studentRes
+    );
+    expect(studentRes.statusCode).toBe(403);
+    expect(studentRes.json().code).toBe('FORBIDDEN_ROLE');
+
+    // 2. Non-owner lecturer cannot save_exam for another lecturer's class
+    mockVerifyIdToken.mockResolvedValueOnce({ uid: 'lec_other', email: 'other@smartsa.edu' });
+    mockCollection.mockImplementation((name) => {
+      if (name === 'users') {
+        return {
+          doc: vi.fn(() => ({
+            get: vi.fn(async () => ({ exists: true, data: () => ({ role: 'lecturer' }) })),
+          })),
+        };
+      }
+      if (name === 'classes') {
+        return {
+          doc: vi.fn(() => ({
+            get: vi.fn(async () => ({
+              exists: true,
+              data: () => ({ id: 'cls_custom_01', lecturerId: 'lec_owner' }),
+            })),
+          })),
+        };
+      }
+      return {};
+    });
+
+    const nonOwnerRes = createMockRes();
+    await handler(
+      {
+        method: 'POST',
+        url: '/api/grade',
+        headers: { authorization: 'Bearer valid-token' },
+        body: {
+          action: 'save_exam',
+          classId: 'cls_custom_01',
+          meetingNo: 2,
+          examType: 'pretest',
+          questions: [{ id: 'q1', question: 'Q1?', options: ['A', 'B'] }],
+          answerKey: { q1: 0 },
+        },
+      },
+      nonOwnerRes
+    );
+    expect(nonOwnerRes.statusCode).toBe(403);
+    expect(nonOwnerRes.json().code).toBe('FORBIDDEN_CLASS_OWNER');
+
+    // 3. Owning lecturer saves exam atomically to exams/{id} (no keys) and exam_keys/{classId}
+    mockVerifyIdToken.mockResolvedValueOnce({ uid: 'lec_owner', email: 'owner@smartsa.edu' });
+    const examRef = { id: 'cls_custom_01_m2_pretest' };
+    const keyRef = { id: 'cls_custom_01' };
+    const txSet = vi.fn();
+
+    mockCollection.mockImplementation((name) => {
+      if (name === 'users') {
+        return {
+          doc: vi.fn(() => ({
+            get: vi.fn(async () => ({ exists: true, data: () => ({ role: 'lecturer' }) })),
+          })),
+        };
+      }
+      if (name === 'classes') {
+        return {
+          doc: vi.fn(() => ({
+            get: vi.fn(async () => ({
+              exists: true,
+              data: () => ({ id: 'cls_custom_01', lecturerId: 'lec_owner' }),
+            })),
+          })),
+        };
+      }
+      if (name === 'exams') {
+        return {
+          doc: vi.fn((docId) => {
+            expect(docId).toBe('cls_custom_01_m2_pretest');
+            return examRef;
+          }),
+        };
+      }
+      if (name === 'exam_keys') {
+        return {
+          doc: vi.fn((docId) => {
+            expect(docId).toBe('cls_custom_01');
+            return keyRef;
+          }),
+        };
+      }
+      return {};
+    });
+
+    mockRunTransaction.mockImplementation(async (callback) => {
+      const tx = {
+        get: vi.fn(async (ref) => {
+          if (ref === keyRef) {
+            return {
+              exists: true,
+              data: () => ({
+                classId: 'cls_custom_01',
+                meetings: {
+                  1: { pretest: { q1: 0 } },
+                },
+              }),
+            };
+          }
+          return { exists: false };
+        }),
+        set: txSet,
+      };
+      return callback(tx);
+    });
+
+    const okRes = createMockRes();
+    await handler(
+      {
+        method: 'POST',
+        url: '/api/grade',
+        headers: { authorization: 'Bearer valid-token' },
+        body: {
+          action: 'save_exam',
+          classId: 'cls_custom_01',
+          meetingNo: 2,
+          examType: 'pretest',
+          title: 'Pretest Pertemuan 2',
+          questions: [
+            {
+              id: 'q1',
+              question: 'Apa kompleksitas pencarian biner?',
+              options: ['O(1)', 'O(log n)', 'O(n)', 'O(n^2)'],
+              answerKey: 99,
+            },
+          ],
+          answerKey: { q1: 1 },
+        },
+      },
+      okRes
+    );
+
+    expect(okRes.statusCode).toBe(200);
+    expect(okRes.json()).toMatchObject({
+      saved: true,
+      examId: 'cls_custom_01_m2_pretest',
+      classId: 'cls_custom_01',
+      meetingNo: 2,
+      examType: 'pretest',
+      questionsCount: 1,
+    });
+
+    expect(txSet).toHaveBeenCalledTimes(2);
+    const [writtenExamRef, writtenExamPayload] = txSet.mock.calls[0];
+    expect(writtenExamRef).toBe(examRef);
+    expect(writtenExamPayload.questions).toEqual([
+      {
+        id: 'q1',
+        question: 'Apa kompleksitas pencarian biner?',
+        options: ['O(1)', 'O(log n)', 'O(n)', 'O(n^2)'],
+      },
+    ]);
+    expect(writtenExamPayload.questions[0]).not.toHaveProperty('answerKey');
+
+    const [writtenKeyRef, writtenKeyPayload] = txSet.mock.calls[1];
+    expect(writtenKeyRef).toBe(keyRef);
+    expect(writtenKeyPayload.meetings).toEqual({
+      1: { pretest: { q1: 0 } },
+      2: { pretest: { q1: 1 } },
+    });
+  });
+
+  it('returns 404 EXAM_NOT_CONFIGURED on start/submit when exam_keys for class/meeting are missing', async () => {
+    mockCollection.mockImplementation((name) => {
+      if (name === 'exam_keys') {
+        return {
+          doc: vi.fn(() => ({
+            get: vi.fn(async () => ({ exists: false })),
+          })),
+        };
+      }
+      return {};
+    });
+
+    mockVerifyIdToken.mockResolvedValueOnce({ uid: 'student_05', role: 'student' });
+    const startRes = createMockRes();
+    await handler(
+      {
+        method: 'POST',
+        url: '/api/grade',
+        headers: { authorization: 'Bearer valid-token' },
+        body: {
+          action: 'start',
+          classId: 'cls_empty_99',
+          meetingNo: 1,
+          examType: 'pretest',
+        },
+      },
+      startRes
+    );
+    expect(startRes.statusCode).toBe(404);
+    expect(startRes.json().code).toBe('EXAM_NOT_CONFIGURED');
+
+    mockVerifyIdToken.mockResolvedValueOnce({ uid: 'student_05', role: 'student' });
+    const submitRes = createMockRes();
+    await handler(
+      {
+        method: 'POST',
+        url: '/api/grade',
+        headers: { authorization: 'Bearer valid-token' },
+        body: {
+          action: 'submit',
+          classId: 'cls_empty_99',
+          meetingNo: 1,
+          examType: 'pretest',
+          answers: { q1: 1 },
+        },
+      },
+      submitRes
+    );
+    expect(submitRes.statusCode).toBe(404);
+    expect(submitRes.json().code).toBe('EXAM_NOT_CONFIGURED');
+
+    // instructor_keys should cleanly report isConfigured: false with empty map
+    mockVerifyIdToken.mockResolvedValueOnce({ uid: 'lec_01', email: 'dosen@smartsa.edu' });
+    const keysRes = createMockRes();
+    await handler(
+      {
+        method: 'POST',
+        url: '/api/grade',
+        headers: { authorization: 'Bearer valid-token' },
+        body: {
+          action: 'instructor_keys',
+          classId: 'cls_empty_99',
+          meetingNo: 1,
+          examType: 'pretest',
+        },
+      },
+      keysRes
+    );
+    expect(keysRes.statusCode).toBe(200);
+    expect(keysRes.json()).toMatchObject({
+      answerKey: {},
+      isConfigured: false,
+    });
+  });
+
+  it('returns 400 CLASS_ID_REQUIRED when POST /api/grade is called with empty or missing classId', async () => {
+    mockVerifyIdToken.mockResolvedValueOnce({ uid: 'student_06', role: 'student' });
+    const missingRes = createMockRes();
+    await handler(
+      {
+        method: 'POST',
+        url: '/api/grade',
+        headers: { authorization: 'Bearer valid-token' },
+        body: {
+          action: 'submit',
+          meetingNo: 1,
+          examType: 'pretest',
+          answers: { q1: 1 },
+        },
+      },
+      missingRes
+    );
+    expect(missingRes.statusCode).toBe(400);
+    expect(missingRes.json().code).toBe('CLASS_ID_REQUIRED');
+
+    mockVerifyIdToken.mockResolvedValueOnce({ uid: 'student_06', role: 'student' });
+    const emptyRes = createMockRes();
+    await handler(
+      {
+        method: 'POST',
+        url: '/api/grade',
+        headers: { authorization: 'Bearer valid-token' },
+        body: {
+          action: 'start',
+          classId: '   ',
+          meetingNo: 1,
+          examType: 'pretest',
+        },
+      },
+      emptyRes
+    );
+    expect(emptyRes.statusCode).toBe(400);
+    expect(emptyRes.json().code).toBe('CLASS_ID_REQUIRED');
+  });
 });

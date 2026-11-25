@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import { useAuth } from '../../context/useAuth';
 import { useLanguage } from '../../context/useLanguage';
 import {
@@ -23,7 +23,7 @@ import {
   Link as LinkIcon,
 } from 'lucide-react';
 import {
-  fetchClasses,
+  fetchClassesForUser,
   fetchAssignmentsWithUserSubmissions,
   fetchUserLearningProgress,
   submitAssignmentToFirestore,
@@ -32,45 +32,8 @@ import {
 import { uploadMediaFile, isValidExternalUrl } from '../../services/cloudinaryService';
 import { AccessibleDialog } from '../common/AccessibleDialog';
 
-const DEMO_ASSIGNMENTS_FALLBACK = [
-  {
-    id: 'asg_01',
-    classId: 'subj_pbo',
-    meetingNo: 1,
-    title: 'Tugas Praktikum 01: Implementasi OOP & Inheritance',
-    subject: 'Pemrograman Berorientasi Objek',
-    subjectCode: 'PBO101',
-    deadline: '20 Nov 2026, 23:59 WIB',
-    isOverdue: false,
-    status: 'pending',
-    submittedFile: null,
-    submittedAt: null,
-    grade: null,
-    note: 'Buatlah program aplikasi perpustakaan sederhana menggunakan konsep Inheritance dan Polimorfisme. Format laporan PDF dan lampirkan link repository GitHub.',
-    maxSize: '10 MB',
-    allowedFormats: '.pdf, .zip, .docx',
-  },
-  {
-    id: 'asg_02',
-    classId: 'subj_bd',
-    meetingNo: 2,
-    title: 'Tugas 02: Normalisasi Basis Data & Skema NoSQL',
-    subject: 'Basis Data',
-    subjectCode: 'BD202',
-    deadline: '24 Nov 2026, 21:00 WIB',
-    isOverdue: false,
-    status: 'pending',
-    submittedFile: null,
-    submittedAt: null,
-    grade: null,
-    note: 'Rancang ERD dan lakukan normalisasi 1NF, 2NF, hingga 3NF pada studi kasus sistem rawat jalan rumah sakit.',
-    maxSize: '15 MB',
-    allowedFormats: '.pdf, .zip',
-  },
-];
-
 export default function MaterialsTab({ onSelectSubject }) {
-  const { currentUser, userProfile } = useAuth();
+  const { currentUser, userProfile, role } = useAuth();
   const { t, language } = useLanguage();
 
   const [activeSubTab, setActiveSubTab] = useState('materi');
@@ -89,30 +52,69 @@ export default function MaterialsTab({ onSelectSubject }) {
   const [submitFeedback, setSubmitFeedback] = useState(null);
   const [cancelTargetId, setCancelTargetId] = useState(null);
 
-  const loadMaterialsAndTasks = async () => {
-    setLoading(true);
-    try {
-      const [classRes, taskRes, progressRes] = await Promise.all([
-        fetchClasses(),
-        currentUser ? fetchAssignmentsWithUserSubmissions() : Promise.resolve(null),
-        currentUser ? fetchUserLearningProgress(currentUser.uid) : Promise.resolve([]),
-      ]);
-      setClasses(classRes.classes || []);
-      setLearningProgress(progressRes || []);
-      if (currentUser && taskRes) {
-        setAssignments(taskRes.assignments || []);
-      } else {
-        setAssignments(DEMO_ASSIGNMENTS_FALLBACK);
-      }
-    } finally {
-      setLoading(false);
-    }
-  };
+  const loadReqIdRef = useRef(0);
+  const mountedRef = useRef(true);
 
   useEffect(() => {
-    void loadMaterialsAndTasks();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [currentUser?.uid]);
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
+
+  const loadMaterialsAndTasks = useCallback(async () => {
+    const reqId = ++loadReqIdRef.current;
+    setLoading(true);
+    try {
+      if (!currentUser?.uid) {
+        if (!mountedRef.current || reqId !== loadReqIdRef.current) return;
+        setClasses([]);
+        setAssignments([]);
+        setLearningProgress([]);
+        setSelectedAssignment(null);
+        setSelectedFile(null);
+        setExternalUrlInput('');
+        setNotesInput('');
+        setSubmitFeedback(null);
+        setCancelTargetId(null);
+        setMeetingFilter('all');
+        return;
+      }
+
+      const classRes = await fetchClassesForUser({ uid: currentUser.uid, role });
+      if (!mountedRef.current || reqId !== loadReqIdRef.current) return;
+      const loadedClasses = classRes.classes || [];
+      setClasses(loadedClasses);
+
+      const userClassIds = loadedClasses.map((c) => c.id).filter(Boolean);
+      const [taskRes, progressRes] = await Promise.all([
+        fetchAssignmentsWithUserSubmissions({ classIds: userClassIds }),
+        userClassIds.length > 0 ? fetchUserLearningProgress(currentUser.uid) : Promise.resolve([]),
+      ]);
+      if (!mountedRef.current || reqId !== loadReqIdRef.current) return;
+
+      const classIdSet = new Set(userClassIds);
+      setAssignments(taskRes?.assignments || []);
+      setLearningProgress((progressRes || []).filter((p) => classIdSet.has(p.classId)));
+      setSelectedAssignment(null);
+      setSelectedFile(null);
+      setExternalUrlInput('');
+      setNotesInput('');
+      setSubmitFeedback(null);
+      setCancelTargetId(null);
+      setMeetingFilter('all');
+    } finally {
+      if (mountedRef.current && reqId === loadReqIdRef.current) {
+        setLoading(false);
+      }
+    }
+  }, [currentUser?.uid, role]);
+
+  useEffect(() => {
+    Promise.resolve().then(() => {
+      if (mountedRef.current) void loadMaterialsAndTasks();
+    });
+  }, [loadMaterialsAndTasks]);
 
   const getSubjectIcon = (iconType) => {
     switch (iconType) {
@@ -396,14 +398,15 @@ export default function MaterialsTab({ onSelectSubject }) {
                 Belum Ada Modul Mata Kuliah
               </p>
               <p className="text-xs text-slate-500 dark:text-slate-400 max-w-sm mx-auto">
-                Koleksi <code className="font-mono text-sky-600 dark:text-[#00e5ff]">classes</code>{' '}
-                masih kosong. Jalankan <code className="font-mono">node scripts/seed-firestore.mjs</code>.
+                {language === 'en'
+                  ? 'No courses available yet. Join or create a class from the Classes menu.'
+                  : 'Belum ada mata kuliah tersedia. Gabung atau buat kelas melalui menu Daftar Kelas.'}
               </p>
             </div>
           ) : (
             classes.map((subj) => {
               const Icon = getSubjectIcon(subj.iconType);
-              const totalMaterials = Math.max(1, Number(subj.meetingsCount || subj.materialsCount || 16));
+              const totalMaterials = Math.max(0, Number(subj.materialsCount || subj.meetingsCount || 0));
               const syncedCompleted = learningProgress.filter(
                 (p) => p.classId === subj.id && (p.materialCompleted || p.videoCompleted)
               ).length;
@@ -430,7 +433,8 @@ export default function MaterialsTab({ onSelectSubject }) {
                           {subj.code}
                         </span>
                         <span className="text-[10px] font-mono text-slate-500 dark:text-slate-400">
-                          {subj.day}, {subj.time}
+                          {[subj.day, subj.time].filter(Boolean).join(', ') ||
+                            (language === 'en' ? 'Schedule not set' : 'Jadwal belum diatur')}
                         </span>
                       </div>
 
@@ -438,7 +442,7 @@ export default function MaterialsTab({ onSelectSubject }) {
                         {subj.title}
                       </h3>
                       <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-0.5 font-sans">
-                        {totalMaterials} {language === 'en' ? 'modules' : 'materi modul'} •{' '}
+                        {totalMaterials} {language === 'en' ? 'materials' : 'materi modul'} •{' '}
                         {completed} {language === 'en' ? 'completed' : 'selesai'}
                       </p>
 
@@ -446,7 +450,7 @@ export default function MaterialsTab({ onSelectSubject }) {
                         <div
                           className="bg-[#00897b] h-full rounded-full transition-all"
                           style={{
-                            width: `${Math.min(100, (completed / totalMaterials) * 100)}%`,
+                            width: `${totalMaterials > 0 ? Math.min(100, (completed / totalMaterials) * 100) : 0}%`,
                           }}
                         />
                       </div>
@@ -521,11 +525,15 @@ export default function MaterialsTab({ onSelectSubject }) {
                   className="px-2.5 py-1 text-[11px] rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-[#121822] text-slate-800 dark:text-slate-200"
                 >
                   <option value="all">{language === 'en' ? 'All Meetings' : 'Semua Pertemuan'}</option>
-                  {Array.from({ length: 16 }, (_, idx) => idx + 1).map((num) => (
-                    <option key={num} value={String(num)}>
-                      Pertemuan {num}
-                    </option>
-                  ))}
+                  {Array.from(
+                    new Set(assignments.map((asg) => Number(asg.meetingNo || 1)))
+                  )
+                    .sort((a, b) => a - b)
+                    .map((num) => (
+                      <option key={num} value={String(num)}>
+                        Pertemuan {num}
+                      </option>
+                    ))}
                 </select>
               </div>
               {assignments

@@ -39,15 +39,82 @@ function initFirebaseAdmin() {
   });
 }
 
-// Kunci jawaban server-side default (fallback bila dokumen exam_keys/{classId} belum dibuat di Firestore)
-const SERVER_EXAM_KEYS = {
-  default: {
-    q1: 1,
-    q2: 2,
-    q3: 1,
-    q4: 1,
-  },
-};
+function resolveMeetingAnswerKey(keyData, meetingNo, examType) {
+  if (!keyData || typeof keyData !== 'object') return null;
+
+  const meetingBucket = keyData.meetings?.[String(meetingNo)];
+  if (meetingBucket && typeof meetingBucket === 'object') {
+    const meetingKey = meetingBucket[examType];
+    if (meetingKey && typeof meetingKey === 'object' && Object.keys(meetingKey).length > 0) {
+      return meetingKey;
+    }
+  }
+
+  const legacyMap = keyData?.[examType] || keyData?.answers || keyData?.questions;
+  if (legacyMap && typeof legacyMap === 'object' && Object.keys(legacyMap).length > 0) {
+    return legacyMap;
+  }
+
+  return null;
+}
+
+function sanitizeExamPayload(rawQuestions, rawAnswerKey) {
+  if (!Array.isArray(rawQuestions) || rawQuestions.length === 0) {
+    return { error: 'Minimal 1 soal evaluasi wajib diisi.', code: 'INVALID_QUESTIONS' };
+  }
+  if (rawQuestions.length > 50) {
+    return { error: 'Maksimal 50 soal per sesi evaluasi.', code: 'TOO_MANY_QUESTIONS' };
+  }
+  if (!rawAnswerKey || typeof rawAnswerKey !== 'object' || Array.isArray(rawAnswerKey)) {
+    return { error: 'Peta kunci jawaban (answerKey) wajib berupa objek valid.', code: 'INVALID_ANSWER_KEY' };
+  }
+
+  const sanitizedQuestions = [];
+  const sanitizedAnswerKey = {};
+  const seenIds = new Set();
+
+  for (let i = 0; i < rawQuestions.length; i += 1) {
+    const q = rawQuestions[i];
+    const qId = String(q?.id || `q${i + 1}`)
+      .trim()
+      .replace(/[^a-zA-Z0-9_-]/g, '');
+    const questionText = String(q?.question || '').trim();
+    const options = Array.isArray(q?.options)
+      ? q.options.map((opt) => String(opt || '').trim())
+      : [];
+
+    if (!qId || seenIds.has(qId)) {
+      return { error: `ID soal ke-${i + 1} tidak valid atau duplikat.`, code: 'INVALID_QUESTION_ID' };
+    }
+    if (!questionText) {
+      return { error: `Teks pertanyaan soal ke-${i + 1} tidak boleh kosong.`, code: 'EMPTY_QUESTION_TEXT' };
+    }
+    if (options.length < 2 || options.length > 6 || options.some((opt) => !opt)) {
+      return {
+        error: `Soal ke-${i + 1} harus memiliki 2 hingga 6 pilihan jawaban yang tidak kosong.`,
+        code: 'INVALID_OPTIONS',
+      };
+    }
+
+    const refIdx = rawAnswerKey[qId];
+    if (!Number.isInteger(refIdx) || refIdx < 0 || refIdx >= options.length) {
+      return {
+        error: `Kunci jawaban untuk soal ${qId} harus berupa indeks opsi valid (0–${options.length - 1}).`,
+        code: 'INVALID_ANSWER_INDEX',
+      };
+    }
+
+    seenIds.add(qId);
+    sanitizedQuestions.push({
+      id: qId,
+      question: questionText,
+      options,
+    });
+    sanitizedAnswerKey[qId] = refIdx;
+  }
+
+  return { sanitizedQuestions, sanitizedAnswerKey };
+}
 
 function sendJson(res, statusCode, payload) {
   res.statusCode = statusCode;
@@ -333,20 +400,26 @@ async function resolveCallerRole(db, decodedToken) {
 
 async function handleGrade(body, decodedToken) {
   const {
-    classId = 'subj_pbo',
+    classId = '',
     meetingNo = 1,
     examType = 'pretest',
     answers = {},
+    questions = [],
+    answerKey: incomingAnswerKey = null,
+    title = '',
     action = 'submit',
   } = body || {};
-  const safeClassId = String(classId || 'subj_pbo').trim().replace(/[^a-zA-Z0-9_-]/g, '');
+  const safeClassId = String(classId || '').trim().replace(/[^a-zA-Z0-9_-]/g, '');
   const safeExamType = examType === 'posttest' ? 'posttest' : 'pretest';
   const parsedMeetingNo = meetingNo === undefined || meetingNo === null || meetingNo === '' ? 1 : Number(meetingNo);
 
   if (!safeClassId) {
     return {
       status: 400,
-      payload: { error: 'classId tidak valid.', code: 'INVALID_CLASS_ID' },
+      payload: {
+        error: 'classId wajib diisi dengan ID kelas yang valid.',
+        code: 'CLASS_ID_REQUIRED',
+      },
     };
   }
 
@@ -360,6 +433,112 @@ async function handleGrade(body, decodedToken) {
   const safeMeetingNo = parsedMeetingNo;
   const db = getFirestore();
   const attemptId = `${safeClassId}_m${safeMeetingNo}_${safeExamType}_${decodedToken.uid}`;
+  const examDocId = `${safeClassId}_m${safeMeetingNo}_${safeExamType}`;
+
+  if (action === 'save_exam') {
+    const callerRole = await resolveCallerRole(db, decodedToken);
+    if (callerRole !== 'lecturer' && callerRole !== 'admin') {
+      return {
+        status: 403,
+        payload: {
+          error: 'AKSES DITOLAK: Hanya dosen atau admin yang dapat menyimpan soal evaluasi.',
+          code: 'FORBIDDEN_ROLE',
+        },
+      };
+    }
+
+    const classRef = db.collection('classes').doc(safeClassId);
+    const classSnap = await classRef.get();
+    if (!classSnap.exists) {
+      return {
+        status: 404,
+        payload: { error: 'Kelas tidak ditemukan di Firestore.', code: 'CLASS_NOT_FOUND' },
+      };
+    }
+
+    if (callerRole !== 'admin' && classSnap.data()?.lecturerId !== decodedToken.uid) {
+      return {
+        status: 403,
+        payload: {
+          error: 'AKSES DITOLAK: Hanya dosen pengampu kelas ini atau admin yang dapat mengelola soal evaluasi.',
+          code: 'FORBIDDEN_CLASS_OWNER',
+        },
+      };
+    }
+
+    const validated = sanitizeExamPayload(questions, incomingAnswerKey);
+    if (validated.error) {
+      return {
+        status: 400,
+        payload: { error: validated.error, code: validated.code },
+      };
+    }
+
+    const examRef = db.collection('exams').doc(examDocId);
+    const keyRef = db.collection('exam_keys').doc(safeClassId);
+    const cleanTitle =
+      String(title || '').trim() ||
+      `${safeExamType === 'posttest' ? 'Post-test' : 'Pretest'} Pertemuan ${safeMeetingNo}`;
+
+    await db.runTransaction(async (tx) => {
+      const keySnap = await tx.get(keyRef);
+      const existingData = keySnap.exists ? keySnap.data() || {} : {};
+      const existingMeetings =
+        existingData.meetings && typeof existingData.meetings === 'object' ? existingData.meetings : {};
+      const meetingKeyStr = String(safeMeetingNo);
+      const existingMeetingEntry =
+        existingMeetings[meetingKeyStr] && typeof existingMeetings[meetingKeyStr] === 'object'
+          ? existingMeetings[meetingKeyStr]
+          : {};
+
+      const nextMeetings = {
+        ...existingMeetings,
+        [meetingKeyStr]: {
+          ...existingMeetingEntry,
+          [safeExamType]: validated.sanitizedAnswerKey,
+        },
+      };
+
+      tx.set(
+        examRef,
+        {
+          examId: examDocId,
+          classId: safeClassId,
+          meetingNo: safeMeetingNo,
+          examType: safeExamType,
+          title: cleanTitle,
+          durationMinutes: 15,
+          questions: validated.sanitizedQuestions,
+          updatedBy: decodedToken.uid,
+          updatedAt: FieldValue.serverTimestamp(),
+        },
+        { merge: true }
+      );
+
+      tx.set(
+        keyRef,
+        {
+          classId: safeClassId,
+          meetings: nextMeetings,
+          updatedBy: decodedToken.uid,
+          updatedAt: FieldValue.serverTimestamp(),
+        },
+        { merge: true }
+      );
+    });
+
+    return {
+      status: 200,
+      payload: {
+        saved: true,
+        examId: examDocId,
+        classId: safeClassId,
+        meetingNo: safeMeetingNo,
+        examType: safeExamType,
+        questionsCount: validated.sanitizedQuestions.length,
+      },
+    };
+  }
 
   if (action === 'instructor_keys') {
     const callerRole = await resolveCallerRole(db, decodedToken);
@@ -373,15 +552,11 @@ async function handleGrade(body, decodedToken) {
       };
     }
 
-    let answerKey = SERVER_EXAM_KEYS[safeClassId] || SERVER_EXAM_KEYS.default;
+    let answerKey = null;
     try {
       const keyDoc = await db.collection('exam_keys').doc(safeClassId).get();
       if (keyDoc.exists) {
-        const keyData = keyDoc.data();
-        const keyMap = keyData?.[safeExamType] || keyData?.answers || keyData?.questions;
-        if (keyMap && typeof keyMap === 'object' && Object.keys(keyMap).length > 0) {
-          answerKey = keyMap;
-        }
+        answerKey = resolveMeetingAnswerKey(keyDoc.data(), safeMeetingNo, safeExamType);
       }
     } catch (err) {
       console.warn('[api/grade] instructor_keys lookup warning:', err.message);
@@ -393,7 +568,28 @@ async function handleGrade(body, decodedToken) {
         classId: safeClassId,
         meetingNo: safeMeetingNo,
         examType: safeExamType,
-        answerKey,
+        answerKey: answerKey || {},
+        isConfigured: Boolean(answerKey),
+      },
+    };
+  }
+
+  let answerKey = null;
+  try {
+    const keyDoc = await db.collection('exam_keys').doc(safeClassId).get();
+    if (keyDoc.exists) {
+      answerKey = resolveMeetingAnswerKey(keyDoc.data(), safeMeetingNo, safeExamType);
+    }
+  } catch (err) {
+    console.warn('[api/grade] exam_keys lookup warning:', err.message);
+  }
+
+  if (!answerKey) {
+    return {
+      status: 404,
+      payload: {
+        error: 'Evaluasi untuk pertemuan ini belum dikonfigurasi oleh dosen.',
+        code: 'EXAM_NOT_CONFIGURED',
       },
     };
   }
@@ -430,21 +626,6 @@ async function handleGrade(body, decodedToken) {
         examActive: true,
       },
     };
-  }
-
-  let answerKey = SERVER_EXAM_KEYS[safeClassId] || SERVER_EXAM_KEYS.default;
-
-  try {
-    const keyDoc = await db.collection('exam_keys').doc(safeClassId).get();
-    if (keyDoc.exists) {
-      const keyData = keyDoc.data();
-      const keyMap = keyData?.[safeExamType] || keyData?.answers || keyData?.questions;
-      if (keyMap && typeof keyMap === 'object' && Object.keys(keyMap).length > 0) {
-        answerKey = keyMap;
-      }
-    }
-  } catch (err) {
-    console.warn('[api/grade] exam_keys lookup warning:', err.message);
   }
 
   const questionIds = Object.keys(answerKey);

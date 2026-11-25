@@ -20,6 +20,11 @@ import { auth, db } from '../firebase';
 const demoAttendanceStore = new Map();
 const demoSessionStore = new Map();
 
+export function clearDemoAttendanceStore() {
+  demoAttendanceStore.clear();
+  demoSessionStore.clear();
+}
+
 function formatTimestampLabel(date = new Date()) {
   const dateFormatted = date.toLocaleDateString('id-ID', {
     day: 'numeric',
@@ -198,30 +203,69 @@ export async function getClassAttendance(classId, uidOverride = null) {
   }
 }
 
-export async function getSemesterAttendanceSummary(uidOverride = null) {
+export async function getSemesterAttendanceSummary(uidOverride = null, activeClasses = null) {
   const uid = uidOverride || auth?.currentUser?.uid;
+  const hasScopedClasses = Array.isArray(activeClasses);
+  const activeClassIds = hasScopedClasses
+    ? Array.from(
+        new Set(
+          activeClasses
+            .map((item) => (typeof item === 'string' ? item : item?.id || ''))
+            .filter(Boolean)
+        )
+      )
+    : [];
+  const activeClassIdSet = hasScopedClasses ? new Set(activeClassIds) : null;
+  const totalMeetings = hasScopedClasses
+    ? activeClasses.reduce(
+        (sum, item) =>
+          typeof item === 'object' && item !== null
+            ? sum + Number(item.meetingsCount ?? item.meetings?.length ?? 0)
+            : sum,
+        0
+      )
+    : 0;
+
+  if (hasScopedClasses && activeClassIds.length === 0) {
+    return { attended: 0, totalMeetings: 0, progress: 0 };
+  }
+
   if (!uid || !db) {
     let totalAttended = 0;
-    for (const record of demoAttendanceStore.values()) {
+    for (const [classIdKey, record] of demoAttendanceStore.entries()) {
+      if (activeClassIdSet && !activeClassIdSet.has(classIdKey)) continue;
       totalAttended += record.attendedOrders.length;
     }
+    const progress =
+      totalMeetings > 0
+        ? Math.min(100, Math.round((totalAttended / totalMeetings) * 100))
+        : 0;
     return {
       attended: totalAttended,
-      progress: Math.min(100, totalAttended >= 16 ? 100 : totalAttended * 6),
+      totalMeetings,
+      progress,
     };
   }
 
   try {
     const q = query(collection(db, 'attendance'), where('uid', '==', uid));
     const snap = await getDocs(q);
-    const attended = snap.size;
+    const attended = snap.docs.filter((docSnap) => {
+      if (!activeClassIdSet) return true;
+      return activeClassIdSet.has(docSnap.data()?.classId);
+    }).length;
+    const progress =
+      totalMeetings > 0
+        ? Math.min(100, Math.round((attended / totalMeetings) * 100))
+        : 0;
     return {
       attended,
-      progress: Math.min(100, attended >= 16 ? 100 : attended * 6),
+      totalMeetings,
+      progress,
     };
   } catch (err) {
     console.warn('[attendanceService] Gagal membaca ringkasan presensi semester:', err.message);
-    return { attended: 0, progress: 0 };
+    return { attended: 0, totalMeetings, progress: 0 };
   }
 }
 

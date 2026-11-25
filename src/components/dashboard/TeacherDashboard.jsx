@@ -1,10 +1,10 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import { useAuth } from '../../context/useAuth';
 import { useLanguage } from '../../context/useLanguage';
 import { ROLES } from '../../constants/roles';
 import {
-  fetchClasses,
-  fetchAllSubmissionsForGrading,
+  fetchClassesForUser,
+  fetchSubmissionsForLecturerClasses,
   gradeSubmissionInFirestore,
   createAssignmentInFirestore,
 } from '../../services/lmsFirestoreService';
@@ -29,18 +29,6 @@ import {
   X,
 } from 'lucide-react';
 
-const DEMO_SUBMISSIONS_FALLBACK = [
-  {
-    id: 'demo_sub_01',
-    studentName: 'Mahasiswa Demo (Kelompok 01)',
-    assignment: 'Laporan Desain Pola & Clean Architecture',
-    class: 'Pemrograman Berorientasi Objek',
-    submittedAt: 'Hari ini, 07:15 WIB (Demo)',
-    fileUrl: 'https://example.com/sample_report.pdf',
-    status: 'pending',
-  },
-];
-
 export default function TeacherDashboard({ onSelectClass, onNavigateView, onOpenCreateClass }) {
   const { userProfile, currentUser, role } = useAuth();
   const { t, language } = useLanguage();
@@ -48,6 +36,7 @@ export default function TeacherDashboard({ onSelectClass, onNavigateView, onOpen
   const [classes, setClasses] = useState([]);
   const [submissionsQueue, setSubmissionsQueue] = useState([]);
   const [loadingData, setLoadingData] = useState(true);
+  const [renderNowMs, setRenderNowMs] = useState(() => Date.now());
   const [selectedSubmission, setSelectedSubmission] = useState(null);
   const [gradeInput, setGradeInput] = useState('');
   const [feedbackInput, setFeedbackInput] = useState('');
@@ -69,10 +58,33 @@ export default function TeacherDashboard({ onSelectClass, onNavigateView, onOpen
   const [taskNote, setTaskNote] = useState('');
   const [creatingTask, setCreatingTask] = useState(false);
 
-  const loadDashboardData = async () => {
+  const loadReqIdRef = useRef(0);
+  const mountedRef = useRef(true);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
+
+  const loadDashboardData = useCallback(async () => {
+    const reqId = ++loadReqIdRef.current;
     setLoadingData(true);
     try {
-      const classRes = await fetchClasses();
+      if (!currentUser?.uid) {
+        if (!mountedRef.current || reqId !== loadReqIdRef.current) return;
+        setClasses([]);
+        setSubmissionsQueue([]);
+        setAttClassId('');
+        setTaskClassId('');
+        setSelectedSubmission(null);
+        setStatusBanner(null);
+        return;
+      }
+
+      const classRes = await fetchClassesForUser({ uid: currentUser.uid, role });
+      if (!mountedRef.current || reqId !== loadReqIdRef.current) return;
       const loadedClasses = classRes.classes || [];
       setClasses(loadedClasses);
       setAttClassId((prev) =>
@@ -82,21 +94,23 @@ export default function TeacherDashboard({ onSelectClass, onNavigateView, onOpen
         prev && loadedClasses.some((c) => c.id === prev) ? prev : loadedClasses[0]?.id || ''
       );
 
-      if (currentUser) {
-        const subs = await fetchAllSubmissionsForGrading();
-        setSubmissionsQueue(subs);
-      } else {
-        setSubmissionsQueue(DEMO_SUBMISSIONS_FALLBACK);
-      }
+      const ownedClassIds = loadedClasses.map((c) => c.id).filter(Boolean);
+      const subs = await fetchSubmissionsForLecturerClasses(ownedClassIds);
+      if (!mountedRef.current || reqId !== loadReqIdRef.current) return;
+      setSubmissionsQueue(subs);
+      setRenderNowMs(Date.now());
     } finally {
-      setLoadingData(false);
+      if (mountedRef.current && reqId === loadReqIdRef.current) {
+        setLoadingData(false);
+      }
     }
-  };
+  }, [currentUser?.uid, role]);
 
   useEffect(() => {
-    void loadDashboardData();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [currentUser?.uid]);
+    Promise.resolve().then(() => {
+      if (mountedRef.current) void loadDashboardData();
+    });
+  }, [loadDashboardData]);
 
   useEffect(() => {
     if (!selectedSubmission) return;
@@ -110,7 +124,7 @@ export default function TeacherDashboard({ onSelectClass, onNavigateView, onOpen
   const selectedAttClass = classes.find((c) => c.id === attClassId) || null;
   const activeAttSession = selectedAttClass?.activeAttendanceSession || null;
   const isSessionActive = Boolean(
-    activeAttSession?.isOpen && (!activeAttSession.expiresAt || activeAttSession.expiresAt > Date.now())
+    activeAttSession?.isOpen && (!activeAttSession.expiresAt || activeAttSession.expiresAt > renderNowMs)
   );
 
   const handleOpenAttendanceSession = async (e) => {
@@ -466,7 +480,7 @@ export default function TeacherDashboard({ onSelectClass, onNavigateView, onOpen
                 <input
                   type="text"
                   maxLength={24}
-                  placeholder={`Contoh: ${selectedAttClass?.code || 'PBO101'}-M0${attMeetingNo}-8821`}
+                  placeholder={`Contoh: ${selectedAttClass?.code || 'CLS101'}-M0${attMeetingNo}-8821`}
                   value={attCustomCode}
                   onChange={(e) => setAttCustomCode(e.target.value.toUpperCase())}
                   className="w-full px-3 py-2 text-xs font-mono border border-slate-300 dark:border-slate-700 bg-white dark:bg-[#0b0f17] rounded-lg text-slate-900 dark:text-slate-100 focus:outline-none focus:border-indigo-500"

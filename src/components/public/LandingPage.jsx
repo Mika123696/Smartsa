@@ -7,7 +7,6 @@ import {
 } from 'lucide-react';
 import { useLanguage } from '../../context/useLanguage';
 import { fetchPublicClasses } from '../../services/lmsFirestoreService';
-import { DEMO_CLASSES } from '../../services/mockData';
 import SafeImage from '../common/SafeImage';
 
 export default function LandingPage({
@@ -17,16 +16,19 @@ export default function LandingPage({
   onSelectClass,
 }) {
   const { t, language } = useLanguage();
-  const [featuredClasses, setFeaturedClasses] = useState(DEMO_CLASSES.slice(0, 3));
+  const [featuredClasses, setFeaturedClasses] = useState([]);
+  const [loadingClasses, setLoadingClasses] = useState(true);
 
   useEffect(() => {
     let mounted = true;
-    fetchPublicClasses().then((res) => {
-      if (!mounted) return;
-      if (res?.classes?.length) {
-        setFeaturedClasses(res.classes.slice(0, 3));
-      }
-    });
+    fetchPublicClasses()
+      .then((res) => {
+        if (!mounted) return;
+        setFeaturedClasses((res?.classes || []).slice(0, 3));
+      })
+      .finally(() => {
+        if (mounted) setLoadingClasses(false);
+      });
     return () => {
       mounted = false;
     };
@@ -154,48 +156,67 @@ export default function LandingPage({
           </button>
         </div>
 
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-          {featuredClasses.map((cls) => (
-            <button
-              key={cls.id}
-              type="button"
-              onClick={() => onSelectClass(cls)}
-              className="text-left bg-white dark:bg-[#121822] border border-slate-200 dark:border-[#232f42] rounded-2xl overflow-hidden shadow-xs hover:shadow-md transition cursor-pointer flex flex-col justify-between group"
-            >
-              <div className="relative h-40 w-full overflow-hidden">
-                <SafeImage
-                  src={cls.coverImage}
-                  alt={cls.name || cls.title}
-                  fallbackLabel={cls.code || cls.name || cls.title}
-                  variant="cover"
-                  className="w-full h-full object-cover group-hover:scale-105 transition duration-300"
-                />
-                <span className="absolute top-3 right-3 bg-slate-900/80 backdrop-blur-xs text-white text-xs font-mono font-bold px-2 py-0.5 rounded-md">
-                  {cls.code}
-                </span>
-              </div>
-              <div className="p-5 flex-1 flex flex-col justify-between w-full">
-                <div>
-                  <span className="text-[10px] font-bold text-blue-600 dark:text-amber-400 uppercase tracking-wider">
-                    {cls.category}
+        {loadingClasses ? (
+          <div className="text-center py-12 text-xs font-mono text-slate-500 dark:text-slate-400">
+            {language === 'en' ? 'Loading public classes...' : 'Memuat kelas publik...'}
+          </div>
+        ) : featuredClasses.length === 0 ? (
+          <div className="text-center py-12 bg-white dark:bg-[#121822] rounded-2xl border border-dashed border-slate-200 dark:border-[#232f42] space-y-1.5">
+            <p className="text-sm font-bold text-slate-800 dark:text-slate-200">
+              {language === 'en'
+                ? 'No Public Courses Available Yet'
+                : 'Belum Ada Kelas Publik Tersedia'}
+            </p>
+            <p className="text-xs text-slate-500 dark:text-slate-400">
+              {language === 'en'
+                ? 'Public courses published by lecturers will appear here.'
+                : 'Daftar kelas publik akan muncul setelah dosen menerbitkan mata kuliah.'}
+            </p>
+          </div>
+        ) : (
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+            {featuredClasses.map((cls) => (
+              <button
+                key={cls.id}
+                type="button"
+                onClick={() => onSelectClass(cls)}
+                className="text-left bg-white dark:bg-[#121822] border border-slate-200 dark:border-[#232f42] rounded-2xl overflow-hidden shadow-xs hover:shadow-md transition cursor-pointer flex flex-col justify-between group"
+              >
+                <div className="relative h-40 w-full overflow-hidden">
+                  <SafeImage
+                    src={cls.coverImage}
+                    alt={cls.name || cls.title}
+                    fallbackLabel={cls.code || cls.name || cls.title}
+                    variant="cover"
+                    className="w-full h-full object-cover group-hover:scale-105 transition duration-300"
+                  />
+                  <span className="absolute top-3 right-3 bg-slate-900/80 backdrop-blur-xs text-white text-xs font-mono font-bold px-2 py-0.5 rounded-md">
+                    {cls.code}
                   </span>
-                  <h3 className="text-base font-bold text-slate-900 dark:text-slate-100 mt-1 line-clamp-1 group-hover:text-blue-600 dark:group-hover:text-amber-400 transition">
-                    {cls.name || cls.title}
-                  </h3>
-                  <p className="text-xs text-slate-500 dark:text-slate-400 mt-1 line-clamp-2">
-                    {cls.description}
-                  </p>
                 </div>
-                <div className="mt-4 pt-3 border-t border-slate-100 dark:border-[#232f42] flex items-center justify-between text-xs text-slate-600 dark:text-slate-400">
-                  <span className="truncate">{cls.instructor || cls.lecturer}</span>
-                  <span className="font-semibold text-blue-600 dark:text-amber-400 shrink-0">
-                    {t('public_open_syllabus')} &rarr;
-                  </span>
+                <div className="p-5 flex-1 flex flex-col justify-between w-full">
+                  <div>
+                    <span className="text-[10px] font-bold text-blue-600 dark:text-amber-400 uppercase tracking-wider">
+                      {cls.category}
+                    </span>
+                    <h3 className="text-base font-bold text-slate-900 dark:text-slate-100 mt-1 line-clamp-1 group-hover:text-blue-600 dark:group-hover:text-amber-400 transition">
+                      {cls.name || cls.title}
+                    </h3>
+                    <p className="text-xs text-slate-500 dark:text-slate-400 mt-1 line-clamp-2">
+                      {cls.description}
+                    </p>
+                  </div>
+                  <div className="mt-4 pt-3 border-t border-slate-100 dark:border-[#232f42] flex items-center justify-between text-xs text-slate-600 dark:text-slate-400">
+                    <span className="truncate">{cls.instructor || cls.lecturer}</span>
+                    <span className="font-semibold text-blue-600 dark:text-amber-400 shrink-0">
+                      {t('public_open_syllabus')} &rarr;
+                    </span>
+                  </div>
                 </div>
-              </div>
-            </button>
-          ))}
-        </div>
+              </button>
+            ))}
+          </div>
+        )}
       </section>
 
       {/* How It Works */}
