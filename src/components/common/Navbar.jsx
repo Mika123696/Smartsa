@@ -3,8 +3,8 @@ import { useAuth } from '../../context/useAuth';
 import { useTheme } from '../../context/useTheme';
 import { useLanguage } from '../../context/useLanguage';
 import { ROLES, ROLE_BADGE_COLORS } from '../../constants/roles';
+import BrandLogo from './BrandLogo';
 import {
-  GraduationCap,
   BookOpen,
   LogIn,
   LogOut,
@@ -34,17 +34,15 @@ export default function Navbar({ activeTab, setActiveTab, onOpenAuth }) {
           {/* Brand Logo */}
           <button
             type="button"
-            className="flex items-center gap-3 text-left cursor-pointer"
+            className="flex items-center gap-2.5 text-left cursor-pointer"
             onClick={() => handleNav('landing')}
           >
-            <div className="w-10 h-10 rounded-xl bg-blue-600 flex items-center justify-center text-white shadow-lg shadow-blue-500/30 shrink-0">
-              <GraduationCap className="w-6 h-6" />
-            </div>
+            <BrandLogo size="md" />
             <div>
               <span className="text-xl font-bold tracking-tight text-slate-900 dark:text-white block leading-none">
                 Smartsa
               </span>
-              <span className="text-[11px] text-blue-600 dark:text-blue-400 block font-medium mt-0.5">
+              <span className="text-[11px] text-amber-600 dark:text-[#f59e0b] block font-medium mt-0.5">
                 Learning Management System
               </span>
             </div>

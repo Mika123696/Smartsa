@@ -1,7 +1,7 @@
 import { useLanguage } from '../../context/useLanguage';
 import { useAuth } from '../../context/useAuth';
+import BrandLogo from '../common/BrandLogo';
 import {
-  GraduationCap,
   ShieldCheck,
   Server,
   Database,
@@ -18,8 +18,8 @@ export default function AboutPage({ onGoToDashboard, onOpenAuth }) {
     <div className="max-w-5xl mx-auto px-4 sm:px-6 lg:px-8 py-12 space-y-12">
       {/* Platform Title */}
       <div className="text-center space-y-3">
-        <div className="w-12 h-12 rounded-2xl bg-blue-600 text-white flex items-center justify-center mx-auto shadow-lg shadow-blue-500/30">
-          <GraduationCap className="w-7 h-7" />
+        <div className="w-14 h-14 rounded-2xl bg-slate-900 dark:bg-[#161c24] border border-amber-500/30 flex items-center justify-center mx-auto shadow-lg shadow-amber-500/15">
+          <BrandLogo size="md" />
         </div>
         <h1 className="text-3xl font-extrabold text-slate-900 dark:text-slate-100">
           {t('public_about_title')}

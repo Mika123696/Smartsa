@@ -23,6 +23,7 @@ import MobileHeader from './components/common/MobileHeader';
 import BottomNav from './components/common/BottomNav';
 import FloatingActionButton from './components/common/FloatingActionButton';
 import AuthModal from './components/common/AuthModal';
+import BrandLogo from './components/common/BrandLogo';
 import { AccessibleDialog } from './components/common/AccessibleDialog';
 
 // Lightweight Public & LMS Views
@@ -699,9 +700,12 @@ function MainApp() {
 
           <footer className="border-t border-slate-200 dark:border-[#232b38] bg-white dark:bg-[#12161f] py-6 px-4 sm:px-6 lg:px-8 text-xs text-slate-500 dark:text-slate-400">
             <div className="max-w-7xl mx-auto flex flex-col sm:flex-row items-center justify-between gap-2">
-              <span className="font-semibold text-slate-700 dark:text-slate-200">
-                Smartsa LMS — Learning Management System
-              </span>
+              <div className="flex items-center gap-2">
+                <BrandLogo size="xs" />
+                <span className="font-semibold text-slate-700 dark:text-slate-200">
+                  Smartsa LMS — Learning Management System
+                </span>
+              </div>
               <span>
                 {language === 'en'
                   ? 'Scaffolded Learning, Exam-Safe AI & Cloud Firestore'

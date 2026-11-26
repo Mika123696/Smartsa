@@ -119,8 +119,12 @@ import AttendanceQrModal from '../src/components/common/AttendanceQrModal';
 import QrScannerPanel from '../src/components/common/QrScannerPanel';
 import App from '../src/App';
 import SafeImage from '../src/components/common/SafeImage';
+import BrandLogo from '../src/components/common/BrandLogo';
 import Navbar from '../src/components/common/Navbar';
 import Sidebar from '../src/components/common/Sidebar';
+import MobileHeader from '../src/components/common/MobileHeader';
+import AuthModal from '../src/components/common/AuthModal';
+import AboutPage from '../src/components/public/AboutPage';
 import { ThemeProvider } from '../src/context/ThemeContext';
 import { AuthProvider } from '../src/context/AuthContext';
 import { LanguageProvider } from '../src/context/LanguageContext';
@@ -4733,5 +4737,93 @@ describe('Frontend Security & UI Components', () => {
       expect(mockHtml5QrcodeClear).toHaveBeenCalled();
     });
     unmountSchedule();
+  });
+
+  it('renders unified yellow-orange geometric BrandLogo across Navbar, Sidebar, MobileHeader, AboutPage, and AuthModal', async () => {
+    const assertHasBrandSvg = (container) => {
+      const svgs = Array.from(container.querySelectorAll('svg[viewBox="0 0 32 36"]'));
+      expect(svgs.length).toBeGreaterThanOrEqual(1);
+      const hasPaths = svgs.some(
+        (svg) =>
+          svg.querySelector('path[fill="#f59e0b"]') !== null &&
+          svg.querySelector('path[fill="#fbbf24"]') !== null
+      );
+      expect(hasPaths).toBe(true);
+    };
+
+    // 1. Standalone BrandLogo props
+    const { container: logoContainer, unmount: unmountLogo } = render(
+      <BrandLogo size="lg" alt="Logo Smartsa" glow={false} />
+    );
+    const standaloneSvg = logoContainer.querySelector('svg[viewBox="0 0 32 36"]');
+    expect(standaloneSvg).toHaveAttribute('role', 'img');
+    expect(standaloneSvg).toHaveAttribute('aria-label', 'Logo Smartsa');
+    expect(standaloneSvg.getAttribute('class')).toContain('w-10');
+    expect(standaloneSvg.getAttribute('class')).not.toContain('drop-shadow');
+    assertHasBrandSvg(logoContainer);
+    unmountLogo();
+
+    // 2. Public Navbar, AboutPage, AuthModal (guest state)
+    mockAuthObj.currentUser = null;
+    mockOnAuthStateChanged.mockImplementation((_auth, cb) => {
+      void cb(null);
+      return () => {};
+    });
+
+    const { container: navContainer, unmount: unmountNav } = render(
+      <ThemeProvider>
+        <LanguageProvider>
+          <AuthProvider>
+            <Navbar activeTab="landing" setActiveTab={vi.fn()} onOpenAuth={vi.fn()} />
+            <AboutPage onGoToDashboard={vi.fn()} onOpenAuth={vi.fn()} />
+            <AuthModal isOpen={true} onClose={vi.fn()} />
+          </AuthProvider>
+        </LanguageProvider>
+      </ThemeProvider>
+    );
+    await waitFor(() => {
+      expect(navContainer.querySelectorAll('svg[viewBox="0 0 32 36"]').length).toBe(3);
+    });
+    expect(navContainer.querySelector('button svg.lucide-graduation-cap')).toBeNull();
+    unmountNav();
+
+    // 3. Authenticated Sidebar (desktop) & MobileHeader
+    const authUser = {
+      uid: 'uid_brand_check',
+      email: 'brand@smartsa.edu',
+      displayName: 'Dosen Brand',
+      emailVerified: true,
+      getIdToken: vi.fn(async () => 'token-brand'),
+    };
+    mockAuthObj.currentUser = authUser;
+    mockOnAuthStateChanged.mockImplementation((_auth, cb) => {
+      void cb(authUser);
+      return () => {};
+    });
+    mockGetDoc.mockImplementation(async (ref) => {
+      if (ref?.path === 'users/uid_brand_check') {
+        return {
+          exists: () => true,
+          data: () => ({ uid: 'uid_brand_check', role: 'student', displayName: 'Mahasiswa Brand' }),
+        };
+      }
+      return { exists: () => false };
+    });
+
+    const { container: shellContainer, unmount: unmountShell } = render(
+      <ThemeProvider>
+        <LanguageProvider>
+          <AuthProvider>
+            <Sidebar currentView="dashboard" setCurrentView={vi.fn()} />
+            <MobileHeader />
+          </AuthProvider>
+        </LanguageProvider>
+      </ThemeProvider>
+    );
+    await waitFor(() => {
+      expect(shellContainer.querySelectorAll('svg[viewBox="0 0 32 36"]').length).toBe(2);
+    });
+    expect(shellContainer.querySelector('aside svg.lucide-graduation-cap')).toBeNull();
+    unmountShell();
   });
 });

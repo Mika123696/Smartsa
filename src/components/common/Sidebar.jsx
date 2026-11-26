@@ -2,6 +2,7 @@ import { useAuth } from '../../context/useAuth';
 import { useLanguage } from '../../context/useLanguage';
 import { ROLES, ROLE_BADGE_COLORS } from '../../constants/roles';
 import SafeImage from './SafeImage';
+import BrandLogo from './BrandLogo';
 import {
   LayoutDashboard,
   BookOpen,
@@ -14,7 +15,6 @@ import {
   HelpCircle,
   Globe,
   ShieldCheck,
-  GraduationCap,
 } from 'lucide-react';
 
 export default function Sidebar({ currentView, setCurrentView }) {
@@ -74,9 +74,7 @@ export default function Sidebar({ currentView, setCurrentView }) {
       <div className="flex flex-col min-h-0 flex-1">
         {/* Brand Header */}
         <div className="h-16 px-4 border-b border-slate-200 dark:border-[#232b38] flex items-center gap-3 shrink-0">
-          <div className="w-9 h-9 rounded-xl bg-[#f59e0b] text-black flex items-center justify-center shadow-sm shrink-0">
-            <GraduationCap className="w-5 h-5" />
-          </div>
+          <BrandLogo size="md" />
           <div className="min-w-0">
             <span className="text-sm font-black tracking-tight text-slate-900 dark:text-white block leading-none">
               SMARTSA <span className="text-[#f59e0b]">LMS</span>

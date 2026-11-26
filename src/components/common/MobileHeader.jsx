@@ -3,6 +3,7 @@ import { useAuth } from '../../context/useAuth';
 import { useLanguage } from '../../context/useLanguage';
 import { useTheme } from '../../context/useTheme';
 import { ROLES } from '../../constants/roles';
+import BrandLogo from './BrandLogo';
 import {
   Bell,
   CheckCircle2,
@@ -48,15 +49,8 @@ export default function MobileHeader() {
 
         {/* Brand Logo & Typography: Smartsa */}
         <div className="pl-3 flex items-start gap-2.5 min-w-0">
-          <div className="w-7 h-8 pt-0.5 shrink-0">
-            <svg
-              viewBox="0 0 32 36"
-              fill="none"
-              className="w-full h-full drop-shadow-[0_0_6px_rgba(245,158,11,0.4)]"
-            >
-              <path d="M4 4L22 4L14 16L4 16Z" fill="#f59e0b" />
-              <path d="M10 18L28 18L18 32L8 32Z" fill="#fbbf24" />
-            </svg>
+          <div className="pt-0.5 shrink-0">
+            <BrandLogo size="sm" />
           </div>
 
           <div className="min-w-0">

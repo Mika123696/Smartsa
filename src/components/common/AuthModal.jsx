@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react';
 import { useAuth } from '../../context/useAuth';
 import { useLanguage } from '../../context/useLanguage';
 import { ROLES } from '../../constants/roles';
+import BrandLogo from './BrandLogo';
 import {
   X,
   Mail,
@@ -210,7 +211,8 @@ export default function AuthModal({ isOpen, onClose }) {
             <X className="w-4 h-4" />
           </button>
 
-          <div className="flex items-center gap-1.5 text-[10px] font-mono text-amber-600 dark:text-[#f59e0b] uppercase tracking-wider mb-1">
+          <div className="flex items-center gap-2 text-[10px] font-mono text-amber-600 dark:text-[#f59e0b] uppercase tracking-wider mb-1.5">
+            <BrandLogo size="xs" />
             <ShieldCheck className="w-3.5 h-3.5" />
             <span>{t('auth_tag')}</span>
           </div>
