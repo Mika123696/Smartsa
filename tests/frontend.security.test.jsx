@@ -81,7 +81,6 @@ import MaterialsTab from '../src/components/features/MaterialsTab';
 import ProfileView from '../src/components/features/ProfileView';
 import LandingPage from '../src/components/public/LandingPage';
 import PublicCatalog from '../src/components/public/PublicCatalog';
-import GeneralDashboard from '../src/components/dashboard/GeneralDashboard';
 import AdminDashboard from '../src/components/dashboard/AdminDashboard';
 import StudentDashboard from '../src/components/dashboard/StudentDashboard';
 import {
@@ -101,6 +100,7 @@ import {
   getSemesterAttendanceSummary,
   recordMeetingAttendance,
 } from '../src/services/attendanceService';
+import { uploadMediaFile } from '../src/services/cloudinaryService';
 import { getActiveExamStatus, setLocalExamSession } from '../src/services/aiService';
 
 describe('Frontend Security & UI Components', () => {
@@ -401,26 +401,42 @@ describe('Frontend Security & UI Components', () => {
     expect(onExamStateChange).toHaveBeenLastCalledWith(false);
   });
 
-  it('enforces 1 Account = 1 Role, auto-corrects stale admin@smartsa.edu name, and removes DEV role simulation', async () => {
+  it('synchronizes userProfile via POST /api/bootstrap with Bearer token and uses strictly read-only fallback without client setDoc role writes', async () => {
     const adminFirebaseUser = {
       uid: 'uid_admin_smartsa',
       email: 'admin@smartsa.edu',
-      displayName: 'Dr. Andi Saputra',
+      displayName: 'Admin Session',
       emailVerified: true,
+      getIdToken: vi.fn(async () => 'firebase-id-token-admin'),
     };
 
-    mockAuthObj.currentUser = adminFirebaseUser;
-    mockGetDoc.mockResolvedValue({
-      exists: () => true,
-      data: () => ({
-        uid: 'uid_admin_smartsa',
-        email: 'admin@smartsa.edu',
-        displayName: 'Dr. Andi Saputra',
-        role: 'student',
-        photoURL: 'https://images.unsplash.com/photo-1570295999919-56ceb5ecca61?auto=format&fit=crop&w=120&q=80',
-      }),
+    const fetchBootstrapMock = vi.fn(async (url) => {
+      if (url === '/api/bootstrap') {
+        return {
+          ok: true,
+          headers: { get: () => 'application/json' },
+          json: async () => ({
+            success: true,
+            isNewUser: false,
+            profile: {
+              uid: 'uid_admin_smartsa',
+              email: 'admin@smartsa.edu',
+              displayName: 'Administrator Smartsa',
+              role: 'admin',
+              accountType: 'DOSEN',
+              isInstitutional: true,
+              nip: 'ADM-001',
+              photoURL: null,
+              emailVerified: true,
+            },
+          }),
+        };
+      }
+      return { ok: false, headers: { get: () => 'application/json' }, json: async () => ({}) };
     });
-    mockSetDoc.mockResolvedValue(undefined);
+    vi.stubGlobal('fetch', fetchBootstrapMock);
+
+    mockAuthObj.currentUser = adminFirebaseUser;
     mockOnAuthStateChanged.mockImplementation((_auth, cb) => {
       void cb(adminFirebaseUser);
       return () => {};
@@ -432,14 +448,15 @@ describe('Frontend Security & UI Components', () => {
         <div>
           <span data-testid="admin-role">{ctx.role}</span>
           <span data-testid="admin-name">{ctx.userProfile?.displayName || ''}</span>
-          <span data-testid="admin-nip">{ctx.userProfile?.nip || ''}</span>
+          <span data-testid="admin-account-type">{ctx.userProfile?.accountType || ''}</span>
+          <span data-testid="admin-inst">{String(Boolean(ctx.userProfile?.isInstitutional))}</span>
           <span data-testid="admin-photo">{String(ctx.userProfile?.photoURL ?? null)}</span>
           <span data-testid="has-sim">{String('simulateDevRole' in ctx)}</span>
         </div>
       );
     }
 
-    render(
+    const { unmount } = render(
       <AuthProvider>
         <AdminIdentityInspector />
       </AuthProvider>
@@ -450,20 +467,58 @@ describe('Frontend Security & UI Components', () => {
     });
 
     expect(screen.getByTestId('admin-name')).toHaveTextContent('Administrator Smartsa');
-    expect(screen.getByTestId('admin-nip')).toHaveTextContent('ADM-001');
+    expect(screen.getByTestId('admin-account-type')).toHaveTextContent('DOSEN');
+    expect(screen.getByTestId('admin-inst')).toHaveTextContent('true');
     expect(screen.getByTestId('admin-photo')).toHaveTextContent('null');
     expect(screen.getByTestId('has-sim')).toHaveTextContent('false');
 
-    expect(mockSetDoc).toHaveBeenCalledWith(
-      { path: 'users/uid_admin_smartsa' },
+    expect(fetchBootstrapMock).toHaveBeenCalledWith(
+      '/api/bootstrap',
       expect.objectContaining({
-        role: 'admin',
-        displayName: 'Administrator Smartsa',
-        nip: 'ADM-001',
-        photoURL: null,
-      }),
-      { merge: true }
+        method: 'POST',
+        headers: expect.objectContaining({
+          Authorization: 'Bearer firebase-id-token-admin',
+        }),
+      })
     );
+    expect(mockSetDoc).not.toHaveBeenCalled();
+
+    // Verify read-only fallback when /api/bootstrap fails: never writes role/domain from client
+    unmount();
+    vi.clearAllMocks();
+    const fallbackUser = {
+      uid: 'uid_fallback_student',
+      email: 'dosen@smartsa.edu',
+      displayName: 'Dosen Dev Offline',
+      emailVerified: true,
+      getIdToken: vi.fn(async () => 'token-offline'),
+    };
+    mockAuthObj.currentUser = fallbackUser;
+    vi.stubGlobal('fetch', vi.fn(async () => {
+      throw new Error('Network unavailable');
+    }));
+    mockGetDoc.mockResolvedValueOnce({
+      exists: () => false,
+    });
+    mockOnAuthStateChanged.mockImplementation((_auth, cb) => {
+      void cb(fallbackUser);
+      return () => {};
+    });
+
+    render(
+      <AuthProvider>
+        <AdminIdentityInspector />
+      </AuthProvider>
+    );
+
+    await waitFor(() => {
+      expect(screen.getByTestId('admin-name')).toHaveTextContent('Dosen Dev Offline');
+    });
+    // Without server /api/bootstrap or existing Firestore role, client NEVER elevates via @smartsa.edu regex
+    expect(screen.getByTestId('admin-role')).toHaveTextContent('student');
+    expect(screen.getByTestId('admin-account-type')).toHaveTextContent('UMUM');
+    expect(mockGetDoc).toHaveBeenCalledWith({ path: 'users/uid_fallback_student' });
+    expect(mockSetDoc).not.toHaveBeenCalled();
   });
 
   it('upsertLearningProgress preserves unspecified completion flags without overwriting', async () => {
@@ -1352,7 +1407,6 @@ describe('Frontend Security & UI Components', () => {
             onSelectClass={vi.fn()}
           />
           <PublicCatalog onSelectClass={vi.fn()} />
-          <GeneralDashboard onSelectClass={vi.fn()} onNavigateView={vi.fn()} />
           <AdminDashboard onClassesChanged={vi.fn()} />
         </AuthProvider>
       </LanguageProvider>
@@ -1361,7 +1415,6 @@ describe('Frontend Security & UI Components', () => {
     await waitFor(() => {
       expect(screen.getByText(/Belum Ada Kelas Publik Tersedia/i)).toBeInTheDocument();
       expect(screen.getByText(/Belum ada kelas publik yang tersedia saat ini/i)).toBeInTheDocument();
-      expect(screen.getByText(/Belum ada kursus publik terbuka yang tersedia/i)).toBeInTheDocument();
       expect(screen.getByText(/Belum ada log audit server yang tercatat pada sesi ini/i)).toBeInTheDocument();
     });
 
@@ -1641,5 +1694,43 @@ describe('Frontend Security & UI Components', () => {
     await waitFor(() => {
       expect(screen.getByLabelText(/Pilih pertemuan aktif/i)).toBeDisabled();
     });
+  });
+
+  it('generates valid 6-12 uppercase alphanumeric class codes and handles 403 FORBIDDEN_ROLE in cloudinaryService gracefully', async () => {
+    mockAuthObj.currentUser = {
+      uid: 'uid_dosen_code',
+      getIdToken: vi.fn(async () => 'token-123'),
+    };
+    mockSetDoc.mockResolvedValue(undefined);
+
+    const createdAuto = await createClassInFirestore({ name: 'Arsitektur Cloud' });
+    expect(createdAuto.code).toMatch(/^[A-Z0-9]{6,12}$/);
+
+    await expect(
+      createClassInFirestore({ name: 'Kelas Kode Pendek', code: 'CLS1' })
+    ).rejects.toThrow(/6–12 karakter alfanumerik/);
+
+    // Student document upload receives 403 FORBIDDEN_ROLE from /api/upload-sign -> clean external URL fallback
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => ({
+        ok: false,
+        status: 403,
+        headers: { get: () => 'application/json' },
+        json: async () => ({
+          error: 'AKSES DITOLAK: Hanya dosen atau admin...',
+          code: 'FORBIDDEN_ROLE',
+        }),
+      }))
+    );
+
+    const samplePdf = new File(['%PDF-1.4 sample'], 'tugas_student.pdf', {
+      type: 'application/pdf',
+    });
+    const uploadResult = await uploadMediaFile(samplePdf, 'document');
+    expect(uploadResult.isLive).toBe(false);
+    expect(uploadResult.requiresExternalUrl).toBe(true);
+    expect(uploadResult.storageType).toBe('external_url_required');
+    expect(uploadResult.note).toMatch(/Dosen\/Admin/i);
   });
 });

@@ -160,9 +160,12 @@ export async function fetchClassesForUser({ uid: uidOverride = null, role: roleO
       };
     }
 
-    // Student role: load enrolled classIds via class_members and chunk by 10 via documentId() in [...]
+    // Student role: load approved/active enrolled classIds via class_members and chunk by 10 via documentId() in [...]
     const memberships = await fetchJoinedMemberships(uid);
-    const classIds = Array.from(new Set(memberships.map((m) => m.classId).filter(Boolean)));
+    const activeMemberships = memberships.filter(
+      (m) => !m.status || m.status === 'approved' || m.status === 'active'
+    );
+    const classIds = Array.from(new Set(activeMemberships.map((m) => m.classId).filter(Boolean)));
     if (classIds.length === 0) {
       return {
         classes: [],
@@ -218,6 +221,17 @@ export async function fetchJoinedMemberships(uidOverride = null) {
   }
 }
 
+const CLASS_CODE_CHARS = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+
+export function generateClassCode(length = 8) {
+  const safeLen = Math.min(12, Math.max(6, Number(length) || 8));
+  let suffix = '';
+  for (let i = 0; i < safeLen - 2; i += 1) {
+    suffix += CLASS_CODE_CHARS[Math.floor(Math.random() * CLASS_CODE_CHARS.length)];
+  }
+  return `SM${suffix}`;
+}
+
 export async function createClassInFirestore({
   name,
   category = 'Teknologi Informasi',
@@ -234,11 +248,11 @@ export async function createClassInFirestore({
     .trim()
     .toUpperCase()
     .replace(/[^A-Z0-9]/g, '');
-  if (cleanCode && cleanCode.length < 4) {
-    throw new Error('Kode kelas opsional minimal 4 karakter alfanumerik.');
+  if (cleanCode && !/^[A-Z0-9]{6,12}$/.test(cleanCode)) {
+    throw new Error('Kode kelas opsional harus terdiri dari 6–12 karakter alfanumerik kapital.');
   }
 
-  const generatedCode = cleanCode || `CLS${Math.floor(100 + Math.random() * 900)}`;
+  const generatedCode = cleanCode || generateClassCode(8);
   const classId = `cls_${Date.now()}`;
 
   const payload = {
@@ -283,8 +297,8 @@ export async function joinClassWithToken(classCode) {
   const cleanCode = String(classCode || '')
     .trim()
     .toUpperCase();
-  if (cleanCode.length < 4) {
-    throw new Error('Kode kelas minimal terdiri dari 4 karakter alfanumerik.');
+  if (!/^[A-Z0-9]{6,12}$/.test(cleanCode)) {
+    throw new Error('Kode kelas harus terdiri dari 6–12 karakter alfanumerik kapital.');
   }
 
   if (!auth?.currentUser || !db) {
@@ -306,7 +320,9 @@ export async function joinClassWithToken(classCode) {
     if (isJson) {
       const data = await res.json();
       if (!res.ok) {
-        throw new Error(data.error || 'Kode kelas tidak valid atau gagal bergabung ke kelas.');
+        const apiError = new Error(data.error || 'Kode kelas tidak valid atau gagal bergabung ke kelas.');
+        apiError.isApiBusinessError = true;
+        throw apiError;
       }
       return {
         ...data,
@@ -317,12 +333,14 @@ export async function joinClassWithToken(classCode) {
     }
   } catch (err) {
     if (
-      err instanceof Error &&
-      (err.message.includes('Kode kelas') ||
-        err.message.includes('Kapasitas') ||
-        err.message.includes('Kelas') ||
-        err.message.includes('Invalid') ||
-        err.message.includes('token'))
+      err?.isApiBusinessError ||
+      (err instanceof Error &&
+        (err.message.includes('Kode kelas') ||
+          err.message.includes('Kapasitas') ||
+          err.message.includes('Kelas') ||
+          err.message.includes('Terlalu banyak') ||
+          err.message.includes('Invalid') ||
+          err.message.includes('token')))
     ) {
       throw err;
     }

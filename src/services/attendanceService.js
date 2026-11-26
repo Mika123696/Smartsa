@@ -380,14 +380,19 @@ export async function recordMeetingAttendance({
     return { success: false, message: 'Nomor pertemuan pada sesi presensi tidak valid.' };
   }
 
-  // Validasi keanggotaan class_members/{classId}_{uid} sesuai firestore.rules
+  // Validasi keanggotaan aktif class_members/{classId}_{uid} sesuai firestore.rules
   const memberRef = doc(db, 'class_members', `${classId}_${uid}`);
   const memberSnap = await getDoc(memberRef);
-  if (!memberSnap.exists()) {
+  const memberStatus = memberSnap.exists() ? memberSnap.data()?.status : null;
+  const isApprovedMember =
+    memberSnap.exists() && (!memberStatus || memberStatus === 'approved' || memberStatus === 'active');
+  if (!isApprovedMember) {
     return {
       success: false,
       notMember: true,
-      message: `Anda belum tergabung di kelas ${classData.code || classId}. Silakan gabung kelas terlebih dahulu.`,
+      message: memberSnap.exists()
+        ? `Keanggotaan Anda di kelas ${classData.code || classId} masih menunggu persetujuan dosen/admin.`
+        : `Anda belum tergabung di kelas ${classData.code || classId}. Silakan gabung kelas terlebih dahulu.`,
     };
   }
 

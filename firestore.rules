@@ -44,7 +44,8 @@ service cloud.firestore {
     }
 
     function isClassMember(classId, uid) {
-      return exists(/databases/$(database)/documents/class_members/$(classId + '_' + uid));
+      return exists(/databases/$(database)/documents/class_members/$(classId + '_' + uid))
+        && get(/databases/$(database)/documents/class_members/$(classId + '_' + uid)).data.get('status', 'approved') in ['approved', 'active'];
     }
 
     function isClassLecturer(classId) {
@@ -53,25 +54,20 @@ service cloud.firestore {
         && get(/databases/$(database)/documents/classes/$(classId)).data.lecturerId == request.auth.uid;
     }
 
-    // 1. users/{uid}
+    // 1. users/{uid} (role, accountType, isInstitutional dikelola server via /api/bootstrap Admin SDK)
     match /users/{uid} {
       allow read: if isSignedIn() && (request.auth.uid == uid || isAdmin());
       allow create: if isSignedIn()
         && request.auth.uid == uid
         && !('password' in request.resource.data)
-        && (
-          request.resource.data.role == 'student'
-          || (isInstitutionalLecturerEmail() && request.resource.data.role == 'lecturer')
-          || (isInstitutionalAdminEmail() && request.resource.data.role == 'admin')
-        );
+        && !('accountType' in request.resource.data)
+        && !('isInstitutional' in request.resource.data)
+        && (!('role' in request.resource.data) || request.resource.data.role == 'student');
       allow update: if (isSignedIn()
         && request.auth.uid == uid
         && !('password' in request.resource.data)
-        && (
-          !request.resource.data.diff(resource.data).affectedKeys().hasAny(['role', 'nim', 'nidn', 'password'])
-          || (isInstitutionalLecturerEmail() && request.resource.data.role == 'lecturer' && !request.resource.data.diff(resource.data).affectedKeys().hasAny(['password']))
-          || (isInstitutionalAdminEmail() && request.resource.data.role == 'admin' && !request.resource.data.diff(resource.data).affectedKeys().hasAny(['password']))
-        ))
+        && !request.resource.data.diff(resource.data).affectedKeys().hasAny(['role', 'nim', 'nidn', 'password'])
+        && !request.resource.data.diff(resource.data).affectedKeys().hasAny(['accountType', 'isInstitutional', 'emailVerified', 'nip']))
         || (isAdmin() && !('password' in request.resource.data));
       allow delete: if false;
     }
@@ -287,6 +283,11 @@ service cloud.firestore {
         && request.resource.data.meetingNo == resource.data.meetingNo
         && progressId == (resource.data.classId + '_m' + string(resource.data.meetingNo) + '_' + request.auth.uid);
       allow delete: if isAdmin();
+    }
+
+    // 11. rate_limits/{scope}_{uid} (strictly server-only via Admin SDK)
+    match /rate_limits/{rateLimitId} {
+      allow read, write: if false;
     }
   }
 }

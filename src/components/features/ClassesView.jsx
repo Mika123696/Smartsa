@@ -139,13 +139,13 @@ export default function ClassesView({
     setFeedback(null);
     const code = classCodeInput.trim().toUpperCase();
 
-    if (code.length < 4) {
+    if (!/^[A-Z0-9]{6,12}$/.test(code)) {
       setFeedback({
         type: 'error',
         text:
           language === 'en'
-            ? 'Class code must be at least 4 alphanumeric characters.'
-            : 'Kode kelas minimal terdiri dari 4 karakter alfanumerik.',
+            ? 'Class code must be 6–12 uppercase alphanumeric characters.'
+            : 'Kode kelas harus terdiri dari 6–12 karakter alfanumerik kapital.',
       });
       return;
     }
@@ -153,8 +153,9 @@ export default function ClassesView({
     setJoining(true);
     try {
       const data = await joinClassWithToken(code);
+      const isPendingApproval = data.status === 'pending' || data.pendingApproval === true;
       const joinedClass = data.classData;
-      if (joinedClass) {
+      if (joinedClass && !isPendingApproval) {
         setClasses((prev) =>
           prev.some((c) => c.id === joinedClass.id)
             ? prev.map((c) => (c.id === joinedClass.id ? { ...c, ...joinedClass } : c))
@@ -165,9 +166,13 @@ export default function ClassesView({
       }
 
       setFeedback({
-        type: 'success',
+        type: isPendingApproval ? 'info' : 'success',
         text: data.note
           ? data.note
+          : isPendingApproval
+          ? language === 'en'
+            ? `Enrollment request for "${joinedClass?.name || code}" is pending approval because your account uses a public domain.`
+            : `Permintaan bergabung ke "${joinedClass?.name || code}" berstatus menunggu persetujuan dosen karena akun menggunakan domain publik.`
           : data.alreadyMember
           ? language === 'en'
             ? `You are already enrolled in "${joinedClass?.name || code}".`
@@ -177,11 +182,13 @@ export default function ClassesView({
           : `Berhasil bergabung ke dalam kelas "${joinedClass?.name || code}"!`,
       });
 
-      setTimeout(() => {
-        setIsJoinModalOpen(false);
-        setClassCodeInput('');
-        if (joinedClass) onSelectClass(joinedClass);
-      }, 1000);
+      if (!isPendingApproval) {
+        setTimeout(() => {
+          setIsJoinModalOpen(false);
+          setClassCodeInput('');
+          if (joinedClass) onSelectClass(joinedClass);
+        }, 1000);
+      }
     } catch (err) {
       setFeedback({
         type: 'error',
@@ -494,11 +501,11 @@ export default function ClassesView({
                 </label>
                 <input
                   type="text"
-                  maxLength={8}
+                  maxLength={12}
                   required
-                  placeholder={language === 'en' ? 'e.g. CLS101' : 'Contoh: CLS101'}
+                  placeholder={language === 'en' ? 'e.g. SMPBO101' : 'Contoh: SMPBO101'}
                   value={classCodeInput}
-                  onChange={(e) => setClassCodeInput(e.target.value.toUpperCase())}
+                  onChange={(e) => setClassCodeInput(e.target.value.toUpperCase().replace(/[^A-Z0-9]/g, ''))}
                   className="w-full px-3 py-2.5 text-center text-lg font-mono font-bold tracking-widest uppercase border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-[#0b0f17] rounded-xl focus:outline-none focus:border-blue-500 dark:focus:border-[#f59e0b] text-slate-900 dark:text-slate-100"
                 />
               </div>
@@ -506,8 +513,8 @@ export default function ClassesView({
               <div className="p-3 bg-slate-50 dark:bg-[#0e1522] border border-slate-200 dark:border-[#232f42] rounded-xl text-[11px] text-slate-500 dark:text-slate-400">
                 <strong>Tips:</strong>{' '}
                 {language === 'en'
-                  ? 'Ask your course lecturer for the unique 4–8 character class enrollment code.'
-                  : 'Minta kode kelas unik (4–8 karakter) yang dibagikan oleh dosen pengampu kelas Anda.'}
+                  ? 'Ask your course lecturer for the unique 6–12 character alphanumeric class enrollment code.'
+                  : 'Minta kode kelas unik (6–12 karakter alfanumerik) yang dibagikan oleh dosen pengampu kelas Anda.'}
               </div>
 
               <div className="flex justify-end gap-2 pt-2">
@@ -630,10 +637,10 @@ export default function ClassesView({
                   </label>
                   <input
                     type="text"
-                    maxLength={10}
-                    placeholder={language === 'en' ? 'Auto if blank' : 'Otomatis jika kosong'}
+                    maxLength={12}
+                    placeholder={language === 'en' ? '6-12 chars / auto' : '6–12 karakter / otomatis'}
                     value={newClassCode}
-                    onChange={(e) => setNewClassCode(e.target.value.toUpperCase())}
+                    onChange={(e) => setNewClassCode(e.target.value.toUpperCase().replace(/[^A-Z0-9]/g, ''))}
                     className="w-full px-3 py-2 text-xs font-mono uppercase bg-slate-50 dark:bg-[#0b0f17] border border-slate-300 dark:border-slate-700 rounded-lg focus:outline-none focus:border-indigo-500 text-slate-900 dark:text-slate-100"
                   />
                 </div>

@@ -2,6 +2,12 @@ import { createHash } from 'node:crypto';
 import { initializeApp, applicationDefault, cert, getApps } from 'firebase-admin/app';
 import { getAuth } from 'firebase-admin/auth';
 import { getFirestore, FieldValue } from 'firebase-admin/firestore';
+import {
+  ACCOUNT_TYPES,
+  classifyAccountByEmail,
+  parseEmailAddress,
+  resolveEmailDomain,
+} from '../lib/domains.js';
 
 function initFirebaseAdmin() {
   if (getApps().length > 0) return;
@@ -116,10 +122,229 @@ function sanitizeExamPayload(rawQuestions, rawAnswerKey) {
   return { sanitizedQuestions, sanitizedAnswerKey };
 }
 
-function sendJson(res, statusCode, payload) {
+const ALLOWED_CORS_METHODS = 'POST, OPTIONS';
+const ALLOWED_CORS_HEADERS = 'Authorization, Content-Type';
+const DEFAULT_CORS_FALLBACK_ORIGIN = 'http://localhost:5173';
+
+function parseCorsOrigin(rawOrigin) {
+  if (typeof rawOrigin !== 'string') return null;
+  const trimmed = rawOrigin.trim();
+  if (!trimmed || trimmed.includes(',')) return null;
+  try {
+    const parsed = new URL(trimmed);
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return null;
+    if (parsed.username || parsed.password || parsed.origin === 'null') return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+function isLocalDevOrigin(originUrl) {
+  return (
+    (originUrl.protocol === 'http:' || originUrl.protocol === 'https:') &&
+    (originUrl.hostname === 'localhost' ||
+      originUrl.hostname === '127.0.0.1' ||
+      originUrl.hostname === '[::1]')
+  );
+}
+
+function isVercelPreviewOrigin(originUrl) {
+  return (
+    originUrl.protocol === 'https:' &&
+    originUrl.hostname.endsWith('.vercel.app') &&
+    originUrl.hostname.length > '.vercel.app'.length &&
+    !originUrl.hostname.startsWith('.')
+  );
+}
+
+function getConfiguredCorsAllowlist() {
+  const rawList = String(process.env.ALLOWED_ORIGINS || '')
+    .split(',')
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+
+  let allowAll = false;
+  const explicitOrigins = [];
+
+  for (const entry of rawList) {
+    if (entry === '*') {
+      allowAll = true;
+      continue;
+    }
+    const parsed = parseCorsOrigin(entry);
+    if (parsed && !explicitOrigins.includes(parsed.origin)) {
+      explicitOrigins.push(parsed.origin);
+    }
+  }
+
+  const vercelOrigins = [];
+  for (const envHost of [
+    process.env.VERCEL_PROJECT_PRODUCTION_URL,
+    process.env.VERCEL_BRANCH_URL,
+    process.env.VERCEL_URL,
+  ]) {
+    if (!envHost || typeof envHost !== 'string') continue;
+    const candidate = envHost.startsWith('http://') || envHost.startsWith('https://')
+      ? envHost.trim()
+      : `https://${envHost.trim()}`;
+    const parsed = parseCorsOrigin(candidate);
+    if (parsed && !vercelOrigins.includes(parsed.origin)) {
+      vercelOrigins.push(parsed.origin);
+    }
+  }
+
+  return { allowAll, explicitOrigins, vercelOrigins };
+}
+
+function resolveCorsAllowOrigin(req) {
+  const { allowAll, explicitOrigins, vercelOrigins } = getConfiguredCorsAllowlist();
+  if (allowAll) {
+    return '*';
+  }
+
+  const rawOrigin = String(req?.headers?.origin || req?.headers?.Origin || '').trim();
+  if (!rawOrigin) {
+    return explicitOrigins[0] || vercelOrigins[0] || DEFAULT_CORS_FALLBACK_ORIGIN;
+  }
+
+  const parsed = parseCorsOrigin(rawOrigin);
+  if (!parsed) {
+    return null;
+  }
+
+  if (
+    explicitOrigins.includes(parsed.origin) ||
+    vercelOrigins.includes(parsed.origin) ||
+    isLocalDevOrigin(parsed) ||
+    isVercelPreviewOrigin(parsed)
+  ) {
+    return parsed.origin;
+  }
+
+  return null;
+}
+
+export function applyCorsHeaders(req, res) {
+  if (!res || typeof res.setHeader !== 'function') return;
+
+  const allowedOrigin = resolveCorsAllowOrigin(req);
+  if (allowedOrigin) {
+    res.setHeader('Access-Control-Allow-Origin', allowedOrigin);
+  } else if (typeof res.removeHeader === 'function') {
+    res.removeHeader('Access-Control-Allow-Origin');
+  }
+
+  res.setHeader('Access-Control-Allow-Methods', ALLOWED_CORS_METHODS);
+  res.setHeader('Access-Control-Allow-Headers', ALLOWED_CORS_HEADERS);
+  res.setHeader('Vary', 'Origin');
+}
+
+function sendJson(res, statusCode, payload, req = null, extraHeaders = null) {
+  if (req) {
+    applyCorsHeaders(req, res);
+  }
+  if (extraHeaders && typeof extraHeaders === 'object') {
+    for (const [key, value] of Object.entries(extraHeaders)) {
+      if (value !== undefined && value !== null) {
+        res.setHeader(key, String(value));
+      }
+    }
+  }
   res.statusCode = statusCode;
   res.setHeader('Content-Type', 'application/json; charset=utf-8');
   res.end(JSON.stringify(payload));
+}
+
+const RATE_LIMIT_WINDOW_MS = 15 * 60 * 1000;
+const UPLOAD_SIGN_MAX_REQUESTS = 10;
+const JOIN_CLASS_MAX_FAILURES = 5;
+const EXAM_DEADLINE_GRACE_MS = 60_000;
+const VALID_CLASS_CODE_REGEX = /^[A-Z0-9]{6,12}$/;
+
+function parseTimestampMillis(rawValue) {
+  if (rawValue === null || rawValue === undefined || rawValue === '') return null;
+  if (typeof rawValue?.toMillis === 'function') {
+    const ms = rawValue.toMillis();
+    return Number.isFinite(ms) && ms > 0 ? ms : null;
+  }
+  if (typeof rawValue === 'number') {
+    return Number.isFinite(rawValue) && rawValue > 0 ? rawValue : null;
+  }
+  if (rawValue instanceof Date) {
+    const ms = rawValue.getTime();
+    return Number.isFinite(ms) && ms > 0 ? ms : null;
+  }
+  if (typeof rawValue === 'string') {
+    const trimmed = rawValue.trim();
+    if (!trimmed) return null;
+    if (/^\d+$/.test(trimmed)) {
+      const num = Number(trimmed);
+      return Number.isFinite(num) && num > 0 ? num : null;
+    }
+    const parsed = Date.parse(trimmed);
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+  }
+  return null;
+}
+
+async function runRateLimitTx(
+  db,
+  { scope, uid, maxAttempts, windowMs = RATE_LIMIT_WINDOW_MS, increment = true }
+) {
+  const safeScope = String(scope || 'global').replace(/[^a-zA-Z0-9_-]/g, '');
+  const safeUid = String(uid || 'anonymous').replace(/[^a-zA-Z0-9_-]/g, '');
+  const rateRef = db.collection('rate_limits').doc(`${safeScope}_${safeUid}`);
+
+  return db.runTransaction(async (tx) => {
+    const snap = await tx.get(rateRef);
+    const nowMs = Date.now();
+    const data = snap?.exists ? snap.data() || {} : null;
+    const windowExpired = !data || !Number.isFinite(data.resetAtMs) || nowMs >= data.resetAtMs;
+    const currentCount = windowExpired ? 0 : Math.max(0, Number(data.count || 0));
+    const windowStartMs = windowExpired ? nowMs : Number(data.windowStartMs || nowMs);
+    const resetAtMs = windowExpired ? nowMs + windowMs : Number(data.resetAtMs);
+
+    if (currentCount >= maxAttempts) {
+      const retryAfterSeconds = Math.max(1, Math.ceil((resetAtMs - nowMs) / 1000));
+      return {
+        allowed: false,
+        count: currentCount,
+        remaining: 0,
+        retryAfterSeconds,
+      };
+    }
+
+    if (!increment) {
+      return {
+        allowed: true,
+        count: currentCount,
+        remaining: Math.max(0, maxAttempts - currentCount),
+        retryAfterSeconds: 0,
+      };
+    }
+
+    const nextCount = currentCount + 1;
+    tx.set(
+      rateRef,
+      {
+        scope: safeScope,
+        uid: safeUid,
+        count: nextCount,
+        windowStartMs,
+        resetAtMs,
+        updatedAt: FieldValue.serverTimestamp(),
+      },
+      { merge: true }
+    );
+
+    return {
+      allowed: true,
+      count: nextCount,
+      remaining: Math.max(0, maxAttempts - nextCount),
+      retryAfterSeconds: Math.max(1, Math.ceil((resetAtMs - nowMs) / 1000)),
+    };
+  });
 }
 
 async function parseJsonBody(req) {
@@ -336,7 +561,47 @@ async function handleAi(body, decodedToken) {
   };
 }
 
-function handleUploadSign(body) {
+async function handleUploadSign(body, decodedToken) {
+  const uid = String(decodedToken?.uid || '').trim();
+  if (!uid) {
+    return {
+      status: 401,
+      payload: { error: 'Token pengguna tidak memiliki UID yang valid.', code: 'UNAUTHORIZED' },
+    };
+  }
+
+  const db = getFirestore();
+  const callerRole = await resolveCallerRole(db, decodedToken);
+  if (callerRole !== 'lecturer' && callerRole !== 'admin') {
+    return {
+      status: 403,
+      payload: {
+        error: 'AKSES DITOLAK: Hanya dosen atau admin yang dapat membuat signature upload Cloudinary.',
+        code: 'FORBIDDEN_ROLE',
+      },
+    };
+  }
+
+  const rateResult = await runRateLimitTx(db, {
+    scope: 'upload_sign',
+    uid,
+    maxAttempts: UPLOAD_SIGN_MAX_REQUESTS,
+    windowMs: RATE_LIMIT_WINDOW_MS,
+    increment: true,
+  });
+
+  if (!rateResult.allowed) {
+    return {
+      status: 429,
+      headers: { 'Retry-After': String(rateResult.retryAfterSeconds) },
+      payload: {
+        error: 'Terlalu banyak permintaan signature upload. Silakan coba lagi beberapa saat lagi.',
+        code: 'RATE_LIMIT_EXCEEDED',
+        retryAfterSeconds: rateResult.retryAfterSeconds,
+      },
+    };
+  }
+
   const { category = 'image' } = body || {};
   if (category !== 'image' && category !== 'document') {
     return {
@@ -376,16 +641,69 @@ function handleUploadSign(body) {
   };
 }
 
+const ROLE_RANK = Object.freeze({
+  student: 1,
+  lecturer: 2,
+  admin: 3,
+});
+
+const ACCOUNT_TYPE_RANK = Object.freeze({
+  [ACCOUNT_TYPES.UMUM]: 1,
+  [ACCOUNT_TYPES.MAHASISWA]: 2,
+  [ACCOUNT_TYPES.DOSEN]: 3,
+});
+
+function sanitizeValidRole(value) {
+  if (value === 'admin' || value === 'lecturer' || value === 'student') {
+    return value;
+  }
+  return null;
+}
+
+function sanitizeValidAccountType(value) {
+  if (
+    value === ACCOUNT_TYPES.DOSEN ||
+    value === ACCOUNT_TYPES.MAHASISWA ||
+    value === ACCOUNT_TYPES.UMUM
+  ) {
+    return value;
+  }
+  return null;
+}
+
+function sanitizeHttpPhotoUrl(rawUrl) {
+  if (typeof rawUrl !== 'string') return null;
+  const trimmed = rawUrl.trim();
+  if (!trimmed || trimmed.length > 2048 || trimmed.startsWith('data:')) {
+    return null;
+  }
+  if (trimmed.startsWith('https://') || trimmed.startsWith('http://')) {
+    return trimmed;
+  }
+  return null;
+}
+
+function pickHighestRank(candidates, rankMap, fallback) {
+  let best = fallback;
+  let bestRank = rankMap[fallback] || 0;
+  for (const candidate of candidates) {
+    if (!candidate) continue;
+    const rank = rankMap[candidate] || 0;
+    if (rank > bestRank) {
+      best = candidate;
+      bestRank = rank;
+    }
+  }
+  return best;
+}
+
 async function resolveCallerRole(db, decodedToken) {
   if (decodedToken?.role === 'admin' || decodedToken?.role === 'lecturer') {
     return decodedToken.role;
   }
-  const email = String(decodedToken?.email || '').trim().toLowerCase();
-  if (/^admin(\.[^@]+)?@smartsa\.edu$/.test(email)) {
-    return 'admin';
-  }
-  if (/^dosen(\.[^@]+)?@smartsa\.edu$/.test(email)) {
-    return 'lecturer';
+  const emailInfo = resolveEmailDomain(decodedToken?.email || '');
+  if (emailInfo.role === 'admin' || emailInfo.role === 'lecturer') {
+    return emailInfo.role;
   }
   try {
     const userDoc = await db.collection('users').doc(decodedToken.uid).get();
@@ -398,6 +716,176 @@ async function resolveCallerRole(db, decodedToken) {
   return 'student';
 }
 
+async function handleBootstrap(body, decodedToken) {
+  const uid = String(decodedToken?.uid || '').trim();
+  if (!uid) {
+    return {
+      status: 401,
+      payload: { error: 'Token pengguna tidak memiliki UID yang valid.', code: 'UNAUTHORIZED' },
+    };
+  }
+
+  const parsedEmail = parseEmailAddress(decodedToken?.email || '');
+  const cleanEmail = parsedEmail.valid
+    ? parsedEmail.email
+    : String(decodedToken?.email || '').trim().toLowerCase();
+  const emailVerified = Boolean(decodedToken?.email_verified);
+  const domainClassification = classifyAccountByEmail(cleanEmail, {
+    emailVerified,
+    requireVerified: true,
+  });
+
+  const tokenRoleClaim = sanitizeValidRole(decodedToken?.role);
+  const domainRole = sanitizeValidRole(domainClassification.role) || 'student';
+
+  const tokenName = String(decodedToken?.name || decodedToken?.displayName || '').trim();
+  const bodyName = String(body?.displayName || body?.name || '').trim();
+  const emailLocalName = cleanEmail ? cleanEmail.split('@')[0] : '';
+  const initialDisplayName = bodyName || tokenName || emailLocalName || 'Pengguna Smartsa';
+  const candidatePhoto = sanitizeHttpPhotoUrl(
+    decodedToken?.picture || decodedToken?.photoURL || body?.photoURL
+  );
+  const bodyInstitution = String(body?.institution || '').trim();
+  const bodyNim = String(body?.nim || '').trim();
+
+  const db = getFirestore();
+  const userRef = db.collection('users').doc(uid);
+
+  const txResult = await db.runTransaction(async (tx) => {
+    const userSnap = await tx.get(userRef);
+    const rawExisting = userSnap.exists ? userSnap.data() || {} : null;
+    const { password: _removedPassword, ...existingData } = rawExisting || {};
+
+    const dbRole = sanitizeValidRole(existingData.role);
+    const resolvedRole = pickHighestRank([dbRole, tokenRoleClaim, domainRole], ROLE_RANK, 'student');
+
+    const dbAccountType = sanitizeValidAccountType(existingData.accountType);
+    const domainAccountType =
+      sanitizeValidAccountType(domainClassification.accountType) || ACCOUNT_TYPES.UMUM;
+    const roleFloorAccountType =
+      resolvedRole === 'admin' || resolvedRole === 'lecturer'
+        ? ACCOUNT_TYPES.DOSEN
+        : ACCOUNT_TYPES.UMUM;
+    const resolvedAccountType = pickHighestRank(
+      [dbAccountType, domainAccountType, roleFloorAccountType],
+      ACCOUNT_TYPE_RANK,
+      ACCOUNT_TYPES.UMUM
+    );
+
+    const resolvedIsInstitutional = Boolean(
+      existingData.isInstitutional ||
+        resolvedAccountType !== ACCOUNT_TYPES.UMUM ||
+        resolvedRole === 'admin' ||
+        resolvedRole === 'lecturer'
+    );
+
+    const effectiveEmail = cleanEmail || String(existingData.email || '').trim().toLowerCase();
+
+    if (!userSnap.exists) {
+      const resolvedInstitution =
+        bodyInstitution ||
+        (resolvedRole === 'admin'
+          ? 'Smartsa Central Administration'
+          : 'Universitas Negeri Surabaya');
+
+      const newUserDoc = {
+        uid,
+        email: effectiveEmail,
+        name: initialDisplayName,
+        displayName: initialDisplayName,
+        photoURL: candidatePhoto,
+        role: resolvedRole,
+        accountType: resolvedAccountType,
+        isInstitutional: resolvedIsInstitutional,
+        emailVerified,
+        institution: resolvedInstitution,
+        nim: bodyNim,
+        createdAt: FieldValue.serverTimestamp(),
+        updatedAt: FieldValue.serverTimestamp(),
+        last_active: FieldValue.serverTimestamp(),
+      };
+
+      tx.set(userRef, newUserDoc);
+
+      return {
+        isNewUser: true,
+        profile: {
+          uid,
+          email: effectiveEmail,
+          name: initialDisplayName,
+          displayName: initialDisplayName,
+          photoURL: candidatePhoto,
+          role: resolvedRole,
+          accountType: resolvedAccountType,
+          isInstitutional: resolvedIsInstitutional,
+          emailVerified,
+          institution: resolvedInstitution,
+          nim: bodyNim,
+        },
+      };
+    }
+
+    const hasExistingDisplayName =
+      typeof existingData.displayName === 'string' && existingData.displayName.trim().length > 0;
+    const hasExistingName =
+      typeof existingData.name === 'string' && existingData.name.trim().length > 0;
+    const hasExistingPhoto = 'photoURL' in existingData;
+
+    const preservedDisplayName = hasExistingDisplayName
+      ? existingData.displayName
+      : hasExistingName
+        ? existingData.name
+        : initialDisplayName;
+    const preservedName = hasExistingName ? existingData.name : preservedDisplayName;
+    const preservedPhotoURL = hasExistingPhoto ? existingData.photoURL : candidatePhoto;
+
+    const updatePatch = {
+      uid,
+      ...(cleanEmail && existingData.email !== cleanEmail ? { email: cleanEmail } : {}),
+      ...(!hasExistingDisplayName ? { displayName: preservedDisplayName } : {}),
+      ...(!hasExistingName ? { name: preservedName } : {}),
+      ...(!hasExistingPhoto ? { photoURL: preservedPhotoURL } : {}),
+      ...(!existingData.createdAt ? { createdAt: FieldValue.serverTimestamp() } : {}),
+      role: resolvedRole,
+      accountType: resolvedAccountType,
+      isInstitutional: resolvedIsInstitutional,
+      emailVerified,
+      updatedAt: FieldValue.serverTimestamp(),
+      last_active: FieldValue.serverTimestamp(),
+    };
+
+    tx.set(userRef, updatePatch, { merge: true });
+
+    return {
+      isNewUser: false,
+      profile: {
+        ...existingData,
+        uid,
+        email: effectiveEmail,
+        name: preservedName,
+        displayName: preservedDisplayName,
+        photoURL: preservedPhotoURL,
+        role: resolvedRole,
+        accountType: resolvedAccountType,
+        isInstitutional: resolvedIsInstitutional,
+        emailVerified,
+      },
+    };
+  });
+
+  return {
+    status: 200,
+    payload: {
+      success: true,
+      isNewUser: txResult.isNewUser,
+      profile: {
+        ...txResult.profile,
+        last_active: new Date().toISOString(),
+      },
+    },
+  };
+}
+
 async function handleGrade(body, decodedToken) {
   const {
     classId = '',
@@ -407,6 +895,9 @@ async function handleGrade(body, decodedToken) {
     questions = [],
     answerKey: incomingAnswerKey = null,
     title = '',
+    status: incomingStatus = undefined,
+    durationMinutes: incomingDurationMinutes = undefined,
+    deadline: incomingDeadline = undefined,
     action = 'submit',
   } = body || {};
   const safeClassId = String(classId || '').trim().replace(/[^a-zA-Z0-9_-]/g, '');
@@ -466,6 +957,51 @@ async function handleGrade(body, decodedToken) {
       };
     }
 
+    const normalizedStatus =
+      incomingStatus === undefined || incomingStatus === null || incomingStatus === ''
+        ? 'published'
+        : String(incomingStatus).trim().toLowerCase();
+    if (!['published', 'draft', 'archived'].includes(normalizedStatus)) {
+      return {
+        status: 400,
+        payload: {
+          error: 'Status evaluasi harus bernilai published, draft, atau archived.',
+          code: 'INVALID_EXAM_STATUS',
+        },
+      };
+    }
+
+    const normalizedDuration =
+      incomingDurationMinutes === undefined ||
+      incomingDurationMinutes === null ||
+      incomingDurationMinutes === ''
+        ? 15
+        : Number(incomingDurationMinutes);
+    if (!Number.isInteger(normalizedDuration) || normalizedDuration < 1 || normalizedDuration > 180) {
+      return {
+        status: 400,
+        payload: {
+          error: 'durationMinutes harus berupa bilangan bulat antara 1 hingga 180 menit.',
+          code: 'INVALID_DURATION_MINUTES',
+        },
+      };
+    }
+
+    let normalizedDeadline = null;
+    if (incomingDeadline !== undefined && incomingDeadline !== null && incomingDeadline !== '') {
+      const deadlineMs = parseTimestampMillis(incomingDeadline);
+      if (deadlineMs === null) {
+        return {
+          status: 400,
+          payload: {
+            error: 'Format deadline evaluasi tidak valid.',
+            code: 'INVALID_DEADLINE',
+          },
+        };
+      }
+      normalizedDeadline = new Date(deadlineMs).toISOString();
+    }
+
     const validated = sanitizeExamPayload(questions, incomingAnswerKey);
     if (validated.error) {
       return {
@@ -507,7 +1043,9 @@ async function handleGrade(body, decodedToken) {
           meetingNo: safeMeetingNo,
           examType: safeExamType,
           title: cleanTitle,
-          durationMinutes: 15,
+          status: normalizedStatus,
+          durationMinutes: normalizedDuration,
+          deadline: normalizedDeadline,
           questions: validated.sanitizedQuestions,
           updatedBy: decodedToken.uid,
           updatedAt: FieldValue.serverTimestamp(),
@@ -535,6 +1073,9 @@ async function handleGrade(body, decodedToken) {
         classId: safeClassId,
         meetingNo: safeMeetingNo,
         examType: safeExamType,
+        status: normalizedStatus,
+        durationMinutes: normalizedDuration,
+        deadline: normalizedDeadline,
         questionsCount: validated.sanitizedQuestions.length,
       },
     };
@@ -574,6 +1115,35 @@ async function handleGrade(body, decodedToken) {
     };
   }
 
+  let examData = null;
+  const examsCollection = db.collection('exams');
+  if (examsCollection && typeof examsCollection.doc === 'function') {
+    const examSnap = await examsCollection.doc(examDocId).get();
+    if (examSnap?.exists) {
+      examData = examSnap.data() || {};
+    }
+  }
+
+  const examStatus = String(examData?.status || 'published').trim().toLowerCase();
+  if (examStatus === 'draft') {
+    return {
+      status: 403,
+      payload: {
+        error: 'Evaluasi masih berstatus draft dan belum dipublikasikan oleh dosen.',
+        code: 'EXAM_NOT_PUBLISHED',
+      },
+    };
+  }
+  if (examStatus === 'archived') {
+    return {
+      status: 403,
+      payload: {
+        error: 'Evaluasi telah diarsipkan dan tidak lagi menerima pengerjaan.',
+        code: 'EXAM_ARCHIVED',
+      },
+    };
+  }
+
   let answerKey = null;
   try {
     const keyDoc = await db.collection('exam_keys').doc(safeClassId).get();
@@ -595,7 +1165,11 @@ async function handleGrade(body, decodedToken) {
   }
 
   if (action === 'start') {
-    const durationMs = 15 * 60 * 1000;
+    const durationMinutes =
+      Number.isFinite(Number(examData?.durationMinutes)) && Number(examData?.durationMinutes) > 0
+        ? Number(examData.durationMinutes)
+        : 15;
+    const durationMs = durationMinutes * 60 * 1000;
     await db
       .collection('exam_attempts')
       .doc(attemptId)
@@ -628,6 +1202,36 @@ async function handleGrade(body, decodedToken) {
     };
   }
 
+  let attemptData = null;
+  const attemptsCol = db.collection('exam_attempts');
+  const attemptRef = attemptsCol && typeof attemptsCol.doc === 'function' ? attemptsCol.doc(attemptId) : null;
+  if (attemptRef && typeof attemptRef.get === 'function') {
+    const attemptSnap = await attemptRef.get();
+    if (attemptSnap?.exists) {
+      attemptData = attemptSnap.data() || {};
+    }
+  }
+
+  const cutoffCandidates = [
+    parseTimestampMillis(examData?.deadline ?? examData?.expiresAt),
+    parseTimestampMillis(
+      attemptData?.examExpiresAt ?? attemptData?.expiresAt ?? attemptData?.deadline
+    ),
+  ].filter((ts) => ts !== null);
+
+  if (cutoffCandidates.length > 0) {
+    const effectiveDeadlineMs = Math.min(...cutoffCandidates);
+    if (Date.now() > effectiveDeadlineMs + EXAM_DEADLINE_GRACE_MS) {
+      return {
+        status: 403,
+        payload: {
+          error: 'Batas waktu pengumpulan evaluasi (termasuk toleransi 60 detik) telah terlewati.',
+          code: 'EXAM_DEADLINE_EXCEEDED',
+        },
+      };
+    }
+  }
+
   const questionIds = Object.keys(answerKey);
   const totalQuestions = questionIds.length;
   let correctCount = 0;
@@ -641,10 +1245,8 @@ async function handleGrade(body, decodedToken) {
   const score = totalQuestions > 0 ? Math.round((correctCount / totalQuestions) * 100) : 0;
   const passed = score >= 75;
 
-  await db
-    .collection('exam_attempts')
-    .doc(attemptId)
-    .set(
+  const targetAttemptRef = attemptRef || db.collection('exam_attempts').doc(attemptId);
+  await targetAttemptRef.set(
       {
         attemptId,
         classId: safeClassId,
@@ -682,24 +1284,88 @@ async function handleGrade(body, decodedToken) {
 }
 
 async function handleJoinClass(body, decodedToken) {
+  const uid = String(decodedToken?.uid || '').trim();
+  if (!uid) {
+    return {
+      status: 401,
+      payload: { error: 'Token pengguna tidak memiliki UID yang valid.', code: 'UNAUTHORIZED' },
+    };
+  }
+
+  const db = getFirestore();
+  const rateLimitPeek = await runRateLimitTx(db, {
+    scope: 'join_class',
+    uid,
+    maxAttempts: JOIN_CLASS_MAX_FAILURES,
+    windowMs: RATE_LIMIT_WINDOW_MS,
+    increment: false,
+  });
+
+  if (!rateLimitPeek.allowed) {
+    return {
+      status: 429,
+      headers: { 'Retry-After': String(rateLimitPeek.retryAfterSeconds) },
+      payload: {
+        error: 'Terlalu banyak percobaan gagal kode kelas. Coba lagi beberapa saat lagi.',
+        code: 'RATE_LIMIT_EXCEEDED',
+        retryAfterSeconds: rateLimitPeek.retryAfterSeconds,
+      },
+    };
+  }
+
   const cleanCode = String(body?.classCode || '')
     .trim()
     .toUpperCase();
 
-  if (cleanCode.length < 4) {
+  if (!VALID_CLASS_CODE_REGEX.test(cleanCode)) {
+    const failureRes = await runRateLimitTx(db, {
+      scope: 'join_class',
+      uid,
+      maxAttempts: JOIN_CLASS_MAX_FAILURES,
+      windowMs: RATE_LIMIT_WINDOW_MS,
+      increment: true,
+    });
+    if (!failureRes.allowed) {
+      return {
+        status: 429,
+        headers: { 'Retry-After': String(failureRes.retryAfterSeconds) },
+        payload: {
+          error: 'Terlalu banyak percobaan gagal kode kelas. Coba lagi beberapa saat lagi.',
+          code: 'RATE_LIMIT_EXCEEDED',
+          retryAfterSeconds: failureRes.retryAfterSeconds,
+        },
+      };
+    }
     return {
       status: 400,
       payload: {
-        error: 'Kode kelas minimal 4 karakter alfanumerik.',
+        error: 'Kode kelas wajib terdiri dari 6–12 karakter alfanumerik kapital.',
         code: 'INVALID_CLASS_CODE',
       },
     };
   }
 
-  const db = getFirestore();
   const classQuery = await db.collection('classes').where('code', '==', cleanCode).limit(1).get();
 
   if (classQuery.empty) {
+    const failureRes = await runRateLimitTx(db, {
+      scope: 'join_class',
+      uid,
+      maxAttempts: JOIN_CLASS_MAX_FAILURES,
+      windowMs: RATE_LIMIT_WINDOW_MS,
+      increment: true,
+    });
+    if (!failureRes.allowed) {
+      return {
+        status: 429,
+        headers: { 'Retry-After': String(failureRes.retryAfterSeconds) },
+        payload: {
+          error: 'Terlalu banyak percobaan gagal kode kelas. Coba lagi beberapa saat lagi.',
+          code: 'RATE_LIMIT_EXCEEDED',
+          retryAfterSeconds: failureRes.retryAfterSeconds,
+        },
+      };
+    }
     return {
       status: 404,
       payload: {
@@ -709,15 +1375,23 @@ async function handleJoinClass(body, decodedToken) {
     };
   }
 
+  const emailVerified = Boolean(decodedToken?.email_verified);
+  const domainInfo = classifyAccountByEmail(decodedToken?.email || '', {
+    emailVerified,
+    requireVerified: true,
+  });
+  const isApproved = Boolean(domainInfo.autoApprove);
+  const membershipStatus = isApproved ? 'approved' : 'pending';
+
   const classDoc = classQuery.docs[0];
   const classRef = classDoc.ref;
-  const memberId = `${classDoc.id}_${decodedToken.uid}`;
+  const memberId = `${classDoc.id}_${uid}`;
   const memberRef = db.collection('class_members').doc(memberId);
 
   const txResult = await db.runTransaction(async (tx) => {
     const freshClassSnap = await tx.get(classRef);
     if (!freshClassSnap.exists) {
-      return { status: 404, payload: { error: 'Kelas tidak ditemukan.', code: 'CLASS_NOT_FOUND' } };
+      return { status: 404, notFound: true, payload: { error: 'Kelas tidak ditemukan.', code: 'CLASS_NOT_FOUND' } };
     }
 
     const freshClassData = freshClassSnap.data();
@@ -727,11 +1401,16 @@ async function handleJoinClass(body, decodedToken) {
 
     const memberSnap = await tx.get(memberRef);
     if (memberSnap.exists) {
+      const memberData = memberSnap.data() || {};
+      const existingStatus = memberData.status || 'approved';
+      const existingPending = existingStatus === 'pending';
       return {
         status: 200,
         payload: {
-          joined: true,
+          joined: !existingPending,
           alreadyMember: true,
+          pendingApproval: existingPending,
+          status: existingStatus,
           memberId,
           classId: classDoc.id,
           classData: { id: classDoc.id, ...freshClassData },
@@ -741,7 +1420,7 @@ async function handleJoinClass(body, decodedToken) {
 
     const currentCount = Number(freshClassData.enrolledCount || 0);
     const maxStudents = Number(freshClassData.maxStudents || 0);
-    if (maxStudents > 0 && currentCount >= maxStudents) {
+    if (isApproved && maxStudents > 0 && currentCount >= maxStudents) {
       return {
         status: 409,
         payload: { error: 'Kapasitas kelas sudah penuh.', code: 'CLASS_FULL' },
@@ -751,36 +1430,58 @@ async function handleJoinClass(body, decodedToken) {
     tx.set(memberRef, {
       memberId,
       classId: classDoc.id,
-      uid: decodedToken.uid,
-      role: decodedToken.role || 'student',
+      uid,
+      role: decodedToken.role || domainInfo.role || 'student',
+      status: membershipStatus,
+      accountType: domainInfo.accountType,
+      isInstitutional: domainInfo.accountType !== ACCOUNT_TYPES.UMUM,
+      autoApproved: isApproved,
       joinedAt: FieldValue.serverTimestamp(),
     });
 
-    tx.update(classRef, {
-      enrolledCount: FieldValue.increment(1),
-      updatedAt: FieldValue.serverTimestamp(),
-    });
+    if (isApproved) {
+      tx.update(classRef, {
+        enrolledCount: FieldValue.increment(1),
+        updatedAt: FieldValue.serverTimestamp(),
+      });
+    }
 
     return {
       status: 200,
       payload: {
-        joined: true,
+        joined: isApproved,
         alreadyMember: false,
+        pendingApproval: !isApproved,
+        status: membershipStatus,
+        accountType: domainInfo.accountType,
         memberId,
         classId: classDoc.id,
         classData: {
           id: classDoc.id,
           ...freshClassData,
-          enrolledCount: currentCount + 1,
+          enrolledCount: isApproved ? currentCount + 1 : currentCount,
         },
       },
     };
   });
 
+  if (txResult?.notFound) {
+    await runRateLimitTx(db, {
+      scope: 'join_class',
+      uid,
+      maxAttempts: JOIN_CLASS_MAX_FAILURES,
+      windowMs: RATE_LIMIT_WINDOW_MS,
+      increment: true,
+    });
+    return { status: 404, payload: txResult.payload };
+  }
+
   return txResult;
 }
 
 export default async function handler(req, res) {
+  applyCorsHeaders(req, res);
+
   if (req.method === 'OPTIONS') {
     res.statusCode = 204;
     res.end();
@@ -788,7 +1489,7 @@ export default async function handler(req, res) {
   }
 
   if (req.method !== 'POST') {
-    sendJson(res, 405, { error: 'Method Not Allowed. Use POST.' });
+    sendJson(res, 405, { error: 'Method Not Allowed. Use POST.' }, req);
     return;
   }
 
@@ -796,7 +1497,7 @@ export default async function handler(req, res) {
   try {
     pathname = new URL(req.url || '/', 'http://localhost').pathname.replace(/\/+$/, '');
   } catch {
-    sendJson(res, 400, { error: 'Malformed request URL.' });
+    sendJson(res, 400, { error: 'Malformed request URL.' }, req);
     return;
   }
 
@@ -805,35 +1506,46 @@ export default async function handler(req, res) {
     const decodedToken = await verifyBearerToken(req);
     const body = await parseJsonBody(req);
 
+    if (pathname === '/api/bootstrap') {
+      const result = await handleBootstrap(body, decodedToken);
+      sendJson(res, result.status, result.payload, req, result.headers);
+      return;
+    }
+
     if (pathname === '/api/ai') {
       const result = await handleAi(body, decodedToken);
-      sendJson(res, result.status, result.payload);
+      sendJson(res, result.status, result.payload, req, result.headers);
       return;
     }
 
     if (pathname === '/api/upload-sign') {
-      const result = handleUploadSign(body);
-      sendJson(res, result.status, result.payload);
+      const result = await handleUploadSign(body, decodedToken);
+      sendJson(res, result.status, result.payload, req, result.headers);
       return;
     }
 
     if (pathname === '/api/grade') {
       const result = await handleGrade(body, decodedToken);
-      sendJson(res, result.status, result.payload);
+      sendJson(res, result.status, result.payload, req, result.headers);
       return;
     }
 
     if (pathname === '/api/join-class') {
       const result = await handleJoinClass(body, decodedToken);
-      sendJson(res, result.status, result.payload);
+      sendJson(res, result.status, result.payload, req, result.headers);
       return;
     }
 
-    sendJson(res, 404, { error: `Unknown API route: ${pathname}` });
+    sendJson(res, 404, { error: `Unknown API route: ${pathname}` }, req);
   } catch (err) {
     const statusCode = err?.statusCode || 500;
-    sendJson(res, statusCode, {
-      error: err?.message || 'Internal Server Error',
-    });
+    sendJson(
+      res,
+      statusCode,
+      {
+        error: err?.message || 'Internal Server Error',
+      },
+      req
+    );
   }
 }

@@ -119,6 +119,8 @@ export async function uploadMediaFile(file, category = 'image') {
   }
 
   // 3. Permintaan signature ke endpoint backend /api/upload-sign dengan Firebase ID Token
+  // Sesuai PRD.md, signature Cloudinary dibatasi hanya untuk role lecturer / admin.
+  let roleRestrictedNote = '';
   if (auth?.currentUser) {
     try {
       const token = await auth.currentUser.getIdToken();
@@ -160,19 +162,38 @@ export async function uploadMediaFile(file, category = 'image') {
             note: 'Berhasil diunggah ke Cloudinary CDN.',
           };
         }
-      } else if ((res.status === 401 || res.status === 403) && isJson) {
+      } else if (res.status === 429 && isJson) {
         const errData = await res.json().catch(() => ({}));
-        throw new Error(errData.error || 'Otorisasi upload media ditolak.');
+        const retrySec = Number(errData.retryAfterSeconds || res.headers.get('retry-after') || 0);
+        throw new Error(
+          errData.error ||
+            `Terlalu banyak permintaan unggah. Coba lagi dalam ${retrySec || 60} detik.`
+        );
+      } else if (res.status === 403 && isJson) {
+        const errData = await res.json().catch(() => ({}));
+        if (errData.code === 'FORBIDDEN_ROLE') {
+          // Mahasiswa tidak diberi signature Cloudinary CDN -> alihkan ke jalur aman klien
+          roleRestrictedNote =
+            'Unggah langsung ke Cloudinary CDN dibatasi untuk Dosen/Admin.';
+        } else {
+          throw new Error(errData.error || 'Otorisasi upload media ditolak.');
+        }
+      } else if (res.status === 401 && isJson) {
+        const errData = await res.json().catch(() => ({}));
+        throw new Error(errData.error || 'Sesi autentikasi upload media ditolak.');
       }
     } catch (err) {
-      if (err instanceof Error && err.message.includes('ditolak')) {
+      if (
+        err instanceof Error &&
+        (err.message.includes('ditolak') || err.message.includes('Terlalu banyak'))
+      ) {
         throw err;
       }
       // Backend Vercel / Cloudinary belum dikonfigurasi -> lanjutkan ke fallback aman
     }
   }
 
-  // 4. Fallback Aman Tanpa Kredensial Cloudinary
+  // 4. Fallback Aman Tanpa Kredensial Cloudinary (atau role non-dosen/admin)
   if (category === 'image') {
     const microDataUrl = await compressImageToMicroThumbnail(file, MAX_MICRO_THUMBNAIL_BYTES);
     return {
@@ -180,9 +201,13 @@ export async function uploadMediaFile(file, category = 'image') {
       isLive: false,
       storageType: 'micro_thumbnail',
       sizeBytes: microDataUrl.length,
-      note: `Cloudinary belum dikonfigurasi — menggunakan thumbnail mikro terkompresi (${Math.round(
-        microDataUrl.length / 1024
-      )} KB) di Firestore.`,
+      note: roleRestrictedNote
+        ? `${roleRestrictedNote} Menggunakan thumbnail mikro terkompresi (${Math.round(
+            microDataUrl.length / 1024
+          )} KB) di Firestore.`
+        : `Cloudinary belum dikonfigurasi — menggunakan thumbnail mikro terkompresi (${Math.round(
+            microDataUrl.length / 1024
+          )} KB) di Firestore.`,
     };
   }
 
@@ -191,6 +216,8 @@ export async function uploadMediaFile(file, category = 'image') {
     isLive: false,
     requiresExternalUrl: true,
     storageType: 'external_url_required',
-    note: 'Cloudinary belum dikonfigurasi di server. Lampirkan tautan URL eksternal (Google Drive / GitHub / dokumen) untuk menyimpan pengumpulan tugas ke Firestore.',
+    note: roleRestrictedNote
+      ? `${roleRestrictedNote} Lampirkan tautan URL eksternal (Google Drive / GitHub / dokumen) untuk menyimpan pengumpulan tugas ke Firestore.`
+      : 'Cloudinary belum dikonfigurasi di server. Lampirkan tautan URL eksternal (Google Drive / GitHub / dokumen) untuk menyimpan pengumpulan tugas ke Firestore.',
   };
 }

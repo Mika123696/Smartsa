@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { readFileSync, readdirSync, statSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import {
   FORBIDDEN_COLLECTIONS,
@@ -76,16 +76,23 @@ describe('Static Security & Firestore Rules Audit', () => {
     expect(firebaseClient).toContain('persistentMultipleTabManager');
   });
 
-  it('ensures no runtime module in src/ imports mockData.js or injects hardcoded subj_pbo fallback', () => {
-    const srcFiles = collectSourceFiles(SRC_DIR).filter(
-      (filePath) => !filePath.endsWith('mockData.js')
-    );
+  it('ensures no module in src/ references mockData, GeneralDashboard, devOnlyKey, computeLocalDevScore, or hardcoded subj_pbo fallback', () => {
+    expect(existsSync(join(SRC_DIR, 'components', 'dashboard', 'GeneralDashboard.jsx'))).toBe(false);
+    expect(existsSync(join(SRC_DIR, 'services', 'mockData.js'))).toBe(false);
+
+    const srcFiles = collectSourceFiles(SRC_DIR);
     const violations = [];
 
     for (const filePath of srcFiles) {
       const content = stripComments(readFileSync(filePath, 'utf8'));
       if (/services\/mockData|\bmockData\b/.test(content)) {
-        violations.push(`${filePath}: imports mockData`);
+        violations.push(`${filePath}: imports or references mockData`);
+      }
+      if (/GeneralDashboard/.test(content)) {
+        violations.push(`${filePath}: references removed GeneralDashboard`);
+      }
+      if (/devOnlyKey|computeLocalDevScore/.test(content)) {
+        violations.push(`${filePath}: contains removed devOnlyKey/computeLocalDevScore`);
       }
       if (/subj_pbo/.test(content)) {
         violations.push(`${filePath}: contains hardcoded subj_pbo`);
@@ -205,5 +212,40 @@ describe('Static Security & Firestore Rules Audit', () => {
     expect(includeSeededPlan.survivingClassIds).toEqual(['cls_valid']);
     expect(includeSeededPlan.targets.classes.map((item) => item.id)).toContain('subj_pbo');
     expect(includeSeededPlan.targets.assignments.map((item) => item.id)).toContain('asg_01');
+  });
+
+  it('locks accountType and isInstitutional in firestore.rules and delegates user role bootstrap from AuthContext to /api/bootstrap', () => {
+    const rules = readFileSync(join(ROOT_DIR, 'firestore.rules'), 'utf8');
+    expect(rules).toMatch(/!\('accountType'\s+in\s+request\.resource\.data\)/);
+    expect(rules).toMatch(/!\('isInstitutional'\s+in\s+request\.resource\.data\)/);
+    expect(rules).toMatch(/hasAny\(\['accountType',\s*'isInstitutional'/);
+
+    const authContextCode = readFileSync(join(SRC_DIR, 'context', 'AuthContext.jsx'), 'utf8');
+    expect(authContextCode).toContain('/api/bootstrap');
+    expect(authContextCode).not.toMatch(/smartsa\\\.edu|@smartsa\.edu/);
+    expect(authContextCode).not.toMatch(/\bsyncInstitutionalUserDoc\b|\bresolveInstitutionalIdentity\b/);
+  });
+
+  it('locks rate_limits collection strictly and requires approved/active status in isClassMember in firestore.rules', () => {
+    const rules = readFileSync(join(ROOT_DIR, 'firestore.rules'), 'utf8');
+    expect(rules).toMatch(
+      /match\s+\/rate_limits\/\{rateLimitId\}\s*\{\s*allow\s+read,\s*write:\s*if\s+false;\s*\}/
+    );
+    expect(rules).toMatch(/\.data\.get\('status',\s*'approved'\)\s+in\s+\['approved',\s*'active'\]/);
+  });
+
+  it('configures Vite /api local dev proxy and preserves single api/index.js serverless dispatcher with /api/ai intact', () => {
+    const viteConfigCode = readFileSync(join(ROOT_DIR, 'vite.config.js'), 'utf8');
+    expect(viteConfigCode).toContain('VITE_API_PROXY_TARGET');
+    expect(viteConfigCode).toContain('http://localhost:3000');
+    expect(viteConfigCode).toContain("'/api'");
+    expect(viteConfigCode).toContain('changeOrigin: true');
+
+    const apiEntries = readdirSync(join(ROOT_DIR, 'api'));
+    expect(apiEntries).toEqual(['index.js']);
+
+    const dispatcherCode = readFileSync(join(ROOT_DIR, 'api', 'index.js'), 'utf8');
+    expect(dispatcherCode).toContain("pathname === '/api/ai'");
+    expect(dispatcherCode).toContain('async function handleAi(');
   });
 });
