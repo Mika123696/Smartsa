@@ -22,6 +22,7 @@ import {
   Trash2,
   FolderOpen,
   Link as LinkIcon,
+  Paperclip,
 } from 'lucide-react';
 import {
   fetchClassesForUser,
@@ -30,8 +31,23 @@ import {
   submitAssignmentToFirestore,
   cancelSubmissionInFirestore,
 } from '../../services/lmsFirestoreService';
-import { uploadMediaFile, isValidExternalUrl } from '../../services/cloudinaryService';
+import {
+  uploadMediaFile,
+  isValidExternalUrl,
+  SUBMISSION_ALLOWED_ACCEPT,
+  MATERIAL_ALLOWED_ACCEPT,
+} from '../../services/cloudinaryService';
 import { AccessibleDialog } from '../common/AccessibleDialog';
+
+function getSafeHttpAttachmentUrl(rawUrl) {
+  if (!rawUrl || typeof rawUrl !== 'string') return '';
+  try {
+    const parsed = new URL(rawUrl.trim());
+    return parsed.protocol === 'https:' || parsed.protocol === 'http:' ? parsed.toString() : '';
+  } catch {
+    return '';
+  }
+}
 
 export default function MaterialsTab({ onSelectSubject }) {
   const { currentUser, userProfile, role } = useAuth();
@@ -50,6 +66,8 @@ export default function MaterialsTab({ onSelectSubject }) {
   const [selectedFile, setSelectedFile] = useState(null);
   const [externalUrlInput, setExternalUrlInput] = useState('');
   const [notesInput, setNotesInput] = useState('');
+  const [groupNameInput, setGroupNameInput] = useState('');
+  const [groupMembersInput, setGroupMembersInput] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [submitFeedback, setSubmitFeedback] = useState(null);
   const [cancelTargetId, setCancelTargetId] = useState(null);
@@ -77,6 +95,8 @@ export default function MaterialsTab({ onSelectSubject }) {
         setSelectedFile(null);
         setExternalUrlInput('');
         setNotesInput('');
+        setGroupNameInput('');
+        setGroupMembersInput('');
         setSubmitFeedback(null);
         setCancelTargetId(null);
         setMeetingFilter('all');
@@ -102,6 +122,8 @@ export default function MaterialsTab({ onSelectSubject }) {
       setSelectedFile(null);
       setExternalUrlInput('');
       setNotesInput('');
+      setGroupNameInput('');
+      setGroupMembersInput('');
       setSubmitFeedback(null);
       setCancelTargetId(null);
       setMeetingFilter('all');
@@ -141,16 +163,21 @@ export default function MaterialsTab({ onSelectSubject }) {
     setSelectedFile(null);
     setExternalUrlInput(asg.externalUrl || asg.submittedFile?.url || '');
     setNotesInput(asg.notes || '');
+    setGroupNameInput(asg.groupName || '');
+    setGroupMembersInput(
+      Array.isArray(asg.groupMembers) ? asg.groupMembers.join('\n') : asg.groupMembers || ''
+    );
     setSubmitFeedback(null);
   };
 
   const handleFileChange = (e) => {
     const file = e.target.files?.[0];
     if (file) {
-      if (file.size > 25 * 1024 * 1024) {
+      const limitMb = isEducatorOrAdmin ? 25 : 15;
+      if (file.size > limitMb * 1024 * 1024) {
         setSubmitFeedback({
           type: 'error',
-          text: 'Ukuran file melebihi batas maksimal 25 MB!',
+          text: `Ukuran file melebihi batas maksimal ${limitMb} MB!`,
         });
         return;
       }
@@ -173,6 +200,36 @@ export default function MaterialsTab({ onSelectSubject }) {
       return;
     }
 
+    const activeTaskType = selectedAssignment.taskType === 'kelompok' ? 'kelompok' : 'individu';
+    const cleanGroupName = groupNameInput.trim();
+    const parsedGroupMembers = groupMembersInput
+      .split(/[\r\n,;]+/)
+      .map((item) => item.trim())
+      .filter(Boolean);
+
+    if (activeTaskType === 'kelompok') {
+      if (!cleanGroupName) {
+        setSubmitFeedback({
+          type: 'error',
+          text:
+            language === 'en'
+              ? 'Group name is required for group assignments.'
+              : 'Nama Kelompok wajib diisi untuk tugas kelompok.',
+        });
+        return;
+      }
+      if (parsedGroupMembers.length === 0) {
+        setSubmitFeedback({
+          type: 'error',
+          text:
+            language === 'en'
+              ? 'List at least one group member (Name / Student ID).'
+              : 'Daftar anggota kelompok (Nama / NIM) wajib diisi minimal 1 anggota.',
+        });
+        return;
+      }
+    }
+
     const cleanExternalUrl = externalUrlInput.trim();
     if (cleanExternalUrl && !isValidExternalUrl(cleanExternalUrl)) {
       setSubmitFeedback({
@@ -182,21 +239,13 @@ export default function MaterialsTab({ onSelectSubject }) {
       return;
     }
 
-    if (!isEducatorOrAdmin && !cleanExternalUrl && !selectedAssignment.submittedFile?.url) {
+    if (!selectedFile && !cleanExternalUrl && !selectedAssignment.submittedFile) {
       setSubmitFeedback({
         type: 'error',
         text:
           language === 'en'
-            ? 'Enter a valid external URL (Google Drive / GitHub / OneDrive / Docs) to submit.'
-            : 'Masukkan tautan URL eksternal yang valid (Google Drive / GitHub / OneDrive / Docs) terlebih dahulu!',
-      });
-      return;
-    }
-
-    if (!selectedFile && !cleanExternalUrl && !selectedAssignment.submittedFile) {
-      setSubmitFeedback({
-        type: 'error',
-        text: 'Pilih berkas dokumen atau masukkan tautan URL eksternal tugas terlebih dahulu!',
+            ? 'Select a file to upload or enter an external URL first!'
+            : 'Pilih berkas dokumen atau masukkan tautan URL eksternal tugas terlebih dahulu!',
       });
       return;
     }
@@ -208,11 +257,16 @@ export default function MaterialsTab({ onSelectSubject }) {
       let fileName = selectedAssignment.submittedFile?.name || '';
       let fileSize = selectedAssignment.submittedFile?.size || '';
       let fileUrl = selectedAssignment.submittedFile?.url || '';
-      let storageType = 'external_url';
+      let storageType = selectedAssignment.submittedFile?.storageType || 'external_url';
       let extraNote = '';
 
       if (selectedFile) {
-        const uploadResult = await uploadMediaFile(selectedFile, 'document');
+        const uploadResult = isEducatorOrAdmin
+          ? await uploadMediaFile(selectedFile, 'document')
+          : await uploadMediaFile(selectedFile, 'submission', {
+              classId: selectedAssignment.classId,
+              assignmentId: selectedAssignment.id,
+            });
         fileName = selectedFile.name;
         fileSize = `${(selectedFile.size / (1024 * 1024)).toFixed(2)} MB`;
 
@@ -249,6 +303,9 @@ export default function MaterialsTab({ onSelectSubject }) {
           assignmentTitle: selectedAssignment.title,
           className: selectedAssignment.subject,
           studentName: userProfile?.displayName || currentUser.displayName || 'Mahasiswa',
+          taskType: activeTaskType,
+          groupName: cleanGroupName,
+          groupMembers: parsedGroupMembers,
           fileName,
           fileSize,
           fileUrl,
@@ -277,6 +334,8 @@ export default function MaterialsTab({ onSelectSubject }) {
                 submittedAt: submittedAtLabel,
                 externalUrl: cleanExternalUrl || fileUrl,
                 notes: notesInput.trim(),
+                groupName: activeTaskType === 'kelompok' ? cleanGroupName : '',
+                groupMembers: activeTaskType === 'kelompok' ? parsedGroupMembers : [],
               }
             : asg
         )
@@ -292,6 +351,8 @@ export default function MaterialsTab({ onSelectSubject }) {
         setSelectedFile(null);
         setExternalUrlInput('');
         setNotesInput('');
+        setGroupNameInput('');
+        setGroupMembersInput('');
         setSubmitFeedback(null);
       }, 1300);
     } catch (err) {
@@ -621,6 +682,15 @@ export default function MaterialsTab({ onSelectSubject }) {
                             <span className="font-bold text-amber-700 dark:text-[#f59e0b] bg-amber-50 dark:bg-[#f59e0b]/10 border border-amber-200 dark:border-[#f59e0b]/30 px-1.5 py-0.2 rounded-xs">
                               PERTEMUAN {Number(asg.meetingNo || 1)}
                             </span>
+                            <span
+                              className={`font-bold px-1.5 py-0.2 rounded-xs uppercase border ${
+                                asg.taskType === 'kelompok'
+                                  ? 'bg-indigo-50 dark:bg-indigo-950/60 text-indigo-700 dark:text-indigo-300 border-indigo-200 dark:border-indigo-500/40'
+                                  : 'bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 border-slate-200 dark:border-slate-700'
+                              }`}
+                            >
+                              {asg.taskType === 'kelompok' ? 'KELOMPOK' : 'INDIVIDU'}
+                            </span>
                             <span className="text-slate-500 dark:text-slate-400 truncate max-w-[180px]">
                               {asg.subject}
                             </span>
@@ -646,6 +716,23 @@ export default function MaterialsTab({ onSelectSubject }) {
                       <p className="text-[11px] text-slate-600 dark:text-slate-400 leading-relaxed font-sans line-clamp-2">
                         {asg.note}
                       </p>
+                      {asg.attachmentUrl && getSafeHttpAttachmentUrl(asg.attachmentUrl) && (
+                        <a
+                          href={getSafeHttpAttachmentUrl(asg.attachmentUrl)}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          download={asg.attachmentName || undefined}
+                          className="inline-flex items-center gap-1 text-[10px] font-mono font-bold text-amber-700 dark:text-[#f59e0b] hover:underline"
+                        >
+                          <Paperclip className="w-3 h-3" />
+                          <span>{asg.attachmentName || 'Unduh Lampiran Instruksi'}</span>
+                        </a>
+                      )}
+                      {asg.groupName && (
+                        <p className="text-[10px] font-mono text-indigo-700 dark:text-indigo-300">
+                          Kelompok: <strong>{asg.groupName}</strong>
+                        </p>
+                      )}
 
                       <div className="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-slate-100 dark:border-[#1e2838] text-[10px] font-mono">
                         <div className="flex items-center gap-1.5 text-slate-500 dark:text-slate-400">
@@ -810,13 +897,37 @@ export default function MaterialsTab({ onSelectSubject }) {
             )}
 
             <form onSubmit={handleSubmitAssignment} className="p-4 space-y-3.5">
-              <div className="p-3 bg-slate-50 dark:bg-[#0a0f18] rounded-lg border border-slate-200 dark:border-[#232f42] text-xs space-y-1">
-                <span className="text-[10px] font-mono font-bold text-slate-500 dark:text-slate-400 uppercase block">
-                  PETUNJUK PENUGASAN:
-                </span>
+              <div className="p-3 bg-slate-50 dark:bg-[#0a0f18] rounded-lg border border-slate-200 dark:border-[#232f42] text-xs space-y-1.5">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-[10px] font-mono font-bold text-slate-500 dark:text-slate-400 uppercase block">
+                    PETUNJUK PENUGASAN:
+                  </span>
+                  <span
+                    className={`text-[9px] font-mono font-bold px-2 py-0.5 rounded-xs uppercase border ${
+                      selectedAssignment.taskType === 'kelompok'
+                        ? 'bg-indigo-50 dark:bg-indigo-950/60 text-indigo-700 dark:text-indigo-300 border-indigo-200 dark:border-indigo-500/40'
+                        : 'bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 border-slate-200 dark:border-slate-700'
+                    }`}
+                  >
+                    {selectedAssignment.taskType === 'kelompok' ? 'TUGAS KELOMPOK' : 'TUGAS INDIVIDU'}
+                  </span>
+                </div>
                 <p className="text-slate-700 dark:text-slate-300 text-[11px] leading-relaxed">
                   {selectedAssignment.note}
                 </p>
+                {selectedAssignment.attachmentUrl &&
+                  getSafeHttpAttachmentUrl(selectedAssignment.attachmentUrl) && (
+                    <a
+                      href={getSafeHttpAttachmentUrl(selectedAssignment.attachmentUrl)}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      download={selectedAssignment.attachmentName || undefined}
+                      className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-[#f59e0b]/40 text-[11px] font-mono font-bold text-amber-800 dark:text-[#f59e0b] hover:underline"
+                    >
+                      <Paperclip className="w-3.5 h-3.5" />
+                      <span>{selectedAssignment.attachmentName || 'Unduh Lampiran Instruksi'}</span>
+                    </a>
+                  )}
                 <div className="flex items-center justify-between text-[10px] font-mono text-slate-500 dark:text-slate-400 pt-1 border-t border-slate-200 dark:border-[#192433]">
                   <span>Maks: {selectedAssignment.maxSize}</span>
                   <span className="text-amber-600 dark:text-[#f59e0b]">
@@ -839,7 +950,46 @@ export default function MaterialsTab({ onSelectSubject }) {
                 </div>
               )}
 
-              {isEducatorOrAdmin && !isSelectedTaskGraded && (
+              {selectedAssignment.taskType === 'kelompok' && (
+                <div className="p-3 bg-indigo-50/60 dark:bg-indigo-950/20 rounded-lg border border-indigo-200 dark:border-indigo-500/40 space-y-2.5">
+                  <div>
+                    <label className="block text-[11px] font-mono font-bold text-indigo-900 dark:text-indigo-200 mb-1 uppercase">
+                      {language === 'en' ? 'GROUP NAME' : 'NAMA KELOMPOK'}
+                    </label>
+                    <input
+                      type="text"
+                      required={!isSelectedTaskGraded}
+                      readOnly={isSelectedTaskGraded}
+                      disabled={isSelectedTaskGraded}
+                      aria-label={language === 'en' ? 'Group name' : 'Nama kelompok'}
+                      value={groupNameInput}
+                      onChange={(e) => setGroupNameInput(e.target.value)}
+                      placeholder="Contoh: Kelompok 03 — Sistem Terdistribusi"
+                      className="w-full p-2 bg-white dark:bg-[#070b12] border border-indigo-300 dark:border-indigo-700 rounded-md text-xs text-slate-900 dark:text-slate-100 disabled:opacity-70"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[11px] font-mono font-bold text-indigo-900 dark:text-indigo-200 mb-1 uppercase">
+                      {language === 'en'
+                        ? 'GROUP MEMBERS (NAME / STUDENT ID)'
+                        : 'DAFTAR ANGGOTA KELOMPOK (NAMA / NIM)'}
+                    </label>
+                    <textarea
+                      rows="2"
+                      required={!isSelectedTaskGraded}
+                      readOnly={isSelectedTaskGraded}
+                      disabled={isSelectedTaskGraded}
+                      aria-label={language === 'en' ? 'Group members list' : 'Daftar anggota kelompok'}
+                      value={groupMembersInput}
+                      onChange={(e) => setGroupMembersInput(e.target.value)}
+                      placeholder="Andi Pratama (23051204001), Budi Santoso (23051204002)"
+                      className="w-full p-2 bg-white dark:bg-[#070b12] border border-indigo-300 dark:border-indigo-700 rounded-md text-xs text-slate-900 dark:text-slate-100 disabled:opacity-70"
+                    />
+                  </div>
+                </div>
+              )}
+
+              {!isSelectedTaskGraded && (
                 <div>
                   <label className="block text-[11px] font-mono font-bold text-slate-700 dark:text-slate-300 mb-1.5 uppercase">
                     UNGGAH BERKAS VIA CLOUDINARY ({selectedAssignment.allowedFormats})
@@ -848,7 +998,8 @@ export default function MaterialsTab({ onSelectSubject }) {
                   <div className="border-2 border-dashed border-slate-300 dark:border-slate-700 hover:border-[#f59e0b] rounded-xl p-4 text-center bg-slate-50 dark:bg-[#0d121a] transition cursor-pointer relative group">
                     <input
                       type="file"
-                      accept={selectedAssignment.allowedFormats}
+                      aria-label={language === 'en' ? 'Upload assignment submission file' : 'Unggah berkas pengumpulan tugas'}
+                      accept={isEducatorOrAdmin ? MATERIAL_ALLOWED_ACCEPT : SUBMISSION_ALLOWED_ACCEPT}
                       onChange={handleFileChange}
                       className="absolute inset-0 opacity-0 cursor-pointer w-full h-full"
                     />
@@ -862,8 +1013,8 @@ export default function MaterialsTab({ onSelectSubject }) {
                     </p>
                     <p className="text-[10px] text-slate-500 dark:text-slate-400 mt-1 font-mono">
                       {selectedFile
-                        ? `${(selectedFile.size / (1024 * 1024)).toFixed(2)} MB • Siap diunggah`
-                        : `Mendukung ${selectedAssignment.allowedFormats}`}
+                        ? `${(selectedFile.size / (1024 * 1024)).toFixed(2)} MB • Siap diunggah ke Cloudinary`
+                        : `Mendukung ${selectedAssignment.allowedFormats} (Maks ${selectedAssignment.maxSize || '15 MB'})`}
                     </p>
                   </div>
                 </div>
@@ -874,13 +1025,13 @@ export default function MaterialsTab({ onSelectSubject }) {
                   <LinkIcon className="w-3 h-3 text-sky-600 dark:text-[#00e5ff]" />
                   <span>
                     {language === 'en'
-                      ? 'EXTERNAL SUBMISSION URL (GOOGLE DRIVE / GITHUB / ONEDRIVE / DOCS)'
-                      : 'TAUTAN URL EKSTERNAL (GOOGLE DRIVE / GITHUB / ONEDRIVE / DOCS)'}
+                      ? 'EXTERNAL SUBMISSION URL (OPTIONAL IF FILE UPLOADED)'
+                      : 'TAUTAN URL EKSTERNAL (OPSIONAL JIKA UNGGAH FILE)'}
                   </span>
                 </label>
                 <input
                   type="url"
-                  required={!isEducatorOrAdmin && !isSelectedTaskGraded}
+                  required={!isSelectedTaskGraded && !selectedFile && !selectedAssignment.submittedFile?.url}
                   readOnly={isSelectedTaskGraded}
                   disabled={isSelectedTaskGraded}
                   value={externalUrlInput}
@@ -888,11 +1039,11 @@ export default function MaterialsTab({ onSelectSubject }) {
                   placeholder="https://drive.google.com/... atau https://github.com/..."
                   className="w-full p-2.5 bg-white dark:bg-[#070b12] border border-slate-300 dark:border-slate-700 rounded-md text-xs text-slate-900 dark:text-slate-100 placeholder-slate-400 dark:placeholder-slate-600 focus:outline-none focus:border-[#00e5ff] font-mono disabled:opacity-70"
                 />
-                {!isEducatorOrAdmin && !isSelectedTaskGraded && (
+                {!isSelectedTaskGraded && (
                   <p className="text-[10px] text-slate-500 dark:text-slate-400 mt-1">
                     {language === 'en'
-                      ? 'Attach an accessible Google Drive, GitHub, OneDrive, or Docs link.'
-                      : 'Tempel tautan Google Drive, GitHub, OneDrive, atau Docs yang dapat diakses dosen.'}
+                      ? 'Upload directly via Cloudinary above or share a Google Drive, GitHub, OneDrive, or Docs link.'
+                      : 'Unggah berkas langsung lewat Cloudinary di atas atau tempel tautan Google Drive / GitHub / Docs.'}
                   </p>
                 )}
               </div>
@@ -922,6 +1073,8 @@ export default function MaterialsTab({ onSelectSubject }) {
                   onClick={() => {
                     setSelectedAssignment(null);
                     setSelectedFile(null);
+                    setGroupNameInput('');
+                    setGroupMembersInput('');
                     setSubmitFeedback(null);
                   }}
                   className="px-3 py-1.5 text-xs text-slate-500 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white transition"
@@ -933,11 +1086,9 @@ export default function MaterialsTab({ onSelectSubject }) {
                     type="submit"
                     disabled={
                       isSubmitting ||
-                      (!isEducatorOrAdmin
-                        ? !externalUrlInput.trim()
-                        : !selectedFile &&
-                          !externalUrlInput.trim() &&
-                          !selectedAssignment.submittedFile)
+                      (!selectedFile &&
+                        !externalUrlInput.trim() &&
+                        !selectedAssignment.submittedFile)
                     }
                     className="bg-[#f59e0b] hover:bg-[#d97706] text-black text-xs font-bold px-4 py-2 rounded-sm transition flex items-center gap-1.5 uppercase shadow-md disabled:opacity-40"
                   >

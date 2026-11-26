@@ -1,4 +1,4 @@
-// Abstraksi Layanan Asisten AI (Mode Asisten Lokal Terisolasi / Gemini API Ditunda)
+// Layanan Asisten AI Smartsa LMS (Google Gemini Server-Side & Proteksi Exam Lockout Firestore)
 import { collection, getDocs, onSnapshot, query, where } from 'firebase/firestore';
 import { auth, db } from '../firebase';
 
@@ -194,13 +194,25 @@ function buildLocalFrozenReply(mode, prompt) {
   return [
     '[MODE ASISTEN LOKAL — Smartsa LMS]',
     `Pertanyaan Anda: "${prompt}"`,
-    'Silakan pelajari modul Silabus, Delta JSON, dan panduan praktikum kelas terkait. Integrasi Gemini API live sedang ditunda pada fase ini.',
+    'Silakan pelajari modul perkuliahan terkait atau aktifkan sesi login/backend `/api/ai` untuk respons Google Gemini AI penuh.',
   ].join('\n');
 }
 
-export async function askAIAssistant({ mode = 'learning', prompt, context = '', isExamActive = false }) {
-  if (!prompt || !prompt.trim()) {
+const MAX_CLIENT_PROMPT_LENGTH = 2000;
+
+export async function askAIAssistant({
+  mode = 'learning',
+  prompt,
+  context = '',
+  history = [],
+  isExamActive = false,
+}) {
+  const cleanPrompt = String(prompt || '').trim();
+  if (!cleanPrompt) {
     throw new Error('Pertanyaan atau prompt tidak boleh kosong.');
+  }
+  if (cleanPrompt.length > MAX_CLIENT_PROMPT_LENGTH) {
+    throw new Error(`Prompt terlalu panjang (maksimal ${MAX_CLIENT_PROMPT_LENGTH} karakter).`);
   }
 
   const liveExamCheck = await getActiveExamStatus();
@@ -210,52 +222,91 @@ export async function askAIAssistant({ mode = 'learning', prompt, context = '', 
     );
   }
 
+  const sanitizedHistory = Array.isArray(history)
+    ? history
+        .slice(-8)
+        .map((item) => ({
+          role: item?.role === 'user' || item?.sender === 'user' ? 'user' : 'model',
+          text: String(item?.text || item?.content || '').trim().slice(0, 1000),
+        }))
+        .filter((item) => Boolean(item.text))
+    : [];
+
   // Kirim permintaan ke endpoint backend /api/ai dengan Firebase ID Token
   if (auth?.currentUser) {
+    let res;
     try {
       const token = await auth.currentUser.getIdToken();
-      const res = await fetch('/api/ai', {
+      res = await fetch('/api/ai', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
           Authorization: `Bearer ${token}`,
         },
-        body: JSON.stringify({ mode, prompt, context, isExamActive: false }),
+        body: JSON.stringify({
+          mode,
+          prompt: cleanPrompt,
+          context: typeof context === 'string' ? context.trim().slice(0, 4000) : '',
+          history: sanitizedHistory,
+          isExamActive: false,
+        }),
       });
-
-      const isJson = res.headers.get('content-type')?.includes('application/json');
-      if (isJson) {
-        const data = await res.json();
-        if (res.status === 401 || res.status === 403) {
-          throw new Error(data.error || 'Akses ke layanan AI ditolak.');
-        }
-        if (res.ok) {
-          return {
-            text: data.response_text,
-            isLive: Boolean(data.is_live),
-            mode: data.mode || 'local_frozen',
-            tokens: data.tokens_consumed || 0,
-            note:
-              data.note ||
-              (data.is_live
-                ? null
-                : 'Mode Asisten Lokal (Integrasi Gemini API ditunda/dibekukan di server).'),
-          };
-        }
+    } catch (networkErr) {
+      if (import.meta.env.DEV) {
+        return {
+          text: buildLocalFrozenReply(mode, cleanPrompt),
+          isLive: false,
+          mode: 'local_frozen',
+          note: `Endpoint /api/ai lokal belum terjangkau (${networkErr?.message || 'offline'}). Menggunakan panduan lokal pengembangan.`,
+        };
       }
-    } catch (err) {
-      if (err instanceof Error && (err.message.startsWith('AKSES DITOLAK') || err.message.includes('ditolak'))) {
-        throw err;
-      }
-      // Fallback dev saat npm run dev (endpoint /api/* Vercel tidak aktif)
+      throw new Error(
+        `Gagal terhubung ke server AI (/api/ai): ${networkErr?.message || 'Kesalahan jaringan.'}`
+      );
     }
+
+    const contentType = res.headers?.get('content-type') || '';
+    const isJson = contentType.includes('application/json');
+    const data = isJson ? await res.json().catch(() => null) : null;
+
+    if (!res.ok) {
+      if (res.status === 429) {
+        const retryAfter = Number(data?.retryAfterSeconds || res.headers?.get('retry-after') || 0);
+        throw new Error(
+          data?.error ||
+            `Batas kuota permintaan AI tercapai. Silakan coba lagi dalam ${retryAfter || 60} detik.`
+        );
+      }
+      if (res.status === 401 || res.status === 403) {
+        throw new Error(data?.error || 'Akses ke layanan AI ditolak.');
+      }
+      throw new Error(
+        data?.error ||
+          `Server AI mengembalikan error HTTP ${res.status}. Silakan periksa konfigurasi server atau coba lagi nanti.`
+      );
+    }
+
+    if (data && typeof data.response_text === 'string') {
+      return {
+        text: data.response_text,
+        isLive: Boolean(data.is_live),
+        mode: data.mode || (data.is_live ? 'gemini_live' : 'local_frozen'),
+        model: data.model || '',
+        tokens: data.tokens_consumed || 0,
+        remainingQuota:
+          typeof data.remaining_quota === 'number' ? data.remaining_quota : undefined,
+        note: data.note || null,
+      };
+    }
+
+    throw new Error('Respons server /api/ai tidak valid atau bukan JSON.');
   }
 
-  await new Promise((resolve) => setTimeout(resolve, 450));
+  await new Promise((resolve) => setTimeout(resolve, 350));
   return {
-    text: buildLocalFrozenReply(mode, prompt.trim()),
+    text: buildLocalFrozenReply(mode, cleanPrompt),
     isLive: false,
     mode: 'local_frozen',
-    note: 'Mode Asisten Lokal (Integrasi Gemini API ditunda — berjalan tanpa panggilan API eksternal).',
+    note: 'Mode Tamu/Offline: Masuk dengan akun terdaftar untuk mengakses Google Gemini AI melalui /api/ai.',
   };
 }

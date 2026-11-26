@@ -283,4 +283,30 @@ describe('Static Security & Firestore Rules Audit', () => {
     expect(seedCode).toContain(".collection('exams')");
     expect(seedCode).toContain(".collection('exam_keys')");
   });
+
+  it('adds manual_books rules, locks graded submissions updates, adds admin AI nav, and removes paused Gemini static text', () => {
+    const rulesCode = readFileSync(join(ROOT_DIR, 'firestore.rules'), 'utf8');
+    const manualMatch = rulesCode.match(/match \/manual_books\/\{bookId\}\s*\{([\s\S]*?)\}/);
+    expect(manualMatch).not.toBeNull();
+    expect(manualMatch[1]).toContain('allow read: if isSignedIn();');
+    expect(manualMatch[1]).toContain('allow create: if isLecturerOrAdmin();');
+    expect(manualMatch[1]).toContain('allow update, delete: if isLecturerOrAdmin();');
+
+    const submissionsMatch = rulesCode.match(/match \/submissions\/\{submissionId\}\s*\{([\s\S]*?)\n\s{4}\}/);
+    expect(submissionsMatch).not.toBeNull();
+    expect(submissionsMatch[1]).toMatch(
+      /allow update:[\s\S]*!\('grade' in resource\.data && resource\.data\.grade != null\)[\s\S]*!\('score' in resource\.data && resource\.data\.score != null\)/
+    );
+
+    const sidebarCode = readFileSync(join(SRC_DIR, 'components', 'common', 'Sidebar.jsx'), 'utf8');
+    const adminBranch = sidebarCode.match(/if \(role === ROLES\.ADMIN\)\s*\{([\s\S]*?)\n\s{4}\}/);
+    expect(adminBranch).not.toBeNull();
+    expect(adminBranch[1]).toContain("id: 'ai'");
+
+    const aiViewCode = readFileSync(
+      join(SRC_DIR, 'components', 'features', 'AIAssistantView.jsx'),
+      'utf8'
+    );
+    expect(aiViewCode).not.toMatch(/Gemini Ditunda|Integrasi live Google Gemini LLM ditunda/i);
+  });
 });

@@ -1,8 +1,9 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { useAuth } from '../../context/useAuth';
 import { useLanguage } from '../../context/useLanguage';
 import { ROLES } from '../../constants/roles';
 import { askAIAssistant, subscribeActiveExamStatus } from '../../services/aiService';
+import { fetchClassesForUser } from '../../services/lmsFirestoreService';
 import {
   Sparkles,
   Send,
@@ -11,19 +12,36 @@ import {
   Bot,
   User,
   Cpu,
+  BookOpen,
 } from 'lucide-react';
 
 export default function AIAssistantView() {
   const { role, currentUser } = useAuth();
   const { t, language } = useLanguage();
   const isTeacher = role === ROLES.LECTURER || role === ROLES.ADMIN;
-  const assistantTitle = isTeacher ? t('sidebar_ai_lecturer') : t('sidebar_ai_student');
+  const assistantTitle =
+    role === ROLES.ADMIN
+      ? t('sidebar_ai_admin')
+      : isTeacher
+        ? t('sidebar_ai_lecturer')
+        : t('sidebar_ai_student');
 
   const [inputPrompt, setInputPrompt] = useState('');
   const [examLock, setExamLock] = useState({ isExamActive: false, activeAttempt: null });
-  const [assistantMode, setAssistantMode] = useState('local_frozen');
+  const [assistantMode, setAssistantMode] = useState('ready');
+  const [activeModel, setActiveModel] = useState('');
   const [loading, setLoading] = useState(false);
-  const [remainingQuota, setRemainingQuota] = useState(18);
+  const [remainingQuota, setRemainingQuota] = useState(20);
+  const [userClasses, setUserClasses] = useState([]);
+  const [selectedClassId, setSelectedClassId] = useState('');
+  const mountedRef = useRef(true);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
 
   useEffect(() => {
     const unsubscribe = subscribeActiveExamStatus((status) => {
@@ -32,26 +50,72 @@ export default function AIAssistantView() {
     return () => unsubscribe();
   }, [currentUser?.uid]);
 
+  useEffect(() => {
+    if (!currentUser?.uid) {
+      return undefined;
+    }
+    let active = true;
+    Promise.resolve()
+      .then(() => fetchClassesForUser({ uid: currentUser.uid, role }))
+      .then((res) => {
+        if (!active || !mountedRef.current) return;
+        const list = res?.classes || [];
+        setUserClasses(list);
+      })
+      .catch(() => {
+        if (active && mountedRef.current) {
+          setUserClasses([]);
+        }
+      });
+    return () => {
+      active = false;
+    };
+  }, [currentUser?.uid, role]);
+
+  const availableClasses = currentUser?.uid ? userClasses : [];
+  const effectiveSelectedClassId = availableClasses.some((c) => c.id === selectedClassId)
+    ? selectedClassId
+    : '';
+
   const [messages, setMessages] = useState([
     {
       sender: 'ai',
       text: isTeacher
-        ? (language === 'en'
-            ? 'Hello Educator! I am Smartsa LMS Teaching Assistant (Local Assistant Mode). I can help draft syllabi, Bloom taxonomy questions, and task rubrics.'
-            : 'Halo Bapak/Ibu Pendidik! Saya Teaching Assistant Smartsa LMS (Mode Asisten Lokal). Saya dapat membantu menyusun draf silabus, bank soal berbasis Taksonomi Bloom, dan rubrik tugas.')
-        : (language === 'en'
-            ? 'Hello! I am Smartsa LMS Learning Assistant (Local Assistant Mode). Ask about programming concepts, Firestore architecture, or request simple analogies.'
-            : 'Halo! Saya Learning Assistant Smartsa LMS (Mode Asisten Lokal). Tanyakan konsep pemrograman, arsitektur Firestore, atau mintalah analogi sederhana untuk memahami materi kuliah.'),
-      note:
-        language === 'en'
-          ? 'Local Assistant Mode active (Live Google Gemini LLM integration temporarily paused).'
-          : 'Mode Asisten Lokal aktif (Integrasi live Google Gemini LLM ditunda sementara).',
+        ? language === 'en'
+          ? 'Hello Educator! I am Smartsa LMS Teaching Assistant powered by server-side Gemini AI. I can help draft syllabi, Bloom taxonomy questions, and grading rubrics.'
+          : 'Halo Bapak/Ibu Pendidik! Saya Teaching Assistant Smartsa LMS berbasis Gemini AI (server-side). Saya dapat membantu menyusun draf silabus, bank soal Taksonomi Bloom, dan rubrik penilaian.'
+        : language === 'en'
+          ? 'Hello! I am Smartsa LMS Learning Assistant powered by server-side Gemini AI. Ask about programming concepts, course materials, or request clear analogies.'
+          : 'Halo! Saya Learning Assistant Smartsa LMS berbasis Gemini AI (server-side). Tanyakan konsep pemrograman, materi mata kuliah, atau mintalah analogi sederhana untuk membantu belajar.',
+      note: null,
     },
   ]);
 
   const handleSend = async (customPrompt) => {
-    const textToSend = customPrompt || inputPrompt;
-    if (!textToSend.trim() || loading) return;
+    const textToSend = (customPrompt || inputPrompt).trim();
+    if (!textToSend || loading) return;
+
+    const historySnapshot = messages.slice(-8).map((msg) => ({
+      role: msg.sender === 'user' ? 'user' : 'model',
+      text: msg.text,
+    }));
+
+    const selectedClass = availableClasses.find((c) => c.id === effectiveSelectedClassId) || null;
+    const contextText = selectedClass
+      ? [
+          `Mata Kuliah: ${selectedClass.name || selectedClass.title} (${selectedClass.code || '-'})`,
+          selectedClass.description ? `Deskripsi: ${selectedClass.description}` : '',
+          Array.isArray(selectedClass.meetings) && selectedClass.meetings.length > 0
+            ? `Daftar Pertemuan: ${selectedClass.meetings
+                .map((m) => `P${m.order}: ${m.title}`)
+                .join('; ')}`
+            : '',
+        ]
+          .filter(Boolean)
+          .join('\n')
+      : language === 'en'
+        ? 'Smartsa LMS Academic Context'
+        : 'Konteks Akademik Smartsa LMS';
 
     const userMessage = { sender: 'user', text: textToSend };
     setMessages((prev) => [...prev, userMessage]);
@@ -63,12 +127,14 @@ export default function AIAssistantView() {
       const result = await askAIAssistant({
         mode,
         prompt: textToSend,
-        context: language === 'en' ? 'Smartsa LMS Learning Assistant' : 'Asisten Pembelajaran Smartsa LMS',
+        context: contextText,
+        history: historySnapshot,
         isExamActive: examLock.isExamActive,
       });
 
       if (result.isLive) {
         setAssistantMode('gemini_live');
+        if (result.model) setActiveModel(result.model);
       } else {
         setAssistantMode('local_frozen');
       }
@@ -81,7 +147,11 @@ export default function AIAssistantView() {
           note: result.note,
         },
       ]);
-      setRemainingQuota((prev) => Math.max(0, prev - 1));
+      if (typeof result.remainingQuota === 'number') {
+        setRemainingQuota(result.remainingQuota);
+      } else {
+        setRemainingQuota((prev) => Math.max(0, prev - 1));
+      }
     } catch (err) {
       setMessages((prev) => [
         ...prev,
@@ -132,10 +202,12 @@ export default function AIAssistantView() {
               <span className="inline-flex items-center gap-1.5 bg-amber-500/20 border border-amber-400/40 text-amber-200 text-xs px-3 py-1 rounded-full font-semibold">
                 <Cpu className="w-3.5 h-3.5" />
                 {assistantMode === 'gemini_live'
-                  ? 'Google Gemini LLM (Live)'
-                  : language === 'en'
-                  ? 'Local Assistant Mode (Gemini Paused)'
-                  : 'Mode Asisten Lokal (Gemini Ditunda)'}
+                  ? `Google Gemini AI (Live${activeModel ? ` • ${activeModel}` : ''})`
+                  : assistantMode === 'local_frozen'
+                    ? language === 'en'
+                      ? 'Local Fallback (No Gemini Key on Server)'
+                      : 'Fallback Lokal (API Key Server Belum Aktif)'
+                    : 'Google Gemini AI (Server-Side Ready)'}
               </span>
               <span className="inline-flex items-center gap-1.5 bg-blue-500/20 border border-blue-400/30 text-blue-200 text-xs px-3 py-1 rounded-full">
                 <Sparkles className="w-3.5 h-3.5" />
@@ -145,8 +217,8 @@ export default function AIAssistantView() {
             <h2 className="text-xl sm:text-2xl font-bold">{assistantTitle}</h2>
             <p className="text-xs sm:text-sm text-slate-300 mt-1 max-w-xl">
               {language === 'en'
-                ? 'The learning assistant runs in safe local mode while live Gemini API integration is paused, verifying active exam status in Cloud Firestore (exam_attempts).'
-                : 'Asisten pembelajaran berjalan dalam mode lokal aman selama integrasi Gemini API dibekukan, dengan verifikasi status ujian aktif di Cloud Firestore (exam_attempts).'}
+                ? 'Requests are processed securely via server-side /api/ai (Gemini API key hidden from client) with real-time Cloud Firestore exam lockout verification.'
+                : 'Permintaan diproses aman melalui endpoint server-side /api/ai (kunci Gemini terlindungi di server) dengan verifikasi status ujian aktif real-time di Cloud Firestore.'}
             </p>
           </div>
 
@@ -199,6 +271,35 @@ export default function AIAssistantView() {
                 : `Sistem mendeteksi Anda sedang memiliki sesi ujian aktif${examLock.activeAttempt?.classId ? ` (${examLock.activeAttempt.classId})` : ''}. Asisten AI dan endpoint /api/ai otomatis menolak akses dengan status 403 Forbidden hingga ujian selesai dikumpulkan.`}
             </p>
           </div>
+        </div>
+      )}
+
+      {/* Course Context Selector */}
+      {availableClasses.length > 0 && (
+        <div className="bg-white dark:bg-[#121822] px-4 py-3 rounded-2xl border border-slate-200 dark:border-[#232f42] flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-xs">
+          <label
+            htmlFor="ai-class-context-select"
+            className="font-semibold text-slate-700 dark:text-slate-300 flex items-center gap-2 shrink-0"
+          >
+            <BookOpen className="w-4 h-4 text-amber-500" />
+            <span>{language === 'en' ? 'Course Context:' : 'Konteks Mata Kuliah:'}</span>
+          </label>
+          <select
+            id="ai-class-context-select"
+            value={effectiveSelectedClassId}
+            disabled={loading || isLocked}
+            onChange={(e) => setSelectedClassId(e.target.value)}
+            className="w-full sm:w-80 px-3 py-1.5 text-xs rounded-xl border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-[#0b0f17] text-slate-900 dark:text-slate-100 focus:outline-none focus:border-indigo-500"
+          >
+            <option value="">
+              {language === 'en' ? '-- General Academic Context --' : '-- Konteks Akademik Umum --'}
+            </option>
+            {availableClasses.map((cls) => (
+              <option key={cls.id} value={cls.id}>
+                {cls.code ? `[${cls.code}] ` : ''}{cls.name || cls.title}
+              </option>
+            ))}
+          </select>
         </div>
       )}
 
@@ -255,8 +356,8 @@ export default function AIAssistantView() {
               </div>
               <div className="bg-slate-50 dark:bg-[#161d2a] border border-slate-200 dark:border-[#232f42] p-3 rounded-2xl text-xs text-slate-500 dark:text-slate-400">
                 {language === 'en'
-                  ? 'Local assistant is processing learning context...'
-                  : 'Asisten lokal sedang memproses konteks materi pembelajaran...'}
+                  ? 'Gemini AI is analyzing your learning context...'
+                  : 'Asisten AI sedang memproses pertanyaan dan konteks pembelajaran...'}
               </div>
             </div>
           )}

@@ -171,6 +171,8 @@ service cloud.firestore {
           isSignedIn()
           && resource.data.uid == request.auth.uid
           && submissionId == (resource.data.assignmentId + '_' + request.auth.uid)
+          && !('grade' in resource.data && resource.data.grade != null)
+          && !('score' in resource.data && resource.data.score != null)
           && !request.resource.data.diff(resource.data).affectedKeys().hasAny(['grade', 'score', 'feedback', 'gradedBy', 'uid', 'assignmentId', 'classId'])
         );
       allow delete: if isAdmin() || (
@@ -361,6 +363,13 @@ service cloud.firestore {
     // 11. rate_limits/{scope}_{uid} (strictly server-only via Admin SDK)
     match /rate_limits/{rateLimitId} {
       allow read, write: if false;
+    }
+
+    // 12. manual_books/{bookId} (panduan global Smartsa LMS)
+    match /manual_books/{bookId} {
+      allow read: if isSignedIn();
+      allow create: if isLecturerOrAdmin();
+      allow update, delete: if isLecturerOrAdmin();
     }
   }
 }

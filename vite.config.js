@@ -40,6 +40,9 @@ export default defineConfig({
             if (id.includes('lucide-react')) {
               return 'icons-vendor';
             }
+            if (id.includes('qrcode') || id.includes('html5-qrcode')) {
+              return 'qr-vendor';
+            }
           }
         },
       },

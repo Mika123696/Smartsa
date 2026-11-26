@@ -25,6 +25,8 @@ import {
   Edit3,
   Sun,
   Moon,
+  BookMarked,
+  ChevronRight,
 } from 'lucide-react';
 
 const PRESET_AVATARS = [
@@ -50,7 +52,7 @@ const PRESET_AVATARS = [
   },
 ];
 
-export default function ProfileView({ onOpenAuth }) {
+export default function ProfileView({ onOpenAuth, onNavigateManualBook }) {
   const {
     userProfile,
     currentUser,
@@ -570,6 +572,39 @@ export default function ProfileView({ onOpenAuth }) {
           </span>
         </button>
       </div>
+
+      {/* AKSES CEPAT MANUAL BOOK GLOBAL (MOBILE & DESKTOP) */}
+      <button
+        type="button"
+        onClick={() => {
+          if (typeof onNavigateManualBook === 'function') {
+            onNavigateManualBook();
+          } else if (typeof window !== 'undefined') {
+            window.location.hash = '#manual-book';
+          }
+        }}
+        className="w-full text-left bg-white dark:bg-[#121822] p-4 rounded-xl border border-slate-200 dark:border-[#232f42] text-slate-900 dark:text-slate-100 flex items-center justify-between gap-3 hover:border-amber-400 dark:hover:border-[#f59e0b]/50 transition shadow-xs cursor-pointer"
+      >
+        <div className="flex items-center gap-3 min-w-0">
+          <div className="w-9 h-9 rounded-lg bg-amber-50 dark:bg-[#f59e0b]/15 border border-amber-200 dark:border-[#f59e0b]/40 text-amber-600 dark:text-[#f59e0b] flex items-center justify-center shrink-0">
+            <BookMarked className="w-4 h-4" />
+          </div>
+          <div className="min-w-0">
+            <span className="text-xs font-bold text-slate-900 dark:text-slate-100 font-mono block">
+              {t('sidebar_manual_book', 'Manual Book')}
+            </span>
+            <span className="text-[11px] text-slate-500 dark:text-slate-400 font-sans block mt-0.5 truncate">
+              {language === 'en'
+                ? 'Open official PDF user guides and academic handbooks'
+                : 'Buka dokumen panduan resmi & buku manual PDF Smartsa'}
+            </span>
+          </div>
+        </div>
+        <span className="inline-flex items-center gap-1 text-xs font-mono font-bold text-amber-700 dark:text-[#f59e0b] shrink-0">
+          <span>{language === 'en' ? 'Open' : 'Buka'}</span>
+          <ChevronRight className="w-4 h-4" />
+        </span>
+      </button>
 
       {/* Keamanan & MFA */}
       <div className="bg-white dark:bg-[#121822] p-4 sm:p-5 rounded-xl border border-slate-200 dark:border-[#232f42] text-slate-900 dark:text-slate-100 space-y-4 shadow-xs">

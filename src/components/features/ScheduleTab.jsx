@@ -14,8 +14,10 @@ import { fetchClassesForUser } from '../../services/lmsFirestoreService';
 import {
   getClassAttendance,
   getClassAttendanceSession,
+  parseAttendanceQrPayload,
   recordMeetingAttendance,
 } from '../../services/attendanceService';
+import QrScannerPanel from '../common/QrScannerPanel';
 
 export default function ScheduleTab() {
   const { t, language } = useLanguage();
@@ -32,6 +34,7 @@ export default function ScheduleTab() {
   const [historyData, setHistoryData] = useState({ attendedOrders: [], progress: 0, history: [] });
   const [historyLoading, setHistoryLoading] = useState(false);
   const [qrSubmitted, setQrSubmitted] = useState(false);
+  const [scanMode, setScanMode] = useState('manual');
   const [isScanning, setIsScanning] = useState(false);
   const [lastScanResult, setLastScanResult] = useState(null);
 
@@ -104,6 +107,7 @@ export default function ScheduleTab() {
   const handleOpenQR = async (subj) => {
     setSelectedQRSubject(subj);
     setQrSubmitted(false);
+    setScanMode('manual');
     setIsScanning(false);
     setLastScanResult(null);
     setSessionCodeInput('');
@@ -131,9 +135,13 @@ export default function ScheduleTab() {
     }
   };
 
-  const handleTriggerScan = async (e) => {
+  const handleTriggerScan = async (e, codeOverride = null) => {
     if (e) e.preventDefault();
     if (!selectedQRSubject || isScanning) return;
+
+    const rawCode =
+      codeOverride !== null ? codeOverride : sessionCodeInput || activeSessionInfo?.sessionCode || '';
+    const parsedSessionCode = parseAttendanceQrPayload(rawCode);
 
     setIsScanning(true);
     try {
@@ -143,7 +151,7 @@ export default function ScheduleTab() {
         meetingTitle: activeSessionInfo?.meetingNo
           ? `Pertemuan ${activeSessionInfo.meetingNo < 10 ? `0${activeSessionInfo.meetingNo}` : activeSessionInfo.meetingNo}: ${selectedQRSubject.title}`
           : `Pertemuan 01: ${selectedQRSubject.title}`,
-        sessionCode: sessionCodeInput || activeSessionInfo?.sessionCode || '',
+        sessionCode: parsedSessionCode,
       });
       setLastScanResult(res);
       setQrSubmitted(true);
@@ -329,45 +337,74 @@ export default function ScheduleTab() {
                     </div>
                   ) : null}
 
-                  <div className="w-40 h-40 mx-auto bg-slate-900 rounded-2xl relative overflow-hidden flex items-center justify-center border-4 border-[#f59e0b]/40">
-                    <Camera className="w-10 h-10 text-slate-400" />
-                    {isScanning && (
-                      <div className="absolute inset-x-0 h-1 bg-[#f59e0b] shadow-[0_0_12px_#f59e0b] animate-bounce top-1/2"></div>
-                    )}
-                    <span className="absolute bottom-2 text-[10px] text-slate-300">
-                      {currentUser ? (language === 'en' ? 'Enter Session Code' : 'Masukkan Kode Sesi Dosen') : t('qr_scanning')}
-                    </span>
+                  {/* Tab Mode Presensi: Input Manual vs Scan QR Kamera */}
+                  <div className="grid grid-cols-2 gap-1.5 p-1 rounded-xl bg-slate-100 dark:bg-[#0a0f18] border border-slate-200 dark:border-[#1e2a3f] font-mono">
+                    <button
+                      type="button"
+                      onClick={() => setScanMode('manual')}
+                      className={`py-1.5 px-2 rounded-lg text-[11px] font-bold transition ${
+                        scanMode === 'manual'
+                          ? 'bg-[#f59e0b] text-black shadow-xs'
+                          : 'text-slate-600 dark:text-slate-300 hover:bg-white/60 dark:hover:bg-[#121822]'
+                      }`}
+                    >
+                      {language === 'en' ? 'Manual Code Input' : 'Input Kode Manual'}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setScanMode('scanner')}
+                      className={`py-1.5 px-2 rounded-lg text-[11px] font-bold transition inline-flex items-center justify-center gap-1 ${
+                        scanMode === 'scanner'
+                          ? 'bg-[#f59e0b] text-black shadow-xs'
+                          : 'text-slate-600 dark:text-slate-300 hover:bg-white/60 dark:hover:bg-[#121822]'
+                      }`}
+                    >
+                      <Camera className="w-3.5 h-3.5" />
+                      <span>{language === 'en' ? 'Scan Camera QR' : 'Scan QR Kamera'}</span>
+                    </button>
                   </div>
 
-                  <div>
-                    <label className="block text-left text-[11px] font-mono text-slate-600 dark:text-slate-300 mb-1">
-                      {language === 'en' ? 'Attendance Session Code' : 'Kode Sesi Presensi'}{' '}
-                      {currentUser ? (language === 'en' ? '(Required)' : '(Wajib)') : '(Opsional Demo)'}
-                    </label>
-                    <input
-                      type="text"
-                      required={Boolean(currentUser)}
-                      placeholder={`Contoh: ${selectedQRSubject.code}-M01-1234`}
-                      value={sessionCodeInput}
-                      onChange={(e) => setSessionCodeInput(e.target.value.toUpperCase())}
-                      className="w-full px-3 py-2 text-center font-mono text-sm font-bold uppercase bg-slate-50 dark:bg-[#0a0f18] border border-slate-300 dark:border-slate-700 rounded-xl text-slate-900 dark:text-white focus:outline-none focus:border-[#f59e0b]"
+                  {scanMode === 'scanner' ? (
+                    <QrScannerPanel
+                      disabled={isScanning}
+                      onScanSuccess={(parsedCode) => {
+                        setSessionCodeInput(parsedCode);
+                        void handleTriggerScan(null, parsedCode);
+                      }}
                     />
-                  </div>
+                  ) : (
+                    <>
+                      <div>
+                        <label className="block text-left text-[11px] font-mono text-slate-600 dark:text-slate-300 mb-1">
+                          {language === 'en' ? 'Attendance Session Code' : 'Kode Sesi Presensi'}{' '}
+                          {currentUser ? (language === 'en' ? '(Required)' : '(Wajib)') : '(Opsional Demo)'}
+                        </label>
+                        <input
+                          type="text"
+                          required={Boolean(currentUser)}
+                          placeholder={`Contoh: ${selectedQRSubject.code}-M01-1234`}
+                          value={sessionCodeInput}
+                          onChange={(e) => setSessionCodeInput(e.target.value)}
+                          className="w-full px-3 py-2 text-center font-mono text-sm font-bold uppercase bg-slate-50 dark:bg-[#0a0f18] border border-slate-300 dark:border-slate-700 rounded-xl text-slate-900 dark:text-white focus:outline-none focus:border-[#f59e0b]"
+                        />
+                      </div>
 
-                  <button
-                    type="submit"
-                    disabled={isScanning || (Boolean(currentUser) && !activeSessionInfo?.isOpen)}
-                    className="w-full bg-[#f59e0b] hover:bg-[#d97706] text-black text-xs font-bold py-3 rounded-xl shadow-md transition disabled:opacity-50 flex items-center justify-center gap-2"
-                  >
-                    <QrCode className="w-4 h-4" />
-                    <span>
-                      {isScanning
-                        ? t('qr_scanning')
-                        : language === 'en'
-                        ? 'Verify & Record Attendance'
-                        : 'Verifikasi & Catat Presensi'}
-                    </span>
-                  </button>
+                      <button
+                        type="submit"
+                        disabled={isScanning || (Boolean(currentUser) && !activeSessionInfo?.isOpen)}
+                        className="w-full bg-[#f59e0b] hover:bg-[#d97706] text-black text-xs font-bold py-3 rounded-xl shadow-md transition disabled:opacity-50 flex items-center justify-center gap-2"
+                      >
+                        <QrCode className="w-4 h-4" />
+                        <span>
+                          {isScanning
+                            ? t('qr_scanning')
+                            : language === 'en'
+                            ? 'Verify & Record Attendance'
+                            : 'Verifikasi & Catat Presensi'}
+                        </span>
+                      </button>
+                    </>
+                  )}
                 </form>
               ) : (
                 <div className="py-4 space-y-3 font-mono">

@@ -25,6 +25,53 @@ export function clearDemoAttendanceStore() {
   demoSessionStore.clear();
 }
 
+export function buildAttendanceQrPayload(sessionCode) {
+  const clean = String(sessionCode || '').trim().toUpperCase();
+  return clean ? `SMARTSA_QR:${clean}` : '';
+}
+
+export function parseAttendanceQrPayload(rawInput) {
+  if (typeof rawInput !== 'string' && typeof rawInput !== 'number') return '';
+  const trimmed = String(rawInput).trim();
+  if (!trimmed) return '';
+
+  // 1. Payload prefiks standar Smartsa: "SMARTSA_QR:<KODE>"
+  const prefixMatch = trimmed.match(/^SMARTSA_QR\s*:\s*([A-Za-z0-9_-]+)/i);
+  if (prefixMatch?.[1]) {
+    return prefixMatch[1].trim().toUpperCase();
+  }
+
+  // 2. Payload JSON terstruktur: { "sessionCode": "<KODE>" } atau { "code": "<KODE>" }
+  if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
+    try {
+      const parsed = JSON.parse(trimmed);
+      const candidate = parsed?.sessionCode || parsed?.code || '';
+      if (typeof candidate === 'string' && candidate.trim()) {
+        return candidate.trim().toUpperCase();
+      }
+    } catch {
+      // Lanjutkan ke parser kode mentah
+    }
+  }
+
+  // 3. URL query string (?sessionCode=<KODE> atau ?code=<KODE>)
+  if (/^https?:\/\//i.test(trimmed)) {
+    try {
+      const parsedUrl = new URL(trimmed);
+      const paramCode =
+        parsedUrl.searchParams.get('sessionCode') || parsedUrl.searchParams.get('code') || '';
+      if (paramCode.trim()) {
+        return paramCode.trim().toUpperCase();
+      }
+    } catch {
+      // Lanjutkan ke normalisasi langsung
+    }
+  }
+
+  // 4. Kode sesi mentah langsung
+  return trimmed.toUpperCase().replace(/[^A-Z0-9-]/g, '');
+}
+
 function formatTimestampLabel(date = new Date()) {
   const dateFormatted = date.toLocaleDateString('id-ID', {
     day: 'numeric',
@@ -279,6 +326,7 @@ export async function recordMeetingAttendance({
     return { success: false, message: 'Data kelas tidak valid.' };
   }
 
+  const normalizedSessionCode = parseAttendanceQrPayload(sessionCode);
   const uid = auth?.currentUser?.uid;
 
   // Mode Demo (tanpa akun Firebase aktif) -> simpan in-memory agar UI tetap responsif
@@ -290,8 +338,8 @@ export async function recordMeetingAttendance({
         return { success: false, expired: true, message: 'Sesi presensi demo telah kedaluwarsa.' };
       }
       if (
-        sessionCode &&
-        demoSession.sessionCode.toUpperCase() !== String(sessionCode).trim().toUpperCase()
+        normalizedSessionCode &&
+        demoSession.sessionCode.toUpperCase() !== normalizedSessionCode
       ) {
         return { success: false, invalidCode: true, message: 'Kode sesi presensi tidak cocok.' };
       }
@@ -318,7 +366,7 @@ export async function recordMeetingAttendance({
       id: `${classId}_m${resolvedOrder}_demo`,
       meetingOrder: resolvedOrder,
       meetingTitle: meetingTitle || `Pertemuan 0${resolvedOrder}`,
-      barcode: sessionCode || demoSession?.sessionCode || `${classId.toUpperCase()}-DEMO`,
+      barcode: normalizedSessionCode || demoSession?.sessionCode || `${classId.toUpperCase()}-DEMO`,
       timestamp: formatTimestampLabel(new Date()),
       progressGained: 6,
       status: 'TERVERIFIKASI (DEMO)',

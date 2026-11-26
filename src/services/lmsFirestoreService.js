@@ -1,6 +1,6 @@
 /**
  * Layanan Modular Cloud Firestore untuk Smartsa LMS
- * Koleksi: classes, class_members, assignments, submissions, discussions, exam_attempts, learning_progress
+ * Koleksi: classes, class_members, assignments, submissions, discussions, exam_attempts, learning_progress, manual_books
  */
 import {
   addDoc,
@@ -49,7 +49,7 @@ export function normalizeHttpsImageUrl(rawUrl, label = 'URL gambar') {
   try {
     parsed = new URL(trimmed);
   } catch {
-    throw new Error(`${label} tidak valid. Gunakan URL gambar berawalan https://.`);
+    throw new Error(`${label} tidak valid. Gunakan URL berawalan https://.`);
   }
   if (parsed.protocol !== 'https:' || !parsed.hostname) {
     throw new Error(
@@ -57,6 +57,49 @@ export function normalizeHttpsImageUrl(rawUrl, label = 'URL gambar') {
     );
   }
   return trimmed;
+}
+
+function normalizeOptionalHttpUrl(rawUrl, label = 'URL lampiran') {
+  if (rawUrl === undefined || rawUrl === null) return '';
+  if (typeof rawUrl !== 'string') {
+    throw new Error(`${label} harus berupa teks URL https:// atau http://.`);
+  }
+  const trimmed = rawUrl.trim();
+  if (!trimmed) return '';
+  if (/\s|[<>]/.test(trimmed)) {
+    throw new Error(`${label} mengandung spasi atau karakter tidak valid.`);
+  }
+  let parsed;
+  try {
+    parsed = new URL(trimmed);
+  } catch {
+    throw new Error(`${label} tidak valid. Gunakan URL berawalan https:// atau http://.`);
+  }
+  if ((parsed.protocol !== 'https:' && parsed.protocol !== 'http:') || !parsed.hostname) {
+    throw new Error(`${label} ditolak demi keamanan. Hanya tautan https:// atau http:// yang diizinkan.`);
+  }
+  return trimmed;
+}
+
+function normalizeAssignmentTaskType(rawType) {
+  return String(rawType || '').trim().toLowerCase() === 'kelompok' ? 'kelompok' : 'individu';
+}
+
+function normalizeGroupMembersList(rawMembers) {
+  if (Array.isArray(rawMembers)) {
+    return rawMembers
+      .map((item) => String(item || '').trim())
+      .filter(Boolean)
+      .slice(0, 30);
+  }
+  if (typeof rawMembers === 'string') {
+    return rawMembers
+      .split(/[\r\n,;]+/)
+      .map((item) => item.trim())
+      .filter(Boolean)
+      .slice(0, 30);
+  }
+  return [];
 }
 
 /**
@@ -518,6 +561,10 @@ export async function fetchAssignmentsWithUserSubmissions({
           title: data.title || 'Tugas Perkuliahan',
           subject: data.subject || 'Mata Kuliah',
           subjectCode: data.subjectCode || 'CLS',
+          taskType: normalizeAssignmentTaskType(data.taskType),
+          attachmentUrl: data.attachmentUrl || '',
+          attachmentName: data.attachmentName || '',
+          attachmentSize: data.attachmentSize || '',
           deadline: formatDeadlineLabel(data),
           rawDeadline: data.deadline || '',
           isOverdue: isDeadlineOverdue(data.deadline),
@@ -534,11 +581,13 @@ export async function fetchAssignmentsWithUserSubmissions({
           submittedAt: sub?.submittedAtLabel || null,
           notes: sub?.notes || '',
           externalUrl: sub?.externalUrl || '',
+          groupName: sub?.groupName || '',
+          groupMembers: normalizeGroupMembersList(sub?.groupMembers),
           grade: typeof sub?.grade === 'number' ? sub.grade : typeof sub?.score === 'number' ? sub.score : null,
           feedback: sub?.feedback || '',
           note: data.note || '',
           maxSize: data.maxSize || '15 MB',
-          allowedFormats: data.allowedFormats || '.pdf, .zip, .docx',
+          allowedFormats: data.allowedFormats || '.pdf, .docx, .zip, .jpg, .png',
         };
       })
       .filter((item) => (parsedMeetingFilter ? item.meetingNo === parsedMeetingFilter : true))
@@ -567,8 +616,12 @@ export async function createAssignmentInFirestore({
   subjectCode = '',
   deadline = '',
   note = '',
+  taskType = 'individu',
+  attachmentUrl = '',
+  attachmentName = '',
+  attachmentSize = '',
   maxSize = '15 MB',
-  allowedFormats = '.pdf, .zip, .docx',
+  allowedFormats = '.pdf, .docx, .zip, .jpg, .png',
 }) {
   const cleanClassId = String(classId || '').trim();
   const cleanTitle = String(title || '').trim();
@@ -576,6 +629,13 @@ export async function createAssignmentInFirestore({
 
   if (!cleanClassId) throw new Error('Kelas wajib dipilih.');
   if (!cleanTitle) throw new Error('Judul tugas wajib diisi.');
+
+  const safeTaskType = normalizeAssignmentTaskType(taskType);
+  const safeAttachmentUrl = normalizeOptionalHttpUrl(attachmentUrl, 'URL lampiran tugas');
+  const cleanAttachmentName = safeAttachmentUrl
+    ? String(attachmentName || '').trim() || 'Lampiran_Instruksi_Tugas'
+    : '';
+  const cleanAttachmentSize = safeAttachmentUrl ? String(attachmentSize || '').trim() : '';
 
   const rawDeadline = String(deadline || '').trim() || '2026-12-15T23:59:00+07:00';
   const deadlineLabel = formatDeadlineLabel({ deadline: rawDeadline });
@@ -585,6 +645,10 @@ export async function createAssignmentInFirestore({
     title: cleanTitle,
     subject: subject || 'Mata Kuliah Smartsa',
     subjectCode: subjectCode || 'CLS',
+    taskType: safeTaskType,
+    attachmentUrl: safeAttachmentUrl,
+    attachmentName: cleanAttachmentName,
+    attachmentSize: cleanAttachmentSize,
     deadline: rawDeadline,
     deadlineLabel,
     note: String(note || '').trim() || 'Kumpulkan berkas tugas sesuai instruksi pertemuan.',
@@ -657,6 +721,23 @@ export async function updateAssignmentInFirestore(assignmentId, updates = {}) {
     updatedAt: serverTimestamp(),
   };
 
+  const resultExtras = {};
+  if ('taskType' in updates) {
+    patch.taskType = normalizeAssignmentTaskType(updates.taskType);
+    resultExtras.taskType = patch.taskType;
+  }
+  if ('attachmentUrl' in updates) {
+    const safeUrl = normalizeOptionalHttpUrl(updates.attachmentUrl, 'URL lampiran tugas');
+    patch.attachmentUrl = safeUrl;
+    patch.attachmentName = safeUrl
+      ? String(updates.attachmentName || '').trim() || 'Lampiran_Instruksi_Tugas'
+      : '';
+    patch.attachmentSize = safeUrl ? String(updates.attachmentSize || '').trim() : '';
+    resultExtras.attachmentUrl = patch.attachmentUrl;
+    resultExtras.attachmentName = patch.attachmentName;
+    resultExtras.attachmentSize = patch.attachmentSize;
+  }
+
   await updateDoc(doc(db, 'assignments', cleanAssignmentId), patch);
 
   return {
@@ -668,6 +749,7 @@ export async function updateAssignmentInFirestore(assignmentId, updates = {}) {
     rawDeadline,
     isOverdue: isDeadlineOverdue(rawDeadline),
     note: cleanNote,
+    ...resultExtras,
   };
 }
 
@@ -692,6 +774,9 @@ export async function submitAssignmentToFirestore({
   assignmentTitle = '',
   className = '',
   studentName = 'Mahasiswa',
+  taskType = 'individu',
+  groupName = '',
+  groupMembers = [],
   fileName = '',
   fileSize = '',
   fileUrl = '',
@@ -704,8 +789,20 @@ export async function submitAssignmentToFirestore({
     throw new Error('Masuk dengan akun Firebase untuk menyimpan pengumpulan tugas ke Firestore.');
   }
 
-  const sanitizedFileUrl = String(fileUrl || '').trim();
-  const sanitizedExternalUrl = String(externalUrl || '').trim();
+  const safeTaskType = normalizeAssignmentTaskType(taskType);
+  const cleanGroupName = String(groupName || '').trim();
+  const cleanGroupMembers = normalizeGroupMembersList(groupMembers);
+  if (safeTaskType === 'kelompok') {
+    if (!cleanGroupName) {
+      throw new Error('Nama Kelompok wajib diisi untuk pengumpulan tugas kelompok.');
+    }
+    if (cleanGroupMembers.length === 0) {
+      throw new Error('Daftar anggota kelompok (Nama / NIM) wajib diisi untuk tugas kelompok.');
+    }
+  }
+
+  const sanitizedFileUrl = normalizeOptionalHttpUrl(fileUrl, 'URL berkas tugas');
+  const sanitizedExternalUrl = normalizeOptionalHttpUrl(externalUrl, 'URL eksternal tugas');
   if (
     sanitizedFileUrl.startsWith('blob:') ||
     sanitizedFileUrl.startsWith('data:') ||
@@ -731,20 +828,34 @@ export async function submitAssignmentToFirestore({
       ? { meetingNo: Number(meetingNo) }
       : {};
 
+  const groupPayload =
+    safeTaskType === 'kelompok'
+      ? {
+          taskType: 'kelompok',
+          groupName: cleanGroupName,
+          groupMembers: cleanGroupMembers,
+        }
+      : {
+          taskType: 'individu',
+          groupName: '',
+          groupMembers: [],
+        };
+
   if (!existingSnap.exists()) {
     await setDoc(subRef, {
       submissionId,
       assignmentId,
       classId,
       ...meetingPayload,
+      ...groupPayload,
       uid: user.uid,
       studentName,
       assignmentTitle,
       className,
-      fileName: fileName || externalUrl || 'Tautan Tugas',
+      fileName: fileName || sanitizedExternalUrl || 'Tautan Tugas',
       fileSize: fileSize || 'Tautan Eksternal',
-      fileUrl: fileUrl || externalUrl || '',
-      externalUrl: externalUrl || '',
+      fileUrl: sanitizedFileUrl || sanitizedExternalUrl || '',
+      externalUrl: sanitizedExternalUrl || '',
       storageType,
       notes,
       status: 'submitted',
@@ -757,13 +868,14 @@ export async function submitAssignmentToFirestore({
     await updateDoc(subRef, {
       classId,
       ...meetingPayload,
+      ...groupPayload,
       studentName,
       assignmentTitle,
       className,
-      fileName: fileName || externalUrl || 'Tautan Tugas',
+      fileName: fileName || sanitizedExternalUrl || 'Tautan Tugas',
       fileSize: fileSize || 'Tautan Eksternal',
-      fileUrl: fileUrl || externalUrl || '',
-      externalUrl: externalUrl || '',
+      fileUrl: sanitizedFileUrl || sanitizedExternalUrl || '',
+      externalUrl: sanitizedExternalUrl || '',
       storageType,
       notes,
       status: 'submitted',
@@ -776,6 +888,7 @@ export async function submitAssignmentToFirestore({
   return {
     submissionId,
     submittedAtLabel: `${nowLabel} WIB`,
+    ...groupPayload,
   };
 }
 
@@ -804,6 +917,9 @@ export async function fetchSubmissionsForLecturerClasses(classIds = []) {
           submissionId: docSnap.id,
           classId: d.classId || '',
           assignmentId: d.assignmentId || '',
+          taskType: normalizeAssignmentTaskType(d.taskType),
+          groupName: d.groupName || '',
+          groupMembers: normalizeGroupMembersList(d.groupMembers),
           studentName: d.studentName || d.uid || 'Mahasiswa',
           assignment: d.assignmentTitle || d.assignmentId || 'Tugas Perkuliahan',
           class: d.className || d.classId || 'Kelas Smartsa',
@@ -869,6 +985,9 @@ export function computeClassMaterialsCount(meetings = []) {
   if (!Array.isArray(meetings)) return 0;
   let total = 0;
   for (const m of meetings) {
+    if (Array.isArray(m?.materialFiles) && m.materialFiles.length > 0) {
+      total += m.materialFiles.length;
+    }
     if (hasDeltaContent(m?.deltaContent)) total += 1;
     if (m?.hasVideo || (typeof m?.videoUrl === 'string' && m.videoUrl.trim())) total += 1;
     if (m?.hasPdf || (typeof m?.pdfUrl === 'string' && m.pdfUrl.trim())) total += 1;
@@ -969,6 +1088,9 @@ export async function fetchClassSubmissionsForGrading(classId) {
           assignmentId: d.assignmentId || '',
           classId: d.classId || classId,
           meetingNo: d.meetingNo ? Number(d.meetingNo) : null,
+          taskType: normalizeAssignmentTaskType(d.taskType),
+          groupName: d.groupName || '',
+          groupMembers: normalizeGroupMembersList(d.groupMembers),
           uid: d.uid || '',
           studentName: d.studentName || d.uid || 'Mahasiswa',
           assignment: d.assignmentTitle || d.assignmentId || 'Tugas Perkuliahan',
@@ -1732,4 +1854,121 @@ export async function deleteClassByAdmin(classId) {
     throw new Error('Otorisasi admin diperlukan untuk menghapus kelas.');
   }
   await deleteDoc(doc(db, 'classes', classId));
+}
+
+/**
+ * Mengambil seluruh daftar Manual Book PDF global dari koleksi Firestore `manual_books`.
+ */
+export async function fetchManualBooks() {
+  if (!auth?.currentUser || !db) {
+    return { books: [], isEmpty: true, source: 'unauthenticated' };
+  }
+
+  try {
+    const snap = await getDocs(collection(db, 'manual_books'));
+    const books = snap.docs
+      .map((docSnap) => {
+        const d = docSnap.data() || {};
+        return {
+          id: docSnap.id,
+          title: d.title || 'Manual Book Smartsa',
+          description: d.description || '',
+          fileUrl: d.fileUrl || '',
+          fileName: d.fileName || '',
+          fileSize: d.fileSize || '',
+          storageType: d.storageType || 'cloudinary',
+          uploadedBy: d.uploadedBy || '',
+          uploadedByName: d.uploadedByName || 'Dosen / Admin',
+          createdAtLabel: d.createdAtLabel || 'Tercatat di Firestore',
+          _sortMs: toTimestampMillis(d.createdAt || d.updatedAt),
+        };
+      })
+      .sort((a, b) => b._sortMs - a._sortMs);
+
+    return {
+      books,
+      isEmpty: books.length === 0,
+      source: 'firestore',
+    };
+  } catch (err) {
+    console.warn('[lmsFirestoreService] Gagal memuat manual_books:', err.message);
+    return { books: [], isEmpty: true, source: 'firestore_error', error: err.message };
+  }
+}
+
+/**
+ * Menyimpan metadata Manual Book PDF baru ke koleksi global Firestore `manual_books`.
+ */
+export async function createManualBook({
+  title,
+  description = '',
+  fileUrl,
+  fileName = '',
+  fileSize = '',
+  storageType = 'cloudinary',
+  uploadedByName = '',
+}) {
+  const user = auth?.currentUser;
+  if (!user || !db) {
+    throw new Error('Masuk sebagai Dosen atau Admin untuk mengunggah Manual Book ke Firestore.');
+  }
+
+  const cleanTitle = String(title || '').trim();
+  if (!cleanTitle) {
+    throw new Error('Judul Manual Book wajib diisi.');
+  }
+
+  const safePdfUrl = normalizeHttpsImageUrl(fileUrl, 'URL PDF Manual Book');
+  if (!safePdfUrl) {
+    throw new Error('Berkas PDF atau URL PDF berawalan https:// wajib disertakan.');
+  }
+
+  const cleanDescription = String(description || '').trim();
+  const cleanFileName = String(fileName || '').trim() || `${cleanTitle}.pdf`;
+  const cleanFileSize = String(fileSize || '').trim();
+  const cleanUploaderName =
+    String(uploadedByName || '').trim() || user.displayName || user.email || 'Dosen / Admin';
+  const nowLabel = new Date().toLocaleString('id-ID', {
+    day: 'numeric',
+    month: 'short',
+    year: 'numeric',
+  });
+
+  const payload = {
+    title: cleanTitle,
+    description: cleanDescription,
+    fileUrl: safePdfUrl,
+    fileName: cleanFileName,
+    fileSize: cleanFileSize,
+    storageType: storageType === 'external_url' ? 'external_url' : 'cloudinary',
+    uploadedBy: user.uid,
+    uploadedByName: cleanUploaderName,
+    createdAtLabel: nowLabel,
+    createdAt: serverTimestamp(),
+    updatedAt: serverTimestamp(),
+  };
+
+  const docRef = await addDoc(collection(db, 'manual_books'), payload);
+  return {
+    id: docRef.id,
+    ...payload,
+    _sortMs: Date.now(),
+    source: 'firestore',
+  };
+}
+
+/**
+ * Menghapus dokumen Manual Book PDF dari koleksi global Firestore `manual_books`.
+ */
+export async function deleteManualBook(bookId) {
+  const user = auth?.currentUser;
+  if (!user || !db) {
+    throw new Error('Otorisasi Dosen/Admin diperlukan untuk menghapus Manual Book.');
+  }
+  const cleanBookId = String(bookId || '').trim();
+  if (!cleanBookId) {
+    throw new Error('ID Manual Book tidak valid.');
+  }
+  await deleteDoc(doc(db, 'manual_books', cleanBookId));
+  return { deleted: true, id: cleanBookId };
 }

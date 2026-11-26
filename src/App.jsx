@@ -41,6 +41,7 @@ const ProfileView = lazy(() => import('./components/features/ProfileView'));
 const ClassDetailView = lazy(() => import('./components/features/ClassDetailView'));
 const AIAssistantView = lazy(() => import('./components/features/AIAssistantView'));
 const ClassesView = lazy(() => import('./components/features/ClassesView'));
+const ManualBookView = lazy(() => import('./components/features/ManualBookView'));
 
 function ViewFallback() {
   return (
@@ -60,6 +61,7 @@ const LMS_VIEWS = [
   'kelas',
   'materi',
   'diskusi',
+  'manual-book',
   'detail',
   'ai',
   'profil',
@@ -133,6 +135,7 @@ function MainApp() {
       materi: language === 'en' ? 'Materials & Tasks' : 'Materi & Tugas',
       diskusi: language === 'en' ? 'Discussion Forum' : 'Forum Diskusi',
       detail: selectedSubject?.name || selectedSubject?.title || (language === 'en' ? 'Class Detail' : 'Detail Kelas'),
+      'manual-book': language === 'en' ? 'Manual Book & Guide' : 'Manual Book & Panduan',
       ai: language === 'en' ? 'Smartsa AI Assistant' : 'Asisten AI Smartsa',
       profil: language === 'en' ? 'Profile & Settings' : 'Profil & Pengaturan',
     };
@@ -543,6 +546,21 @@ function MainApp() {
       );
     }
 
+    if (activeView === 'manual-book') {
+      return (
+        <div className="space-y-3">
+          <button
+            type="button"
+            onClick={() => navigateTo('dashboard')}
+            className="text-xs font-mono font-bold text-amber-600 dark:text-[#f59e0b] hover:text-amber-500 dark:hover:text-[#fbbf24] flex items-center gap-1.5 mb-2 transition"
+          >
+            {t('back_to_hub')}
+          </button>
+          <ManualBookView />
+        </div>
+      );
+    }
+
     if (activeView === 'ai') {
       return (
         <div className="space-y-3">
@@ -587,7 +605,12 @@ function MainApp() {
       case 'diskusi':
         return <DiscussionTab />;
       case 'profil':
-        return <ProfileView onOpenAuth={() => setAuthModalOpen(true)} />;
+        return (
+          <ProfileView
+            onOpenAuth={() => setAuthModalOpen(true)}
+            onNavigateManualBook={() => navigateTo('manual-book')}
+          />
+        );
       case 'dashboard':
       default:
         if (role === ROLES.ADMIN) {

@@ -7,12 +7,18 @@ import {
   fetchSubmissionsForLecturerClasses,
   gradeSubmissionInFirestore,
   createAssignmentInFirestore,
+  normalizeHttpsImageUrl,
 } from '../../services/lmsFirestoreService';
 import {
   openAttendanceSession,
   closeAttendanceSession,
 } from '../../services/attendanceService';
-import { isValidExternalUrl } from '../../services/cloudinaryService';
+import {
+  uploadMediaFile,
+  isValidExternalUrl,
+  MATERIAL_ALLOWED_ACCEPT,
+} from '../../services/cloudinaryService';
+import AttendanceQrModal from '../common/AttendanceQrModal';
 import {
   BookOpen,
   Users,
@@ -23,10 +29,10 @@ import {
   FileCheck,
   Send,
   QrCode,
-  Clock,
-  XCircle,
   AlertCircle,
   X,
+  Upload,
+  Paperclip,
 } from 'lucide-react';
 
 export default function TeacherDashboard({ onSelectClass, onNavigateView, onOpenCreateClass }) {
@@ -53,9 +59,14 @@ export default function TeacherDashboard({ onSelectClass, onNavigateView, onOpen
   // State Pembuatan Tugas Pertemuan Baru
   const [taskClassId, setTaskClassId] = useState('');
   const [taskMeetingNo, setTaskMeetingNo] = useState(1);
+  const [taskType, setTaskType] = useState('individu');
   const [taskTitle, setTaskTitle] = useState('');
   const [taskDeadline, setTaskDeadline] = useState('2026-12-15T23:59');
   const [taskNote, setTaskNote] = useState('');
+  const [taskAttachmentUrl, setTaskAttachmentUrl] = useState('');
+  const [taskAttachmentName, setTaskAttachmentName] = useState('');
+  const [taskAttachmentSize, setTaskAttachmentSize] = useState('');
+  const [uploadingTaskAttachment, setUploadingTaskAttachment] = useState(false);
   const [creatingTask, setCreatingTask] = useState(false);
 
   const loadReqIdRef = useRef(0);
@@ -249,6 +260,47 @@ export default function TeacherDashboard({ onSelectClass, onNavigateView, onOpen
     }
   };
 
+  const handleUploadDashboardTaskAttachment = async (file) => {
+    if (!file || uploadingTaskAttachment) return;
+    setUploadingTaskAttachment(true);
+    setStatusBanner(null);
+    try {
+      const uploadResult = await uploadMediaFile(file, 'document');
+      if (uploadResult?.isLive && uploadResult.url) {
+        const cleanUrl = normalizeHttpsImageUrl(
+          uploadResult.url,
+          language === 'en' ? 'Assignment attachment URL' : 'URL lampiran tugas'
+        );
+        setTaskAttachmentUrl(cleanUrl);
+        setTaskAttachmentName(file.name);
+        setTaskAttachmentSize(`${(file.size / (1024 * 1024)).toFixed(2)} MB`);
+        setStatusBanner({
+          type: 'success',
+          text:
+            language === 'en'
+              ? `Instruction file "${file.name}" uploaded to Cloudinary.`
+              : `Lampiran instruksi "${file.name}" berhasil diunggah ke Cloudinary.`,
+        });
+      } else {
+        setStatusBanner({
+          type: 'error',
+          text:
+            uploadResult?.note ||
+            (language === 'en'
+              ? 'Cloudinary upload is unavailable for task attachment.'
+              : 'Unggah Cloudinary tidak tersedia untuk lampiran tugas.'),
+        });
+      }
+    } catch (err) {
+      setStatusBanner({
+        type: 'error',
+        text: err.message || 'Gagal mengunggah lampiran instruksi tugas.',
+      });
+    } finally {
+      setUploadingTaskAttachment(false);
+    }
+  };
+
   const handleCreateAssignment = async (e) => {
     e.preventDefault();
     if (!taskClassId || !taskTitle.trim() || creatingTask || taskClassMeetings.length === 0) return;
@@ -263,11 +315,19 @@ export default function TeacherDashboard({ onSelectClass, onNavigateView, onOpen
         title: taskTitle.trim(),
         subject: targetClass?.name || 'Mata Kuliah Smartsa',
         subjectCode: targetClass?.code || 'CLS',
+        taskType,
+        attachmentUrl: taskAttachmentUrl.trim(),
+        attachmentName: taskAttachmentName.trim(),
+        attachmentSize: taskAttachmentSize.trim(),
         deadline: taskDeadline,
         note: taskNote.trim(),
       });
       setTaskTitle('');
       setTaskNote('');
+      setTaskType('individu');
+      setTaskAttachmentUrl('');
+      setTaskAttachmentName('');
+      setTaskAttachmentSize('');
       setStatusBanner({
         type: 'success',
         text:
@@ -528,38 +588,13 @@ export default function TeacherDashboard({ onSelectClass, onNavigateView, onOpen
             </div>
 
             {isSessionActive && activeAttSession && (
-              <div className="p-4 rounded-xl bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-200 dark:border-emerald-500/40 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-                <div className="space-y-1">
-                  <div className="flex items-center gap-2 text-xs font-bold text-emerald-900 dark:text-emerald-200">
-                    <Clock className="w-4 h-4 text-emerald-600 dark:text-emerald-400" />
-                    <span>
-                      {language === 'en' ? 'Active Session: Meeting' : 'Sesi Aktif: Pertemuan'}{' '}
-                      {activeAttSession.meetingNo < 10 ? `0${activeAttSession.meetingNo}` : activeAttSession.meetingNo}
-                    </span>
-                  </div>
-                  <div className="text-xs text-emerald-800 dark:text-emerald-300">
-                    {language === 'en' ? 'Session Code:' : 'Kode Sesi:'}{' '}
-                    <code className="font-mono font-black bg-white dark:bg-[#0b0f17] px-2 py-0.5 rounded border border-emerald-300 dark:border-emerald-500/40 text-emerald-900 dark:text-emerald-300">
-                      {activeAttSession.sessionCode}
-                    </code>
-                    {activeAttSession.expiresAt && (
-                      <span className="ml-2 text-[11px] text-emerald-700 dark:text-emerald-400">
-                        ({language === 'en' ? 'Valid until' : 'Berlaku hingga'}{' '}
-                        {new Date(activeAttSession.expiresAt).toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' })} WIB)
-                      </span>
-                    )}
-                  </div>
-                </div>
-                <button
-                  type="button"
-                  onClick={handleCloseAttendanceSession}
-                  disabled={attLoading}
-                  className="inline-flex items-center gap-1.5 text-xs font-semibold text-rose-700 dark:text-rose-300 bg-white dark:bg-[#18212e] hover:bg-rose-50 dark:hover:bg-rose-950/60 border border-rose-200 dark:border-rose-500/40 px-3 py-1.5 rounded-lg transition self-start sm:self-center"
-                >
-                  <XCircle className="w-3.5 h-3.5" />
-                  {language === 'en' ? 'Close Session' : 'Tutup Sesi'}
-                </button>
-              </div>
+              <AttendanceQrModal
+                session={activeAttSession}
+                classCode={selectedAttClass?.code || ''}
+                className={selectedAttClass?.name || ''}
+                onCloseSession={handleCloseAttendanceSession}
+                closing={attLoading}
+              />
             )}
           </form>
         )}
@@ -581,7 +616,7 @@ export default function TeacherDashboard({ onSelectClass, onNavigateView, onOpen
           </div>
 
           <form onSubmit={handleCreateAssignment} className="space-y-3">
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+            <div className="grid grid-cols-1 sm:grid-cols-4 gap-3">
               <div>
                 <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1">
                   {language === 'en' ? 'Class' : 'Kelas'}
@@ -631,6 +666,21 @@ export default function TeacherDashboard({ onSelectClass, onNavigateView, onOpen
 
               <div>
                 <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1">
+                  {language === 'en' ? 'Task Type' : 'Tipe Tugas'}
+                </label>
+                <select
+                  aria-label={language === 'en' ? 'Select assignment task type' : 'Pilih tipe tugas'}
+                  value={taskType}
+                  onChange={(e) => setTaskType(e.target.value)}
+                  className="w-full px-3 py-2 text-xs border border-slate-300 dark:border-slate-700 rounded-lg bg-white dark:bg-[#0b0f17] text-slate-900 dark:text-slate-100"
+                >
+                  <option value="individu">{language === 'en' ? 'Individual' : 'Individu'}</option>
+                  <option value="kelompok">{language === 'en' ? 'Group' : 'Kelompok'}</option>
+                </select>
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1">
                   {language === 'en' ? 'Deadline' : 'Tenggat'}
                 </label>
                 <input
@@ -664,19 +714,73 @@ export default function TeacherDashboard({ onSelectClass, onNavigateView, onOpen
                   type="text"
                   value={taskNote}
                   onChange={(e) => setTaskNote(e.target.value)}
-                  placeholder="Format PDF/ZIP atau link GitHub..."
+                  placeholder="Format PDF/DOCX/ZIP atau catatan kelompok..."
                   className="w-full px-3 py-2 text-xs border border-slate-300 dark:border-slate-700 rounded-lg bg-white dark:bg-[#0b0f17] text-slate-900 dark:text-slate-100"
                 />
               </div>
               <button
                 type="submit"
-                disabled={creatingTask || !taskTitle.trim() || taskClassMeetings.length === 0}
+                disabled={
+                  creatingTask ||
+                  uploadingTaskAttachment ||
+                  !taskTitle.trim() ||
+                  taskClassMeetings.length === 0
+                }
                 className="bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold px-4 py-2.5 rounded-lg transition disabled:opacity-50"
               >
                 {creatingTask
                   ? language === 'en' ? 'Publishing...' : 'Menerbitkan...'
                   : language === 'en' ? 'Publish Assignment' : 'Terbitkan Tugas'}
               </button>
+            </div>
+
+            <div className="p-2.5 rounded-lg bg-slate-50 dark:bg-[#0e1522] border border-slate-200 dark:border-[#232f42] flex flex-wrap items-center justify-between gap-2 text-xs">
+              <div className="flex items-center gap-2 min-w-0">
+                <Paperclip className="w-3.5 h-3.5 text-indigo-500 shrink-0" />
+                <span className="text-slate-600 dark:text-slate-300 truncate">
+                  {taskAttachmentName
+                    ? `${taskAttachmentName}${taskAttachmentSize ? ` (${taskAttachmentSize})` : ''}`
+                    : language === 'en'
+                      ? 'Optional instruction file attachment (Cloudinary)'
+                      : 'Lampiran berkas instruksi tugas opsional (Cloudinary)'}
+                </span>
+              </div>
+              <div className="flex items-center gap-2 shrink-0">
+                {taskAttachmentUrl && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setTaskAttachmentUrl('');
+                      setTaskAttachmentName('');
+                      setTaskAttachmentSize('');
+                    }}
+                    className="px-2 py-1 rounded bg-rose-50 dark:bg-rose-950/40 text-rose-700 dark:text-rose-300 border border-rose-200 dark:border-rose-500/40 text-[11px] font-semibold"
+                  >
+                    {language === 'en' ? 'Clear' : 'Hapus'}
+                  </button>
+                )}
+                <label className="cursor-pointer px-2.5 py-1 rounded bg-indigo-50 dark:bg-indigo-950/50 text-indigo-700 dark:text-indigo-300 border border-indigo-200 dark:border-indigo-500/40 text-[11px] font-semibold inline-flex items-center gap-1">
+                  <Upload className="w-3 h-3" />
+                  {uploadingTaskAttachment
+                    ? language === 'en'
+                      ? 'Uploading...'
+                      : 'Mengunggah...'
+                    : language === 'en'
+                      ? 'Attach File'
+                      : 'Unggah Lampiran'}
+                  <input
+                    type="file"
+                    accept={MATERIAL_ALLOWED_ACCEPT}
+                    disabled={uploadingTaskAttachment || creatingTask}
+                    onChange={(e) => {
+                      const f = e.target.files?.[0];
+                      if (f) void handleUploadDashboardTaskAttachment(f);
+                      e.target.value = '';
+                    }}
+                    className="sr-only"
+                  />
+                </label>
+              </div>
             </div>
           </form>
         </div>
@@ -789,9 +893,27 @@ export default function TeacherDashboard({ onSelectClass, onNavigateView, onOpen
               <tbody className="divide-y divide-slate-100 dark:divide-[#232f42]">
                 {submissionsQueue.map((sub) => (
                   <tr key={sub.id} className="hover:bg-slate-50 dark:hover:bg-[#161d2a] transition">
-                    <td className="py-3 px-4 font-semibold text-slate-900 dark:text-slate-100">{sub.studentName}</td>
+                    <td className="py-3 px-4 font-semibold text-slate-900 dark:text-slate-100">
+                      <div>{sub.studentName}</div>
+                      {sub.groupName && (
+                        <div className="text-[10px] font-mono text-indigo-600 dark:text-indigo-400 mt-0.5">
+                          Kelompok: {sub.groupName}
+                        </div>
+                      )}
+                    </td>
                     <td className="py-3 px-4 text-slate-700 dark:text-slate-300">
-                      <div>{sub.assignment}</div>
+                      <div className="flex flex-wrap items-center gap-1.5">
+                        <span>{sub.assignment}</span>
+                        <span
+                          className={`text-[9px] font-mono font-bold px-1.5 py-0.5 rounded uppercase border ${
+                            sub.taskType === 'kelompok' || sub.groupName
+                              ? 'bg-indigo-50 dark:bg-indigo-950/60 text-indigo-700 dark:text-indigo-300 border-indigo-200 dark:border-indigo-500/40'
+                              : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300 border-slate-200 dark:border-slate-700'
+                          }`}
+                        >
+                          {sub.taskType === 'kelompok' || sub.groupName ? 'KELOMPOK' : 'INDIVIDU'}
+                        </span>
+                      </div>
                       <span className="text-[10px] text-indigo-600 dark:text-indigo-400">{sub.class}</span>
                     </td>
                     <td className="py-3 px-4 text-slate-500 dark:text-slate-400">{sub.submittedAt}</td>
@@ -840,6 +962,20 @@ export default function TeacherDashboard({ onSelectClass, onNavigateView, onOpen
               </button>
             </div>
             <form onSubmit={handleGradeSubmit} className="p-6 space-y-4">
+              {selectedSubmission.groupName && (
+                <div className="p-3 bg-indigo-50 dark:bg-indigo-950/30 rounded-lg border border-indigo-200 dark:border-indigo-500/40 text-xs font-mono space-y-1">
+                  <div className="font-bold text-indigo-800 dark:text-indigo-200">
+                    {language === 'en' ? 'Group:' : 'Kelompok:'} {selectedSubmission.groupName}
+                  </div>
+                  {Array.isArray(selectedSubmission.groupMembers) &&
+                    selectedSubmission.groupMembers.length > 0 && (
+                      <div className="text-[11px] text-indigo-700 dark:text-indigo-300">
+                        {language === 'en' ? 'Members:' : 'Anggota:'}{' '}
+                        {selectedSubmission.groupMembers.join(' • ')}
+                      </div>
+                    )}
+                </div>
+              )}
               {selectedSubmission.fileUrl && (
                 <div className="p-3 bg-slate-50 dark:bg-[#0e1522] rounded-lg border border-slate-200 dark:border-[#232f42] text-xs">
                   <span className="font-semibold text-slate-700 dark:text-slate-300 block mb-1">

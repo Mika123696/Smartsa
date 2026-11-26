@@ -257,10 +257,30 @@ function sendJson(res, statusCode, payload, req = null, extraHeaders = null) {
 }
 
 const RATE_LIMIT_WINDOW_MS = 15 * 60 * 1000;
+const AI_MAX_REQUESTS = 20;
+const AI_MAX_PROMPT_LENGTH = 2000;
+const AI_MAX_CONTEXT_LENGTH = 4000;
+const AI_MAX_HISTORY_ITEMS = 8;
+const AI_MAX_HISTORY_TEXT_LENGTH = 1000;
 const UPLOAD_SIGN_MAX_REQUESTS = 10;
+const SUBMISSION_MAX_FILE_BYTES = 15 * 1024 * 1024; // 15 MB
+const SUBMISSION_ALLOWED_EXTENSIONS = ['.pdf', '.docx', '.zip', '.jpg', '.jpeg', '.png'];
+const SUBMISSION_ALLOWED_MIME_TYPES = new Set([
+  'application/pdf',
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  'application/zip',
+  'application/x-zip-compressed',
+  'application/x-zip',
+  'image/jpeg',
+  'image/png',
+]);
 const JOIN_CLASS_MAX_FAILURES = 5;
 const EXAM_DEADLINE_GRACE_MS = 60_000;
 const VALID_CLASS_CODE_REGEX = /^[A-Z0-9]{6,12}$/;
+
+function computePointsPerQuestion(totalQuestions) {
+  return totalQuestions > 0 ? Number((100 / totalQuestions).toFixed(2)) : 0;
+}
 
 function parseTimestampMillis(rawValue) {
   if (rawValue === null || rawValue === undefined || rawValue === '') return null;
@@ -434,7 +454,15 @@ function buildLocalAssistantResponse({ mode = 'learning', prompt = '', context =
 }
 
 async function handleAi(body, decodedToken) {
-  const { mode = 'learning', prompt, context = '', isExamActive = false } = body || {};
+  const uid = String(decodedToken?.uid || '').trim();
+  if (!uid) {
+    return {
+      status: 401,
+      payload: { error: 'Token pengguna tidak memiliki UID yang valid.', code: 'UNAUTHORIZED' },
+    };
+  }
+
+  const { mode = 'learning', prompt, context = '', history = [], isExamActive = false } = body || {};
 
   if (isExamActive === true) {
     return {
@@ -451,7 +479,7 @@ async function handleAi(body, decodedToken) {
   try {
     const attemptSnap = await db
       .collection('exam_attempts')
-      .where('uid', '==', decodedToken.uid)
+      .where('uid', '==', uid)
       .get();
 
     const nowMs = Date.now();
@@ -485,57 +513,144 @@ async function handleAi(body, decodedToken) {
     console.warn('[api/ai] exam_attempts check warning:', err.message);
   }
 
-  if (typeof prompt !== 'string' || !prompt.trim()) {
+  const trimmedPrompt = typeof prompt === 'string' ? prompt.trim() : '';
+  if (!trimmedPrompt) {
     return {
       status: 400,
       payload: { error: 'Prompt tidak boleh kosong.', code: 'INVALID_PROMPT' },
     };
   }
+  if (trimmedPrompt.length > AI_MAX_PROMPT_LENGTH) {
+    return {
+      status: 400,
+      payload: {
+        error: `Prompt melebihi batas maksimum ${AI_MAX_PROMPT_LENGTH} karakter.`,
+        code: 'PROMPT_TOO_LONG',
+      },
+    };
+  }
 
-  const apiKey = process.env.GEMINI_API_KEY;
+  const rateResult = await runRateLimitTx(db, {
+    scope: 'ai',
+    uid,
+    maxAttempts: AI_MAX_REQUESTS,
+    windowMs: RATE_LIMIT_WINDOW_MS,
+    increment: true,
+  });
+
+  if (!rateResult.allowed) {
+    return {
+      status: 429,
+      headers: { 'Retry-After': String(rateResult.retryAfterSeconds) },
+      payload: {
+        error: 'Terlalu banyak permintaan ke Asisten AI. Silakan coba lagi beberapa saat lagi.',
+        code: 'RATE_LIMIT_EXCEEDED',
+        retryAfterSeconds: rateResult.retryAfterSeconds,
+      },
+    };
+  }
+
+  const cleanContext =
+    typeof context === 'string' ? context.trim().slice(0, AI_MAX_CONTEXT_LENGTH) : '';
+  const cleanHistory = Array.isArray(history)
+    ? history
+        .slice(-AI_MAX_HISTORY_ITEMS)
+        .map((item) => {
+          const textVal = String(item?.text || item?.content || '')
+            .trim()
+            .slice(0, AI_MAX_HISTORY_TEXT_LENGTH);
+          if (!textVal) return null;
+          const rawRole = String(item?.role || item?.sender || '').trim().toLowerCase();
+          return {
+            role: rawRole === 'user' ? 'user' : 'model',
+            parts: [{ text: textVal }],
+          };
+        })
+        .filter(Boolean)
+    : [];
+
+  const apiKey = String(process.env.GEMINI_API_KEY || '').trim();
   if (!apiKey) {
     return {
       status: 200,
       payload: {
         response_text: buildLocalAssistantResponse({
           mode,
-          prompt: prompt.trim(),
-          context,
+          prompt: trimmedPrompt,
+          context: cleanContext,
         }),
         tokens_consumed: 0,
         mode: 'local_frozen',
         is_live: false,
-        note: 'Mode Asisten Lokal (Integrasi Gemini API ditunda/belum dikonfigurasi di server).',
+        remaining_quota: rateResult.remaining,
+        note: 'GEMINI_API_KEY belum dikonfigurasi di server. Menggunakan respons panduan lokal.',
       },
     };
   }
 
   const systemPrompt =
     mode === 'teaching'
-      ? 'Anda adalah Smartsa Teaching Assistant AI untuk dosen/pendidik. Bantu menyusun silabus, rubrik penilaian, dan draf soal Bloom taxonomy secara terstruktur.'
-      : 'Anda adalah Smartsa Learning Assistant AI untuk mahasiswa. Jelaskan konsep dengan analogi jelas, ringkas, dan dilarang memberikan kunci jawaban ujian aktif.';
+      ? 'Anda adalah Smartsa Teaching Assistant AI untuk dosen/pendidik. Bantu menyusun silabus, rubrik penilaian, dan draf soal Bloom taxonomy secara terstruktur dalam bahasa yang jelas.'
+      : 'Anda adalah Smartsa Learning Assistant AI untuk mahasiswa. Jelaskan konsep dengan analogi jelas, ringkas, edukatif, dan dilarang memberikan kunci jawaban ujian aktif.';
 
-  const combinedText = context
-    ? `${systemPrompt}\n\nKonteks Materi: ${context}\n\nPertanyaan: ${prompt.trim()}`
-    : `${systemPrompt}\n\nPertanyaan: ${prompt.trim()}`;
+  const systemInstructionText = cleanContext
+    ? `${systemPrompt}\n\nKonteks Kelas/Materi:\n${cleanContext}`
+    : systemPrompt;
 
-  const model = process.env.GEMINI_MODEL || 'gemini-2.0-flash';
+  const model = String(process.env.GEMINI_MODEL || 'gemini-2.5-flash').trim() || 'gemini-2.5-flash';
   const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(apiKey)}`;
 
-  const geminiRes = await fetch(endpoint, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      contents: [{ role: 'user', parts: [{ text: combinedText }] }],
-    }),
-  });
+  const contents =
+    cleanHistory.length > 0
+      ? [...cleanHistory, { role: 'user', parts: [{ text: trimmedPrompt }] }]
+      : [
+          {
+            role: 'user',
+            parts: [
+              {
+                text: cleanContext
+                  ? `${systemPrompt}\n\nKonteks Materi: ${cleanContext}\n\nPertanyaan: ${trimmedPrompt}`
+                  : `${systemPrompt}\n\nPertanyaan: ${trimmedPrompt}`,
+              },
+            ],
+          },
+        ];
 
-  if (!geminiRes.ok) {
-    const errorText = await geminiRes.text();
+  let geminiRes;
+  try {
+    geminiRes = await fetch(endpoint, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        systemInstruction: { parts: [{ text: systemInstructionText }] },
+        contents,
+      }),
+    });
+  } catch (err) {
     return {
       status: 502,
       payload: {
-        error: `Gemini API error (${geminiRes.status}): ${errorText.slice(0, 200)}`,
+        error: `Gagal menghubungi layanan Google Gemini AI: ${err?.message || 'Network error'}`,
+        code: 'GEMINI_NETWORK_ERROR',
+      },
+    };
+  }
+
+  if (!geminiRes.ok) {
+    const errorText = await geminiRes.text();
+    let parsedErrorMessage = errorText.slice(0, 200);
+    try {
+      const parsedErrJson = JSON.parse(errorText);
+      if (parsedErrJson?.error?.message) {
+        parsedErrorMessage = String(parsedErrJson.error.message).slice(0, 200);
+      }
+    } catch {
+      // gunakan raw text terpotong
+    }
+    return {
+      status: 502,
+      payload: {
+        error: `Gemini API error (${geminiRes.status}): ${parsedErrorMessage}`,
         code: 'GEMINI_UPSTREAM_ERROR',
       },
     };
@@ -557,6 +672,8 @@ async function handleAi(body, decodedToken) {
       tokens_consumed: tokensConsumed,
       mode: 'gemini_live',
       is_live: true,
+      model,
+      remaining_quota: rateResult.remaining,
     },
   };
 }
@@ -570,20 +687,137 @@ async function handleUploadSign(body, decodedToken) {
     };
   }
 
-  const db = getFirestore();
-  const callerRole = await resolveCallerRole(db, decodedToken);
-  if (callerRole !== 'lecturer' && callerRole !== 'admin') {
+  const category = String(body?.category || 'image').trim().toLowerCase();
+  if (category !== 'image' && category !== 'document' && category !== 'submission') {
     return {
-      status: 403,
-      payload: {
-        error: 'AKSES DITOLAK: Hanya dosen atau admin yang dapat membuat signature upload Cloudinary.',
-        code: 'FORBIDDEN_ROLE',
-      },
+      status: 400,
+      payload: { error: 'Kategori berkas tidak valid.', code: 'INVALID_CATEGORY' },
     };
   }
 
+  const db = getFirestore();
+  const callerRole = await resolveCallerRole(db, decodedToken);
+
+  let folder = '';
+  let rateScope = 'upload_sign';
+
+  if (category === 'submission') {
+    const safeClassId = String(body?.classId || '').trim().replace(/[^a-zA-Z0-9_-]/g, '');
+    const safeAssignmentId = String(body?.assignmentId || '').trim().replace(/[^a-zA-Z0-9_-]/g, '');
+    if (!safeClassId || !safeAssignmentId) {
+      return {
+        status: 400,
+        payload: {
+          error: 'classId dan assignmentId wajib disertakan untuk mengunggah pengumpulan tugas.',
+          code: 'INVALID_SUBMISSION_TARGET',
+        },
+      };
+    }
+
+    const asgSnap = await db.collection('assignments').doc(safeAssignmentId).get();
+    if (!asgSnap?.exists) {
+      return {
+        status: 404,
+        payload: {
+          error: 'Tugas tidak ditemukan di Firestore.',
+          code: 'ASSIGNMENT_NOT_FOUND',
+        },
+      };
+    }
+    const asgData = asgSnap.data() || {};
+    if (String(asgData.classId || '').trim() !== safeClassId) {
+      return {
+        status: 403,
+        payload: {
+          error: 'Tugas ini bukan milik kelas yang diminta.',
+          code: 'FORBIDDEN_CLASS_ACCESS',
+        },
+      };
+    }
+
+    if (callerRole !== 'admin') {
+      const memberCheck = await verifyApprovedClassMember(db, { safeClassId, uid, callerRole });
+      if (!memberCheck.ok) {
+        if (callerRole === 'lecturer') {
+          const ownership = await verifyClassInstructorOwnership(db, {
+            safeClassId,
+            decodedToken,
+            callerRole,
+          });
+          if (!ownership.ok) {
+            return memberCheck.response;
+          }
+        } else {
+          return memberCheck.response;
+        }
+      }
+    }
+
+    const rawFileName = String(body?.fileName || '').trim();
+    const lowerFileName = rawFileName.toLowerCase();
+    const hasValidExtension = SUBMISSION_ALLOWED_EXTENSIONS.some((ext) => lowerFileName.endsWith(ext));
+    if (!rawFileName || /[\\/]/.test(rawFileName) || !hasValidExtension) {
+      return {
+        status: 400,
+        payload: {
+          error: `Nama atau ekstensi berkas tidak diizinkan. Gunakan format: ${SUBMISSION_ALLOWED_EXTENSIONS.join(', ')}`,
+          code: 'INVALID_FILE_TYPE',
+        },
+      };
+    }
+
+    const rawMimeType = String(body?.mimeType || body?.fileType || '').trim().toLowerCase();
+    if (
+      rawMimeType &&
+      rawMimeType !== 'application/octet-stream' &&
+      !SUBMISSION_ALLOWED_MIME_TYPES.has(rawMimeType)
+    ) {
+      return {
+        status: 400,
+        payload: {
+          error: 'Tipe MIME berkas pengumpulan tugas tidak diizinkan.',
+          code: 'INVALID_FILE_TYPE',
+        },
+      };
+    }
+
+    const parsedFileSize = Number(body?.fileSize);
+    if (!Number.isFinite(parsedFileSize) || parsedFileSize <= 0) {
+      return {
+        status: 400,
+        payload: {
+          error: 'Ukuran berkas (fileSize) wajib valid lebih dari 0 byte.',
+          code: 'INVALID_FILE_SIZE',
+        },
+      };
+    }
+    if (parsedFileSize > SUBMISSION_MAX_FILE_BYTES) {
+      return {
+        status: 413,
+        payload: {
+          error: `Ukuran berkas melebihi batas maksimum (${SUBMISSION_MAX_FILE_BYTES / (1024 * 1024)} MB).`,
+          code: 'FILE_TOO_LARGE',
+        },
+      };
+    }
+
+    folder = `smartsa/submissions/${safeClassId}/${safeAssignmentId}/${uid}`;
+    rateScope = 'upload_sign_submission';
+  } else {
+    if (callerRole !== 'lecturer' && callerRole !== 'admin') {
+      return {
+        status: 403,
+        payload: {
+          error: 'AKSES DITOLAK: Hanya dosen atau admin yang dapat membuat signature upload Cloudinary.',
+          code: 'FORBIDDEN_ROLE',
+        },
+      };
+    }
+    folder = category === 'document' ? 'smartsa/documents' : 'smartsa/images';
+  }
+
   const rateResult = await runRateLimitTx(db, {
-    scope: 'upload_sign',
+    scope: rateScope,
     uid,
     maxAttempts: UPLOAD_SIGN_MAX_REQUESTS,
     windowMs: RATE_LIMIT_WINDOW_MS,
@@ -602,14 +836,6 @@ async function handleUploadSign(body, decodedToken) {
     };
   }
 
-  const { category = 'image' } = body || {};
-  if (category !== 'image' && category !== 'document') {
-    return {
-      status: 400,
-      payload: { error: 'Kategori berkas tidak valid.', code: 'INVALID_CATEGORY' },
-    };
-  }
-
   const cloudName = process.env.CLOUDINARY_CLOUD_NAME;
   const apiKey = process.env.CLOUDINARY_API_KEY;
   const apiSecret = process.env.CLOUDINARY_API_SECRET;
@@ -625,7 +851,6 @@ async function handleUploadSign(body, decodedToken) {
   }
 
   const timestamp = Math.floor(Date.now() / 1000);
-  const folder = category === 'document' ? 'smartsa/documents' : 'smartsa/images';
   const paramsToSign = `folder=${folder}&timestamp=${timestamp}`;
   const signature = createHash('sha1').update(`${paramsToSign}${apiSecret}`).digest('hex');
 
@@ -637,6 +862,12 @@ async function handleUploadSign(body, decodedToken) {
       api_key: apiKey,
       cloud_name: cloudName,
       folder,
+      ...(category === 'submission'
+        ? {
+            maxBytes: SUBMISSION_MAX_FILE_BYTES,
+            allowedExtensions: SUBMISSION_ALLOWED_EXTENSIONS,
+          }
+        : {}),
     },
   };
 }
@@ -1115,6 +1346,8 @@ async function handleGrade(body, decodedToken) {
     const cleanTitle =
       String(title || '').trim() ||
       `${safeExamType === 'posttest' ? 'Post-test' : 'Pretest'} Pertemuan ${safeMeetingNo}`;
+    const totalQuestions = validated.sanitizedQuestions.length;
+    const pointsPerQuestion = computePointsPerQuestion(totalQuestions);
 
     await db.runTransaction(async (tx) => {
       const keySnap = await tx.get(keyRef);
@@ -1147,6 +1380,8 @@ async function handleGrade(body, decodedToken) {
           durationMinutes: normalizedDuration,
           deadline: normalizedDeadline,
           questions: validated.sanitizedQuestions,
+          totalQuestions,
+          pointsPerQuestion,
           updatedBy: decodedToken.uid,
           updatedAt: FieldValue.serverTimestamp(),
         },
@@ -1176,7 +1411,9 @@ async function handleGrade(body, decodedToken) {
         status: normalizedStatus,
         durationMinutes: normalizedDuration,
         deadline: normalizedDeadline,
-        questionsCount: validated.sanitizedQuestions.length,
+        questionsCount: totalQuestions,
+        totalQuestions,
+        pointsPerQuestion,
       },
     };
   }
@@ -1438,12 +1675,16 @@ async function handleGrade(body, decodedToken) {
     const savedCorrect = Number.isFinite(Number(attemptData.correctCount))
       ? Number(attemptData.correctCount)
       : 0;
+    const savedPointsPerQuestion = Number.isFinite(Number(attemptData.pointsPerQuestion))
+      ? Number(attemptData.pointsPerQuestion)
+      : computePointsPerQuestion(savedTotal);
     const savedPassed =
       typeof attemptData.passed === 'boolean' ? attemptData.passed : savedScore >= 75;
     const savedResultSummary = {
       score: savedScore,
       correctCount: savedCorrect,
       totalQuestions: savedTotal,
+      pointsPerQuestion: savedPointsPerQuestion,
       passed: savedPassed,
     };
 
@@ -1608,6 +1849,7 @@ async function handleGrade(body, decodedToken) {
 
   const questionIds = Object.keys(answerKey);
   const totalQuestions = questionIds.length;
+  const pointsPerQuestion = computePointsPerQuestion(totalQuestions);
   let correctCount = 0;
 
   for (const qId of questionIds) {
@@ -1635,6 +1877,7 @@ async function handleGrade(body, decodedToken) {
       score,
       correctCount,
       totalQuestions,
+      pointsPerQuestion,
       passed,
       submittedAt: FieldValue.serverTimestamp(),
       updatedAt: FieldValue.serverTimestamp(),
@@ -1656,6 +1899,7 @@ async function handleGrade(body, decodedToken) {
       score,
       correctCount,
       totalQuestions,
+      pointsPerQuestion,
       passed,
     },
   };

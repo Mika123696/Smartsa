@@ -16,7 +16,14 @@ const {
   mockWhere,
   mockDocumentId,
   mockRunTransaction,
+  mockAddDoc,
   mockDeleteDoc,
+  mockQrToDataUrl,
+  mockHtml5QrcodeStart,
+  mockHtml5QrcodeStop,
+  mockHtml5QrcodeClear,
+  mockHtml5QrcodeScanFile,
+  lastScannerOnSuccessRef,
 } = vi.hoisted(() => ({
   mockAuthObj: { currentUser: null },
   mockDbObj: { name: 'mock-db' },
@@ -32,7 +39,14 @@ const {
   mockWhere: vi.fn((...args) => ({ type: 'where', args })),
   mockDocumentId: vi.fn(() => '__name__'),
   mockRunTransaction: vi.fn(),
+  mockAddDoc: vi.fn(async () => ({ id: 'doc_new_mock' })),
   mockDeleteDoc: vi.fn(),
+  mockQrToDataUrl: vi.fn(async (payload) => `data:image/png;base64,MOCK_QR_${encodeURIComponent(String(payload))}`),
+  mockHtml5QrcodeStart: vi.fn(),
+  mockHtml5QrcodeStop: vi.fn(async () => {}),
+  mockHtml5QrcodeClear: vi.fn(async () => {}),
+  mockHtml5QrcodeScanFile: vi.fn(async () => 'SMARTSA_QR:SCAN-FILE-999'),
+  lastScannerOnSuccessRef: { current: null },
 }));
 
 vi.mock('../src/firebase', () => ({
@@ -69,18 +83,50 @@ vi.mock('firebase/firestore', () => ({
   updateDoc: mockUpdateDoc,
   where: mockWhere,
   documentId: mockDocumentId,
-  addDoc: vi.fn(),
+  addDoc: mockAddDoc,
   deleteDoc: mockDeleteDoc,
 }));
 
+vi.mock('qrcode', () => ({
+  default: { toDataURL: mockQrToDataUrl },
+  toDataURL: mockQrToDataUrl,
+}));
+
+vi.mock('html5-qrcode', () => {
+  class MockHtml5Qrcode {
+    constructor(elementId) {
+      this.elementId = elementId;
+    }
+    start(cameraConfig, config, onSuccess, onError) {
+      lastScannerOnSuccessRef.current = onSuccess;
+      return mockHtml5QrcodeStart(cameraConfig, config, onSuccess, onError);
+    }
+    stop() {
+      return mockHtml5QrcodeStop();
+    }
+    clear() {
+      return mockHtml5QrcodeClear();
+    }
+    scanFile(file, showImage) {
+      return mockHtml5QrcodeScanFile(file, showImage);
+    }
+  }
+  return { Html5Qrcode: MockHtml5Qrcode };
+});
+
 import DeltaContentRenderer from '../src/components/common/DeltaContentRenderer';
+import AttendanceQrModal from '../src/components/common/AttendanceQrModal';
+import QrScannerPanel from '../src/components/common/QrScannerPanel';
 import App from '../src/App';
 import SafeImage from '../src/components/common/SafeImage';
 import Navbar from '../src/components/common/Navbar';
+import Sidebar from '../src/components/common/Sidebar';
 import { ThemeProvider } from '../src/context/ThemeContext';
 import { AuthProvider } from '../src/context/AuthContext';
 import { LanguageProvider } from '../src/context/LanguageContext';
 import { useAuth } from '../src/context/useAuth';
+import AIAssistantView from '../src/components/features/AIAssistantView';
+import ManualBookView from '../src/components/features/ManualBookView';
 import ClassDetailView from '../src/components/features/ClassDetailView';
 import {
   deltaToEditableText,
@@ -89,6 +135,7 @@ import {
 import ClassesView from '../src/components/features/ClassesView';
 import DiscussionTab from '../src/components/features/DiscussionTab';
 import MaterialsTab from '../src/components/features/MaterialsTab';
+import ScheduleTab from '../src/components/features/ScheduleTab';
 import ProfileView from '../src/components/features/ProfileView';
 import LandingPage from '../src/components/public/LandingPage';
 import PublicCatalog from '../src/components/public/PublicCatalog';
@@ -115,12 +162,15 @@ import {
   upsertLearningProgress,
 } from '../src/services/lmsFirestoreService';
 import {
+  buildAttendanceQrPayload,
   clearDemoAttendanceStore,
   getSemesterAttendanceSummary,
+  parseAttendanceQrPayload,
   recordMeetingAttendance,
 } from '../src/services/attendanceService';
-import { uploadMediaFile } from '../src/services/cloudinaryService';
-import { getActiveExamStatus, setLocalExamSession } from '../src/services/aiService';
+import { parseAikenQuestions } from '../src/services/aikenParser';
+import { uploadMediaFile, uploadSubmissionFile } from '../src/services/cloudinaryService';
+import { askAIAssistant, getActiveExamStatus, setLocalExamSession } from '../src/services/aiService';
 
 describe('Frontend Security & UI Components', () => {
   beforeEach(() => {
@@ -695,7 +745,7 @@ describe('Frontend Security & UI Components', () => {
     expect(screen.getByRole('button', { name: /MULAI POST-TEST/i })).toBeDisabled();
 
     // 3. Complete Material and Video
-    fireEvent.click(screen.getByRole('button', { name: /DELTA JSON/i }));
+    fireEvent.click(screen.getByRole('button', { name: /MATERI FILE/i }));
     await act(async () => {
       fireEvent.click(screen.getByRole('button', { name: /Tandai Materi Selesai/i }));
     });
@@ -1037,10 +1087,11 @@ describe('Frontend Security & UI Components', () => {
       </LanguageProvider>
     );
 
-    // 1. Reading tab: no DEFAULT_SAMPLE_DELTA ("Clean Architecture"), clean empty state
-    fireEvent.click(screen.getByRole('button', { name: /DELTA JSON/i }));
-    expect(screen.getByText(/Belum ada materi bacaan untuk pertemuan ini/i)).toBeInTheDocument();
+    // 1. Course Materials tab: clean empty state, zero hardcoded Clean Architecture fallback, & no per-meeting Manual Book tab
+    fireEvent.click(screen.getByRole('button', { name: /MATERI FILE/i }));
+    expect(screen.getByText(/Belum ada materi file untuk pertemuan ini/i)).toBeInTheDocument();
     expect(screen.queryByText(/Clean Architecture/i)).toBeNull();
+    expect(screen.queryByRole('button', { name: /MANUAL BOOK/i })).toBeNull();
 
     // 2. Video tab: no ForBiggerBlazes.mp4 fallback
     fireEvent.click(screen.getByRole('button', { name: /VIDEO CDN/i }));
@@ -1049,12 +1100,7 @@ describe('Frontend Security & UI Components', () => {
     ).toBeInTheDocument();
     expect(container.innerHTML).not.toContain('ForBiggerBlazes');
 
-    // 3. Manual Book PDF tab: no synthetic Buku_Panduan_Praktikum_*.txt
-    fireEvent.click(screen.getByRole('button', { name: /MANUAL BOOK/i }));
-    expect(screen.getByText(/Belum Ada Dokumen PDF untuk Pertemuan Ini/i)).toBeInTheDocument();
-    expect(container.innerHTML).not.toContain('Buku_Panduan_Praktikum');
-
-    // 4. Exam tab: unconfigured exams disabled & no hardcoded EXAM_QUESTIONS
+    // 3. Exam tab: unconfigured exams disabled & no hardcoded EXAM_QUESTIONS
     fireEvent.click(screen.getByRole('button', { name: /PRETEST & EVALUASI/i }));
     await waitFor(() => {
       expect(
@@ -1065,7 +1111,7 @@ describe('Frontend Security & UI Components', () => {
     expect(screen.getByRole('button', { name: /POST-TEST BELUM TERSEDIA/i })).toBeDisabled();
   });
 
-  it('allows lecturer to manage per-meeting reading material, video/PDF URLs safely, and syncs hasVideo/hasPdf/materialsCount', async () => {
+  it('allows lecturer to manage per-meeting material files and video URLs safely, and syncs hasVideo/materialsCount', async () => {
     const lecturerUser = {
       uid: 'uid_dosen_01',
       email: 'dosen@smartsa.edu',
@@ -1103,7 +1149,6 @@ describe('Frontend Security & UI Components', () => {
               instructor: 'Dr. Andi Saputra',
               lecturerId: 'uid_dosen_01',
               videoUrl: '',
-              pdfUrl: '',
               meetings: [
                 {
                   id: 'cls_crud_mat_m1',
@@ -1111,8 +1156,8 @@ describe('Frontend Security & UI Components', () => {
                   title: 'Divide and Conquer',
                   date: 'Rabu, 08.00',
                   status: 'open',
+                  materialFiles: [],
                   hasVideo: false,
-                  hasPdf: false,
                 },
               ],
             }}
@@ -1128,14 +1173,25 @@ describe('Frontend Security & UI Components', () => {
       expect(screen.getByText(/MODE INSTRUKTUR/i)).toBeInTheDocument();
     });
 
-    // 1. Save reading material (Delta JSON) -> materialsCount: 1
-    fireEvent.click(screen.getByRole('button', { name: /DELTA JSON/i }));
-    const matTextarea = screen.getByLabelText(/Teks materi pertemuan/i);
-    fireEvent.change(matTextarea, {
-      target: { value: '# Pengantar\nMembagi masalah besar menjadi sub-masalah.' },
+    // 1. Reject javascript: material URL, then save valid https:// material file -> materialsCount: 1
+    fireEvent.click(screen.getByRole('button', { name: /MATERI FILE/i }));
+    const matTitleInput = screen.getByLabelText(/Judul berkas materi/i);
+    const matUrlInput = screen.getByLabelText(/URL berkas materi \(https:\/\/\)/i);
+    const callsBeforeInvalidMat = mockUpdateDoc.mock.calls.length;
+
+    fireEvent.change(matTitleInput, { target: { value: 'Modul Divide and Conquer' } });
+    fireEvent.change(matUrlInput, { target: { value: 'javascript:alert(2)' } });
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /Simpan Materi File/i }));
+    });
+    expect(screen.getByText(/Hanya URL berawalan https:\/\/ yang diizinkan/i)).toBeInTheDocument();
+    expect(mockUpdateDoc.mock.calls.length).toBe(callsBeforeInvalidMat);
+
+    fireEvent.change(matUrlInput, {
+      target: { value: 'https://res.cloudinary.com/demo/raw/upload/v1/modul-algoritma.pdf' },
     });
     await act(async () => {
-      fireEvent.click(screen.getByRole('button', { name: /Simpan Materi/i }));
+      fireEvent.click(screen.getByRole('button', { name: /Simpan Materi File/i }));
     });
     expect(mockUpdateDoc).toHaveBeenLastCalledWith(
       { path: 'classes/cls_crud_mat' },
@@ -1144,13 +1200,18 @@ describe('Frontend Security & UI Components', () => {
         meetings: [
           expect.objectContaining({
             id: 'cls_crud_mat_m1',
-            deltaContent: expect.objectContaining({ ops: expect.any(Array) }),
+            materialFiles: [
+              expect.objectContaining({
+                title: 'Modul Divide and Conquer',
+                fileUrl: 'https://res.cloudinary.com/demo/raw/upload/v1/modul-algoritma.pdf',
+              }),
+            ],
           }),
         ],
       })
     );
 
-    // 2. Reject javascript: video URL, then accept valid https://youtu.be URL -> hasVideo: true
+    // 2. Reject javascript: video URL, then accept valid https://youtu.be URL -> hasVideo: true, materialsCount: 2
     fireEvent.click(screen.getByRole('button', { name: /VIDEO CDN/i }));
     const videoInput = screen.getByLabelText(/URL video pembelajaran pertemuan/i);
     const prevUpdateCalls = mockUpdateDoc.mock.calls.length;
@@ -1180,44 +1241,14 @@ describe('Frontend Security & UI Components', () => {
       })
     );
 
-    // 3. Reject invalid javascript: PDF URL, then save valid https:// PDF URL -> hasPdf: true, materialsCount: 3
-    fireEvent.click(screen.getByRole('button', { name: /MANUAL BOOK/i }));
-    const pdfInput = screen.getByLabelText(/URL PDF pertemuan/i);
-    const callsBeforeInvalidPdf = mockUpdateDoc.mock.calls.length;
-    fireEvent.change(pdfInput, { target: { value: 'javascript:alert(2)' } });
-    await act(async () => {
-      fireEvent.click(screen.getByRole('button', { name: /Simpan PDF/i }));
-    });
-    expect(screen.getByText(/URL PDF tidak valid/i)).toBeInTheDocument();
-    expect(mockUpdateDoc.mock.calls.length).toBe(callsBeforeInvalidPdf);
-
-    fireEvent.change(pdfInput, { target: { value: 'https://example.com/modul-algoritma.pdf' } });
-    await act(async () => {
-      fireEvent.click(screen.getByRole('button', { name: /Simpan PDF/i }));
-    });
-    expect(mockUpdateDoc).toHaveBeenLastCalledWith(
-      { path: 'classes/cls_crud_mat' },
-      expect.objectContaining({
-        materialsCount: 3,
-        meetings: [
-          expect.objectContaining({
-            id: 'cls_crud_mat_m1',
-            pdfUrl: 'https://example.com/modul-algoritma.pdf',
-            hasPdf: true,
-          }),
-        ],
-      })
-    );
-
-    // 4. Delete Video -> hasVideo: false, materialsCount: 2
-    fireEvent.click(screen.getByRole('button', { name: /VIDEO CDN/i }));
+    // 3. Delete Video -> hasVideo: false, materialsCount: 1
     await act(async () => {
       fireEvent.click(screen.getByRole('button', { name: /Hapus Video/i }));
     });
     expect(mockUpdateDoc).toHaveBeenLastCalledWith(
       { path: 'classes/cls_crud_mat' },
       expect.objectContaining({
-        materialsCount: 2,
+        materialsCount: 1,
         meetings: [
           expect.objectContaining({
             id: 'cls_crud_mat_m1',
@@ -1229,7 +1260,7 @@ describe('Frontend Security & UI Components', () => {
     );
     expect(onClassUpdated).toHaveBeenLastCalledWith(
       expect.objectContaining({
-        materialsCount: 2,
+        materialsCount: 1,
       })
     );
   });
@@ -1338,6 +1369,9 @@ describe('Frontend Security & UI Components', () => {
     fireEvent.change(screen.getByLabelText(/Soal 1 Opsi 4/i), {
       target: { value: 'Menggabungkan tabel' },
     });
+    fireEvent.change(screen.getByLabelText(/Soal 1 Opsi 5/i), {
+      target: { value: 'Memperbanyak atribut turunan' },
+    });
     fireEvent.change(screen.getByLabelText(/Kunci Jawaban Soal 1/i), { target: { value: '1' } });
 
     await act(async () => {
@@ -1365,6 +1399,7 @@ describe('Frontend Security & UI Components', () => {
             'Menghilangkan ketergantungan transitif',
             'Menambah indeks tabel',
             'Menggabungkan tabel',
+            'Memperbanyak atribut turunan',
           ],
         },
       ],
@@ -1969,7 +2004,7 @@ describe('Frontend Security & UI Components', () => {
     expect(screen.queryByRole('button', { name: /Masuk \/ Daftar/i })).toBeNull();
   });
 
-  it('hides Cloudinary dropzone in student task modal and protects graded tasks in ClassDetailView and MaterialsTab', async () => {
+  it('enables student Cloudinary file upload or URL fallback while protecting graded tasks in ClassDetailView and MaterialsTab', async () => {
     const studentUser = {
       uid: 'uid_mhs_task',
       email: 'mhs.task@gmail.com',
@@ -2146,23 +2181,23 @@ describe('Frontend Security & UI Components', () => {
 
     fireEvent.click(closeGradedBtn);
 
-    // Open ungraded task modal: hides Cloudinary dropzone, focuses External URL input + Notes
+    // Open ungraded task modal: enables student Cloudinary file dropzone + External URL input + Notes
     const ungradedDetailBtn = Array.from(ungradedCard.querySelectorAll('button')).find((b) =>
       /Detail Tugas/i.test(b.textContent || '')
     );
     fireEvent.click(ungradedDetailBtn);
 
-    expect(screen.queryByText(/UNGGAH DOKUMEN VIA CLOUDINARY/i)).toBeNull();
-    expect(container.querySelector('input[type="file"]')).toBeNull();
+    expect(screen.getByText(/UNGGAH DOKUMEN VIA CLOUDINARY/i)).toBeInTheDocument();
+    expect(screen.getByLabelText(/Unggah berkas pengumpulan tugas/i)).toBeInTheDocument();
     expect(
-      screen.getByText(/TAUTAN URL EKSTERNAL \(GOOGLE DRIVE \/ GITHUB \/ ONEDRIVE \/ DOCS\)/i)
+      screen.getByText(/TAUTAN URL EKSTERNAL \(OPSIONAL JIKA UNGGAH FILE\)/i)
     ).toBeInTheDocument();
     const urlInput = screen.getByDisplayValue('https://github.com/student/ungraded');
     expect(urlInput).toHaveAttribute('type', 'url');
     expect(screen.getByDisplayValue('Catatan awal mahasiswa')).toBeInTheDocument();
     unmount();
 
-    // 2. Verify identical protections inside standalone MaterialsTab -> Tugas
+    // 2. Verify identical protections and student dropzone inside standalone MaterialsTab -> Tugas
     const { container: matContainer, unmount: unmountMat } = render(
       <LanguageProvider>
         <AuthProvider>
@@ -2193,10 +2228,10 @@ describe('Frontend Security & UI Components', () => {
     );
     fireEvent.click(matUngradedBtn);
 
-    expect(screen.queryByText(/UNGGAH BERKAS VIA CLOUDINARY/i)).toBeNull();
-    expect(matContainer.querySelector('input[type="file"]')).toBeNull();
+    expect(screen.getByText(/UNGGAH BERKAS VIA CLOUDINARY/i)).toBeInTheDocument();
+    expect(screen.getByLabelText(/Unggah berkas pengumpulan tugas/i)).toBeInTheDocument();
     expect(
-      screen.getByText(/TAUTAN URL EKSTERNAL \(GOOGLE DRIVE \/ GITHUB \/ ONEDRIVE \/ DOCS\)/i)
+      screen.getByText(/TAUTAN URL EKSTERNAL \(OPSIONAL JIKA UNGGAH FILE\)/i)
     ).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: /^Batal$/i }));
 
@@ -2205,6 +2240,7 @@ describe('Frontend Security & UI Components', () => {
     );
     fireEvent.click(matGradedBtn);
     expect(await screen.findByText(/NILAI TUGAS \(TERKUNCI\)/i)).toBeInTheDocument();
+    expect(matContainer.querySelector('input[type="file"]')).toBeNull();
     expect(screen.getByRole('button', { name: /^Tutup$/i })).toBeInTheDocument();
     unmountMat();
   });
@@ -2426,7 +2462,7 @@ describe('Frontend Security & UI Components', () => {
     // Gain table delta (+30 for Siti Rahma)
     expect(screen.getByText('+30')).toBeInTheDocument();
 
-    // Configure metadata + 5 dynamic options, remove option 2 -> key shifts from 4 to 3
+    // Configure metadata + default 5 options (A-E) -> add 6th option -> remove option 2 -> key shifts from 5 to 4
     fireEvent.change(screen.getByLabelText(/Status evaluasi/i), { target: { value: 'draft' } });
     fireEvent.change(screen.getByLabelText(/Durasi ujian \(menit\)/i), { target: { value: '45' } });
     const deadlineInput = screen.getByLabelText(/Deadline evaluasi/i);
@@ -2436,20 +2472,21 @@ describe('Frontend Security & UI Components', () => {
     fireEvent.change(deadlineInput, { target: { value: '2026-12-30T15:30' } });
 
     fireEvent.change(screen.getByLabelText(/Teks Soal 1/i), { target: { value: 'Soal Metadata?' } });
-    fireEvent.click(screen.getByRole('button', { name: /Tambah opsi Soal 1/i }));
     expect(screen.getByLabelText(/Soal 1 Opsi 5/i)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /Tambah opsi Soal 1/i }));
+    expect(screen.getByLabelText(/Soal 1 Opsi 6/i)).toBeInTheDocument();
 
-    ['Opsi 1', 'Opsi 2', 'Opsi 3', 'Opsi 4', 'Opsi 5'].forEach((label, idx) => {
+    ['Opsi 1', 'Opsi 2', 'Opsi 3', 'Opsi 4', 'Opsi 5', 'Opsi 6'].forEach((label, idx) => {
       fireEvent.change(screen.getByLabelText(new RegExp(`Soal 1 Opsi ${idx + 1}`, 'i')), {
         target: { value: `Pilihan ${label}` },
       });
     });
-    fireEvent.change(screen.getByLabelText(/Kunci Jawaban Soal 1/i), { target: { value: '4' } });
+    fireEvent.change(screen.getByLabelText(/Kunci Jawaban Soal 1/i), { target: { value: '5' } });
 
-    // Remove Opsi 2 -> selected answer index 4 shifts safely to 3
+    // Remove Opsi 2 -> selected answer index 5 shifts safely to 4
     fireEvent.click(screen.getByRole('button', { name: /Hapus pilihan 2 pertanyaan 1/i }));
-    expect(screen.queryByLabelText(/Soal 1 Opsi 5/i)).toBeNull();
-    expect(screen.getByLabelText(/Kunci Jawaban Soal 1/i)).toHaveValue('3');
+    expect(screen.queryByLabelText(/Soal 1 Opsi 6/i)).toBeNull();
+    expect(screen.getByLabelText(/Kunci Jawaban Soal 1/i)).toHaveValue('4');
 
     await act(async () => {
       fireEvent.click(screen.getByRole('button', { name: /Simpan Soal & Kunci ke Server/i }));
@@ -2464,12 +2501,18 @@ describe('Frontend Security & UI Components', () => {
       action: 'save_exam',
       status: 'draft',
       durationMinutes: 45,
-      answerKey: { q1: 3 },
+      answerKey: { q1: 4 },
       questions: [
         {
           id: 'q1',
           question: 'Soal Metadata?',
-          options: ['Pilihan Opsi 1', 'Pilihan Opsi 3', 'Pilihan Opsi 4', 'Pilihan Opsi 5'],
+          options: [
+            'Pilihan Opsi 1',
+            'Pilihan Opsi 3',
+            'Pilihan Opsi 4',
+            'Pilihan Opsi 5',
+            'Pilihan Opsi 6',
+          ],
         },
       ],
     });
@@ -3435,7 +3478,7 @@ describe('Frontend Security & UI Components', () => {
     expect(unsafeAttempt.ops.some((op) => op.insert?.image)).toBe(false);
     expect(unsafeAttempt.ops.some((op) => op.attributes?.link)).toBe(false);
 
-    // 2. Interactive ClassDetailView Material Editor re-edit + safe Cloudinary & URL image insertion
+    // 2. Legacy Delta Read-Only Fallback + Cloudinary Material File Upload (PDF/PPTX/Image) in ClassDetailView
     const lecturerUser = {
       uid: 'uid_dosen_delta',
       email: 'dosen.delta@smartsa.edu',
@@ -3471,7 +3514,7 @@ describe('Frontend Security & UI Components', () => {
               timestamp: 1700000111,
               signature: 'sig_mat_123',
               cloud_name: 'smartsa_cloud',
-              folder: 'smartsa/materials',
+              folder: 'smartsa/documents',
             }),
           };
         }
@@ -3481,7 +3524,8 @@ describe('Frontend Security & UI Components', () => {
             status: 200,
             headers: { get: () => 'application/json' },
             json: async () => ({
-              secure_url: 'https://res.cloudinary.com/smartsa_cloud/image/upload/v9/architecture.png',
+              secure_url:
+                'https://res.cloudinary.com/smartsa_cloud/raw/upload/v9/slide_pola_desain.pptx',
             }),
           };
         }
@@ -3527,87 +3571,1167 @@ describe('Frontend Security & UI Components', () => {
       </LanguageProvider>
     );
 
-    fireEvent.click(await screen.findByRole('button', { name: /DELTA JSON/i }));
-    fireEvent.click(screen.getByRole('button', { name: /Kelola Materi/i }));
+    fireEvent.click(await screen.findByRole('button', { name: /MATERI FILE/i }));
 
-    const matTextarea = screen.getByLabelText(/Teks materi pertemuan/i);
-    expect(matTextarea.value).toContain('https://res.cloudinary.com/demo/image/upload/v1/uml.png');
-    expect(matTextarea.value).toContain('```');
-    expect(matTextarea.value).toContain('[Dokumentasi](https://smartsa.edu/docs/oop)');
+    // Legacy Delta content still renders read-only safely
+    expect(screen.getByText(/CATATAN TEKS MODUL \(ARSIP READ-ONLY\)/i)).toBeInTheDocument();
+    expect(screen.getByText(/Bab 1: Enkapsulasi/i)).toBeInTheDocument();
+    expect(container.querySelector('script')).toBeNull();
+    expect(
+      Array.from(container.querySelectorAll('img')).map((img) => img.getAttribute('src'))
+    ).toContain('https://res.cloudinary.com/demo/image/upload/v1/uml.png');
 
-    // Reject javascript: & data: URLs in Insert Image URL control
-    const imgUrlInput = screen.getByLabelText(/URL gambar materi \(https:\/\/\)/i);
-    const insertImgBtn = screen.getByRole('button', { name: /Sisipkan URL Gambar/i });
-
-    fireEvent.change(imgUrlInput, { target: { value: 'javascript:alert(99)' } });
-    fireEvent.click(insertImgBtn);
-    expect(matTextarea.value).not.toContain('javascript:alert');
-
-    fireEvent.change(imgUrlInput, { target: { value: 'data:image/png;base64,xxx' } });
-    fireEvent.click(insertImgBtn);
-    expect(matTextarea.value).not.toContain('data:image/png');
-
-    // Upload Cloudinary image into Delta editor
-    const matUploadInput = screen.getByLabelText(/Unggah gambar materi/i);
-    const diagramFile = new File(['png-diagram'], 'diagram_arsitektur.png', {
-      type: 'image/png',
+    // Lecturer uploads a PPTX material file via Cloudinary -> fills form -> saves into materialFiles
+    const matUploadInput = screen.getByLabelText(/Unggah berkas materi pertemuan/i);
+    const slideFile = new File(['pptx-binary'], 'slide_pola_desain.pptx', {
+      type: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
     });
     await act(async () => {
-      fireEvent.change(matUploadInput, { target: { files: [diagramFile] } });
+      fireEvent.change(matUploadInput, { target: { files: [slideFile] } });
     });
 
     await waitFor(() => {
-      expect(matTextarea.value).toContain(
-        '![diagram_arsitektur](https://res.cloudinary.com/smartsa_cloud/image/upload/v9/architecture.png)'
+      expect(screen.getByLabelText(/URL berkas materi \(https:\/\/\)/i)).toHaveValue(
+        'https://res.cloudinary.com/smartsa_cloud/raw/upload/v9/slide_pola_desain.pptx'
       );
     });
 
-    // Also insert safe https:// image URL
-    fireEvent.change(imgUrlInput, {
-      target: { value: 'https://cdn.smartsa.edu/images/flowchart.webp' },
+    fireEvent.change(screen.getByLabelText(/Deskripsi berkas materi/i), {
+      target: { value: 'Slide presentasi lengkap pola Singleton & Factory' },
     });
-    fireEvent.click(insertImgBtn);
-    expect(matTextarea.value).toContain(
-      '![Ilustrasi modul](https://cdn.smartsa.edu/images/flowchart.webp)'
-    );
-
     await act(async () => {
-      fireEvent.click(screen.getByRole('button', { name: /Simpan Materi/i }));
+      fireEvent.click(screen.getByRole('button', { name: /Simpan Materi File/i }));
     });
 
     expect(mockUpdateDoc).toHaveBeenCalledWith(
       { path: 'classes/cls_delta_rt' },
       expect.objectContaining({
-        materialsCount: 1,
+        materialsCount: 2,
         meetings: [
           expect.objectContaining({
             id: 'cls_delta_rt_m1',
-            deltaContent: expect.objectContaining({
-              ops: expect.arrayContaining([
-                expect.objectContaining({ insert: { image: 'https://res.cloudinary.com/demo/image/upload/v1/uml.png' } }),
-                expect.objectContaining({ insert: { image: 'https://res.cloudinary.com/smartsa_cloud/image/upload/v9/architecture.png' } }),
-                expect.objectContaining({ insert: { image: 'https://cdn.smartsa.edu/images/flowchart.webp' } }),
-                expect.objectContaining({ insert: '\n', attributes: { 'code-block': true } }),
-                expect.objectContaining({ insert: 'Dokumentasi', attributes: { link: 'https://smartsa.edu/docs/oop' } }),
-              ]),
-            }),
+            materialFiles: [
+              expect.objectContaining({
+                title: 'slide pola desain',
+                description: 'Slide presentasi lengkap pola Singleton & Factory',
+                fileType: 'pptx',
+                storageType: 'cloudinary',
+                fileUrl:
+                  'https://res.cloudinary.com/smartsa_cloud/raw/upload/v9/slide_pola_desain.pptx',
+              }),
+            ],
           }),
         ],
       })
     );
-
-    // Verify all 3 HTTPS images render cleanly with zero XSS script elements
-    expect(container.querySelector('script')).toBeNull();
-    const renderedImgs = Array.from(container.querySelectorAll('img')).map((img) =>
-      img.getAttribute('src')
-    );
-    expect(renderedImgs).toEqual(
-      expect.arrayContaining([
-        'https://res.cloudinary.com/demo/image/upload/v1/uml.png',
-        'https://res.cloudinary.com/smartsa_cloud/image/upload/v9/architecture.png',
-        'https://cdn.smartsa.edu/images/flowchart.webp',
-      ])
-    );
     unmount();
+  });
+
+  it('surfaces honest backend AI errors on 429/500/502, renders live AIAssistantView without paused copy, and displays AI link in Sidebar for admin', async () => {
+    const adminUser = {
+      uid: 'uid_admin_ai',
+      email: 'admin@smartsa.edu',
+      displayName: 'Admin Smartsa',
+      emailVerified: true,
+      getIdToken: vi.fn(async () => 'token-admin-ai'),
+    };
+    mockAuthObj.currentUser = adminUser;
+    mockOnAuthStateChanged.mockImplementation((_auth, cb) => {
+      void cb(adminUser);
+      return () => {};
+    });
+    mockGetDoc.mockImplementation(async (ref) => {
+      if (ref?.path === 'users/uid_admin_ai') {
+        return {
+          exists: () => true,
+          data: () => ({ uid: 'uid_admin_ai', role: 'admin', displayName: 'Admin Smartsa' }),
+        };
+      }
+      return { exists: () => false };
+    });
+
+    // 1. aiService must throw honest error on 429, 502 JSON, and 500 plain-text (never mask with dummy reply)
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+
+    fetchMock.mockResolvedValueOnce({
+      ok: false,
+      status: 429,
+      headers: { get: (k) => (k.toLowerCase() === 'content-type' ? 'application/json' : '45') },
+      json: async () => ({
+        error: 'Terlalu banyak permintaan ke Asisten AI.',
+        code: 'RATE_LIMIT_EXCEEDED',
+        retryAfterSeconds: 45,
+      }),
+    });
+    await expect(askAIAssistant({ prompt: 'Halo' })).rejects.toThrow(/Terlalu banyak permintaan/);
+
+    fetchMock.mockResolvedValueOnce({
+      ok: false,
+      status: 502,
+      headers: { get: () => 'application/json' },
+      json: async () => ({ error: 'Gemini API error (503): Quota exceeded', code: 'GEMINI_UPSTREAM_ERROR' }),
+    });
+    await expect(askAIAssistant({ prompt: 'Halo' })).rejects.toThrow(/Gemini API error/);
+
+    fetchMock.mockResolvedValueOnce({
+      ok: false,
+      status: 500,
+      headers: { get: () => 'text/plain' },
+    });
+    await expect(askAIAssistant({ prompt: 'Halo' })).rejects.toThrow(/HTTP 500/);
+
+    // 2. Sidebar shows AI Assistant link for role admin and navigates to 'ai'
+    const setCurrentView = vi.fn();
+    const { unmount: unmountSidebar } = render(
+      <LanguageProvider>
+        <AuthProvider>
+          <Sidebar currentView="dashboard" setCurrentView={setCurrentView} />
+        </AuthProvider>
+      </LanguageProvider>
+    );
+    const adminAiNavBtn = await screen.findByRole('button', { name: /AI Assistant Admin/i });
+    fireEvent.click(adminAiNavBtn);
+    expect(setCurrentView).toHaveBeenCalledWith('ai');
+    unmountSidebar();
+
+    // 3. AIAssistantView loads user class context, forwards history & context, and renders Gemini live response
+    mockGetDocs.mockImplementation(async (qOrRef) => {
+      const colName = qOrRef?.col || qOrRef?.args?.[0]?.col;
+      if (colName === 'classes') {
+        return {
+          docs: [
+            {
+              id: 'cls_ai_ctx',
+              data: () => ({
+                name: 'Sistem Terdistribusi',
+                code: 'STD401',
+                description: 'Konsistensi & transaksi terdistribusi',
+                meetings: [{ id: 'm1', order: 1, title: 'Pengantar RPC' }],
+              }),
+            },
+          ],
+        };
+      }
+      return { docs: [] };
+    });
+
+    fetchMock.mockImplementation(async (url) => {
+      if (String(url).includes('/api/bootstrap')) {
+        return {
+          ok: true,
+          status: 200,
+          headers: { get: () => 'application/json' },
+          json: async () => ({
+            uid: 'uid_admin_ai',
+            role: 'admin',
+            displayName: 'Admin Smartsa',
+            isInstitutional: true,
+          }),
+        };
+      }
+      if (String(url).includes('/api/ai')) {
+        return {
+          ok: true,
+          status: 200,
+          headers: { get: () => 'application/json' },
+          json: async () => ({
+            response_text: 'RPC menyederhanakan pemanggilan prosedur antar node.',
+            tokens_consumed: 180,
+            mode: 'gemini_live',
+            is_live: true,
+            model: 'gemini-2.5-flash',
+            remaining_quota: 19,
+          }),
+        };
+      }
+      return {
+        ok: true,
+        status: 200,
+        headers: { get: () => 'application/json' },
+        json: async () => ({}),
+      };
+    });
+
+    const { unmount: unmountAi } = render(
+      <LanguageProvider>
+        <AuthProvider>
+          <AIAssistantView />
+        </AuthProvider>
+      </LanguageProvider>
+    );
+
+    expect(screen.queryByText(/Gemini Ditunda/i)).toBeNull();
+    const contextSelect = await screen.findByLabelText(/Konteks Mata Kuliah/i);
+    fireEvent.change(contextSelect, { target: { value: 'cls_ai_ctx' } });
+
+    const promptInput = screen.getByPlaceholderText(/Ketik pertanyaan atau permintaan/i);
+    fireEvent.change(promptInput, { target: { value: 'Jelaskan konsep RPC' } });
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /Kirim pesan/i }));
+    });
+
+    expect(await screen.findByText(/RPC menyederhanakan pemanggilan prosedur antar node\./i)).toBeInTheDocument();
+    expect(screen.getByText(/Google Gemini AI \(Live • gemini-2\.5-flash\)/i)).toBeInTheDocument();
+    expect(screen.getByText(/Sisa Kuota Permintaan: 19 \/ 20/i)).toBeInTheDocument();
+
+    const aiPostCalls = fetchMock.mock.calls.filter(([url]) => String(url).includes('/api/ai'));
+    const latestAiBody = JSON.parse(aiPostCalls[aiPostCalls.length - 1][1].body);
+    expect(latestAiBody.prompt).toBe('Jelaskan konsep RPC');
+    expect(latestAiBody.context).toContain('Sistem Terdistribusi');
+    expect(latestAiBody.history.length).toBeGreaterThan(0);
+    unmountAi();
+  });
+
+  it('renders global ManualBookView with Cloudinary upload, AccessibleDialog delete, Sidebar/ProfileView nav, and Strict Auth Guard on #manual-book', async () => {
+    // 1. Strict Auth Guard blocks unauthenticated #manual-book and redirects to landing
+    mockAuthObj.currentUser = null;
+    mockOnAuthStateChanged.mockImplementation((_auth, cb) => {
+      void cb(null);
+      return () => {};
+    });
+    window.location.hash = '#manual-book';
+
+    const { unmount: unmountGuestApp } = render(<App />);
+    await waitFor(() => {
+      expect(window.location.hash).toBe('#landing');
+      expect(screen.getByText(/Masuk ke Smartsa LMS/i)).toBeInTheDocument();
+    });
+    expect(screen.queryByText(/Smartsa Official Manual Books/i)).toBeNull();
+    expect(screen.queryByText(/Manual Book & Panduan Resmi Smartsa/i)).toBeNull();
+    unmountGuestApp();
+
+    // 2. Sidebar shows Manual Book link for admin/lecturer/student & ProfileView renders quick-access button
+    const adminUser = {
+      uid: 'uid_admin_mb',
+      email: 'admin.mb@smartsa.edu',
+      displayName: 'Admin Manual Book',
+      emailVerified: true,
+      getIdToken: vi.fn(async () => 'token-admin-mb'),
+    };
+    mockAuthObj.currentUser = adminUser;
+    mockOnAuthStateChanged.mockImplementation((_auth, cb) => {
+      void cb(adminUser);
+      return () => {};
+    });
+    mockGetDoc.mockImplementation(async (ref) => {
+      if (ref?.path === 'users/uid_admin_mb') {
+        return {
+          exists: () => true,
+          data: () => ({ uid: 'uid_admin_mb', role: 'admin', displayName: 'Admin Manual Book' }),
+        };
+      }
+      return { exists: () => false };
+    });
+
+    const fetchMock = vi.fn(async (url) => {
+      if (String(url).includes('/api/bootstrap')) {
+        return {
+          ok: true,
+          status: 200,
+          headers: { get: () => 'application/json' },
+          json: async () => ({ uid: 'uid_admin_mb', role: 'admin', isInstitutional: true }),
+        };
+      }
+      if (String(url).includes('/api/upload-sign')) {
+        return {
+          ok: true,
+          status: 200,
+          headers: { get: () => 'application/json' },
+          json: async () => ({
+            api_key: 'mb_key',
+            timestamp: 1700000222,
+            signature: 'sig_mb_pdf',
+            cloud_name: 'smartsa_cloud',
+            folder: 'smartsa/documents',
+          }),
+        };
+      }
+      if (String(url).includes('api.cloudinary.com/v1_1/smartsa_cloud/auto/upload')) {
+        return {
+          ok: true,
+          status: 200,
+          headers: { get: () => 'application/json' },
+          json: async () => ({
+            secure_url: 'https://res.cloudinary.com/smartsa_cloud/raw/upload/v2/panduan_smartsa.pdf',
+          }),
+        };
+      }
+      return { ok: true, status: 200, headers: { get: () => 'application/json' }, json: async () => ({}) };
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const setViewSpy = vi.fn();
+    const { unmount: unmountSidebar } = render(
+      <LanguageProvider>
+        <AuthProvider>
+          <Sidebar currentView="dashboard" setCurrentView={setViewSpy} />
+        </AuthProvider>
+      </LanguageProvider>
+    );
+    const mbSidebarBtn = await screen.findByRole('button', { name: /^Manual Book$/i });
+    fireEvent.click(mbSidebarBtn);
+    expect(setViewSpy).toHaveBeenCalledWith('manual-book');
+    unmountSidebar();
+
+    const navMbSpy = vi.fn();
+    const { unmount: unmountProfile } = render(
+      <ThemeProvider>
+        <LanguageProvider>
+          <AuthProvider>
+            <ProfileView onOpenAuth={vi.fn()} onNavigateManualBook={navMbSpy} />
+          </AuthProvider>
+        </LanguageProvider>
+      </ThemeProvider>
+    );
+    const mbProfileBtn = await screen.findByRole('button', { name: /Manual Book/i });
+    fireEvent.click(mbProfileBtn);
+    expect(navMbSpy).toHaveBeenCalledTimes(1);
+    unmountProfile();
+
+    // 3. ManualBookView CRUD as Admin/Lecturer + AccessibleDialog delete
+    mockGetDocs.mockImplementation(async (qOrRef) => {
+      const colName = qOrRef?.col || qOrRef?.args?.[0]?.col;
+      if (colName === 'manual_books') {
+        return {
+          docs: [
+            {
+              id: 'book_existing',
+              data: () => ({
+                title: 'Panduan Lama Unsafe Check',
+                description: 'Uji validasi skema PDF',
+                fileUrl: 'javascript:alert(9)',
+                uploadedByName: 'Admin Smartsa',
+              }),
+            },
+          ],
+        };
+      }
+      return { docs: [] };
+    });
+    mockAddDoc.mockResolvedValue({ id: 'book_new_pdf' });
+    mockDeleteDoc.mockResolvedValue(undefined);
+
+    const { unmount: unmountAdminMb } = render(
+      <LanguageProvider>
+        <AuthProvider>
+          <ManualBookView />
+        </AuthProvider>
+      </LanguageProvider>
+    );
+
+    expect(await screen.findByText(/Tautan PDF tidak valid atau diblokir/i)).toBeInTheDocument();
+
+    const pdfUploadInput = screen.getByLabelText(/Unggah berkas PDF Manual Book/i);
+    const sampleManual = new File(['%PDF-1.4'], 'panduan_smartsa.pdf', { type: 'application/pdf' });
+    await act(async () => {
+      fireEvent.change(pdfUploadInput, { target: { files: [sampleManual] } });
+    });
+
+    await waitFor(() => {
+      expect(screen.getByLabelText(/URL PDF Manual Book/i)).toHaveValue(
+        'https://res.cloudinary.com/smartsa_cloud/raw/upload/v2/panduan_smartsa.pdf'
+      );
+    });
+
+    fireEvent.change(screen.getByLabelText(/Judul Manual Book/i), {
+      target: { value: 'Buku Panduan Smartsa LMS' },
+    });
+    fireEvent.change(screen.getByLabelText(/Deskripsi Manual Book/i), {
+      target: { value: 'Panduan penggunaan mahasiswa dan dosen' },
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /Simpan Manual Book/i }));
+    });
+
+    expect(mockAddDoc).toHaveBeenCalledWith(
+      { col: 'manual_books' },
+      expect.objectContaining({
+        title: 'Buku Panduan Smartsa LMS',
+        description: 'Panduan penggunaan mahasiswa dan dosen',
+        fileUrl: 'https://res.cloudinary.com/smartsa_cloud/raw/upload/v2/panduan_smartsa.pdf',
+      })
+    );
+    expect(screen.getByTitle(/Manual Book PDF: Buku Panduan Smartsa LMS/i)).toHaveAttribute(
+      'src',
+      'https://res.cloudinary.com/smartsa_cloud/raw/upload/v2/panduan_smartsa.pdf'
+    );
+
+    // Delete via AccessibleDialog
+    fireEvent.click(screen.getByLabelText(/Hapus Manual Book Buku Panduan Smartsa LMS/i));
+    expect(await screen.findByRole('dialog')).toBeInTheDocument();
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /Ya, Hapus/i }));
+    });
+    expect(mockDeleteDoc).toHaveBeenCalledWith({ path: 'manual_books/book_new_pdf' });
+    unmountAdminMb();
+
+    // 4. Student view: sees Manual Book read-only (no upload/delete controls)
+    const studentMbUser = {
+      uid: 'uid_mhs_mb',
+      email: 'mhs.mb@gmail.com',
+      displayName: 'Mahasiswa Pembaca',
+      emailVerified: true,
+      getIdToken: vi.fn(async () => 'token-mhs-mb'),
+    };
+    mockAuthObj.currentUser = studentMbUser;
+    mockOnAuthStateChanged.mockImplementation((_auth, cb) => {
+      void cb(studentMbUser);
+      return () => {};
+    });
+    mockGetDoc.mockImplementation(async (ref) => {
+      if (ref?.path === 'users/uid_mhs_mb') {
+        return {
+          exists: () => true,
+          data: () => ({ uid: 'uid_mhs_mb', role: 'student', displayName: 'Mahasiswa Pembaca' }),
+        };
+      }
+      return { exists: () => false };
+    });
+    mockGetDocs.mockImplementation(async (qOrRef) => {
+      const colName = qOrRef?.col || qOrRef?.args?.[0]?.col;
+      if (colName === 'manual_books') {
+        return {
+          docs: [
+            {
+              id: 'book_student_ok',
+              data: () => ({
+                title: 'Panduan Mahasiswa Resmi',
+                description: 'Silabus & tatacara presensi',
+                fileUrl: 'https://res.cloudinary.com/smartsa_cloud/raw/upload/v2/panduan_mhs.pdf',
+                uploadedByName: 'Admin Smartsa',
+              }),
+            },
+          ],
+        };
+      }
+      return { docs: [] };
+    });
+
+    const { unmount: unmountStudentMb } = render(
+      <LanguageProvider>
+        <AuthProvider>
+          <ManualBookView />
+        </AuthProvider>
+      </LanguageProvider>
+    );
+
+    const studentBookMatches = await screen.findAllByText('Panduan Mahasiswa Resmi');
+    expect(studentBookMatches.length).toBeGreaterThanOrEqual(1);
+    expect(screen.getByTitle(/Manual Book PDF: Panduan Mahasiswa Resmi/i)).toHaveAttribute(
+      'src',
+      'https://res.cloudinary.com/smartsa_cloud/raw/upload/v2/panduan_mhs.pdf'
+    );
+    expect(screen.queryByRole('button', { name: /Simpan Manual Book/i })).toBeNull();
+    expect(screen.queryByLabelText(/Unggah berkas PDF Manual Book/i)).toBeNull();
+    expect(screen.queryByLabelText(/Hapus Manual Book/i)).toBeNull();
+    unmountStudentMb();
+
+    // Verify Sidebar renders Manual Book link for student role too
+    const { unmount: unmountStudentSidebar } = render(
+      <LanguageProvider>
+        <AuthProvider>
+          <Sidebar currentView="dashboard" setCurrentView={setViewSpy} />
+        </AuthProvider>
+      </LanguageProvider>
+    );
+    expect(await screen.findByRole('button', { name: /^Manual Book$/i })).toBeInTheDocument();
+    unmountStudentSidebar();
+  });
+
+  it('supports individu and kelompok assignment creation, category submission Cloudinary upload, required group metadata, and grading visibility', async () => {
+    // 1. Lecturer creates a Kelompok assignment with Cloudinary instruction attachment
+    const lecturerUser = {
+      uid: 'uid_dosen_grp',
+      email: 'dosen.grp@smartsa.edu',
+      displayName: 'Dr. Kelompok',
+      emailVerified: true,
+      getIdToken: vi.fn(async () => 'token-dosen-grp'),
+    };
+    mockAuthObj.currentUser = lecturerUser;
+    mockOnAuthStateChanged.mockImplementation((_auth, cb) => {
+      void cb(lecturerUser);
+      return () => {};
+    });
+    mockGetDoc.mockImplementation(async (ref) => {
+      if (ref?.path === 'users/uid_dosen_grp') {
+        return {
+          exists: () => true,
+          data: () => ({ uid: 'uid_dosen_grp', role: 'lecturer', displayName: 'Dr. Kelompok' }),
+        };
+      }
+      return { exists: () => false };
+    });
+
+    const fetchMock = vi.fn(async (url, opts) => {
+      if (String(url).includes('/api/upload-sign')) {
+        const parsed = JSON.parse(opts?.body || '{}');
+        if (parsed.category === 'submission') {
+          return {
+            ok: true,
+            status: 200,
+            headers: { get: () => 'application/json' },
+            json: async () => ({
+              api_key: 'sub_key',
+              timestamp: 1700000333,
+              signature: 'sig_sub_pdf',
+              cloud_name: 'smartsa_cloud',
+              folder: `smartsa/submissions/${parsed.classId}/${parsed.assignmentId}/uid_mhs_grp`,
+            }),
+          };
+        }
+        return {
+          ok: true,
+          status: 200,
+          headers: { get: () => 'application/json' },
+          json: async () => ({
+            api_key: 'doc_key',
+            timestamp: 1700000333,
+            signature: 'sig_doc_pdf',
+            cloud_name: 'smartsa_cloud',
+            folder: 'smartsa/documents',
+          }),
+        };
+      }
+      if (String(url).includes('api.cloudinary.com/v1_1/smartsa_cloud/auto/upload')) {
+        return {
+          ok: true,
+          status: 200,
+          headers: { get: () => 'application/json' },
+          json: async () => ({
+            secure_url: 'https://res.cloudinary.com/smartsa_cloud/raw/upload/v5/berkas_upload.pdf',
+          }),
+        };
+      }
+      return { ok: true, status: 200, headers: { get: () => 'application/json' }, json: async () => ({}) };
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    mockAddDoc.mockResolvedValue({ id: 'asg_kelompok_01' });
+
+    const { unmount: unmountLecturer } = render(
+      <LanguageProvider>
+        <AuthProvider>
+          <ClassDetailView
+            classData={{
+              id: 'cls_grp_01',
+              name: 'Rekayasa Perangkat Lunak',
+              code: 'RPL301',
+              lecturerId: 'uid_dosen_grp',
+              instructor: 'Dr. Kelompok',
+              meetings: [{ id: 'cls_grp_01_m1', order: 1, title: 'Sprint 1', status: 'open' }],
+            }}
+            onBack={vi.fn()}
+            onNavigateAI={vi.fn()}
+          />
+        </AuthProvider>
+      </LanguageProvider>
+    );
+
+    fireEvent.click(await screen.findByRole('button', { name: /NILAI TUGAS/i }));
+    fireEvent.change(screen.getByLabelText(/Tipe tugas baru/i), {
+      target: { value: 'kelompok' },
+    });
+    fireEvent.change(screen.getByPlaceholderText(/Tugas Praktikum 03/i), {
+      target: { value: 'Tugas Proyek Kelompok 01' },
+    });
+
+    const attachFile = new File(['rubric'], 'rubrik_proyek.pdf', { type: 'application/pdf' });
+    await act(async () => {
+      fireEvent.change(screen.getByLabelText(/Unggah lampiran instruksi tugas/i), {
+        target: { files: [attachFile] },
+      });
+    });
+    await waitFor(() => {
+      expect(screen.getByText(/Lampiran instruksi "rubrik_proyek\.pdf" berhasil diunggah/i)).toBeInTheDocument();
+    });
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /Terbitkan Tugas/i }));
+    });
+
+    expect(mockAddDoc).toHaveBeenCalledWith(
+      { col: 'assignments' },
+      expect.objectContaining({
+        classId: 'cls_grp_01',
+        title: 'Tugas Proyek Kelompok 01',
+        taskType: 'kelompok',
+        attachmentName: 'rubrik_proyek.pdf',
+        attachmentUrl: 'https://res.cloudinary.com/smartsa_cloud/raw/upload/v5/berkas_upload.pdf',
+      })
+    );
+    unmountLecturer();
+
+    // 2. Verify submission validation & category: 'submission' Cloudinary upload as Student
+    const studentUser = {
+      uid: 'uid_mhs_grp',
+      email: 'mhs.grp@gmail.com',
+      displayName: 'Ketua Kelompok',
+      emailVerified: true,
+      getIdToken: vi.fn(async () => 'token-mhs-grp'),
+    };
+    mockAuthObj.currentUser = studentUser;
+    mockOnAuthStateChanged.mockImplementation((_auth, cb) => {
+      void cb(studentUser);
+      return () => {};
+    });
+    mockGetDoc.mockImplementation(async (ref) => {
+      if (ref?.path === 'users/uid_mhs_grp') {
+        return {
+          exists: () => true,
+          data: () => ({ uid: 'uid_mhs_grp', role: 'student', displayName: 'Ketua Kelompok' }),
+        };
+      }
+      return { exists: () => false };
+    });
+
+    const unsafeFile = new File(['mz'], 'malware.exe', { type: 'application/x-msdownload' });
+    await expect(
+      uploadSubmissionFile(unsafeFile, { classId: 'cls_grp_01', assignmentId: 'asg_kelompok_01' })
+    ).rejects.toThrow(/Format berkas tugas tidak diizinkan/i);
+
+    mockGetDocs.mockImplementation(async (qOrRef) => {
+      const colName = qOrRef?.col || qOrRef?.args?.[0]?.col;
+      if (colName === 'assignments') {
+        return {
+          docs: [
+            {
+              id: 'asg_kelompok_01',
+              data: () => ({
+                classId: 'cls_grp_01',
+                meetingNo: 1,
+                title: 'Tugas Proyek Kelompok 01',
+                taskType: 'kelompok',
+                attachmentUrl: 'https://res.cloudinary.com/smartsa_cloud/raw/upload/v5/berkas_upload.pdf',
+                attachmentName: 'rubrik_proyek.pdf',
+                note: 'Kumpulkan laporan sprint secara berkelompok.',
+                deadline: '2026-12-30T23:59:00.000Z',
+              }),
+            },
+          ],
+        };
+      }
+      if (colName === 'submissions') {
+        return { docs: [] };
+      }
+      return { docs: [] };
+    });
+    mockSetDoc.mockResolvedValue(undefined);
+
+    const { unmount: unmountStudent } = render(
+      <LanguageProvider>
+        <AuthProvider>
+          <ClassDetailView
+            classData={{
+              id: 'cls_grp_01',
+              name: 'Rekayasa Perangkat Lunak',
+              code: 'RPL301',
+              instructor: 'Dr. Kelompok',
+              meetings: [{ id: 'cls_grp_01_m1', order: 1, title: 'Sprint 1', status: 'open' }],
+            }}
+            isMember={true}
+            onBack={vi.fn()}
+            onNavigateAI={vi.fn()}
+          />
+        </AuthProvider>
+      </LanguageProvider>
+    );
+
+    fireEvent.click(await screen.findByRole('button', { name: /PENGUMPULAN TUGAS FILE/i }));
+    expect(await screen.findByText('Tugas Proyek Kelompok 01')).toBeInTheDocument();
+    expect(screen.getByText('KELOMPOK')).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: /rubrik_proyek\.pdf/i })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: /Kumpulkan Tugas/i }));
+    expect(await screen.findByLabelText(/Nama kelompok/i)).toBeInTheDocument();
+    expect(screen.getByLabelText(/Daftar anggota kelompok/i)).toBeInTheDocument();
+
+    const subPdf = new File(['laporan-pdf'], 'laporan_kelompok_03.pdf', { type: 'application/pdf' });
+    fireEvent.change(screen.getByLabelText(/Unggah berkas pengumpulan tugas/i), {
+      target: { files: [subPdf] },
+    });
+
+    // Required validation triggers cleanly if group fields are empty on submit
+    const modalForm = screen.getByRole('dialog').querySelector('form');
+    await act(async () => {
+      fireEvent.submit(modalForm);
+    });
+    expect(screen.getByText(/Nama Kelompok wajib diisi untuk tugas kelompok/i)).toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText(/Nama kelompok/i), {
+      target: { value: 'Kelompok 03 Alpha' },
+    });
+    fireEvent.change(screen.getByLabelText(/Daftar anggota kelompok/i), {
+      target: { value: 'Andi (230501)\nBudi (230502)' },
+    });
+
+    await act(async () => {
+      fireEvent.submit(modalForm);
+    });
+
+    await waitFor(() => {
+      expect(mockSetDoc).toHaveBeenCalledWith(
+        { path: 'submissions/asg_kelompok_01_uid_mhs_grp' },
+        expect.objectContaining({
+          assignmentId: 'asg_kelompok_01',
+          classId: 'cls_grp_01',
+          taskType: 'kelompok',
+          groupName: 'Kelompok 03 Alpha',
+          groupMembers: ['Andi (230501)', 'Budi (230502)'],
+          storageType: 'cloudinary',
+          fileUrl: 'https://res.cloudinary.com/smartsa_cloud/raw/upload/v5/berkas_upload.pdf',
+        })
+      );
+    });
+
+    const submissionSignCall = fetchMock.mock.calls.find(
+      ([url, init]) =>
+        String(url).includes('/api/upload-sign') &&
+        JSON.parse(init?.body || '{}').category === 'submission'
+    );
+    expect(submissionSignCall).toBeDefined();
+    expect(JSON.parse(submissionSignCall[1].body)).toEqual(
+      expect.objectContaining({
+        category: 'submission',
+        classId: 'cls_grp_01',
+        assignmentId: 'asg_kelompok_01',
+        fileName: 'laporan_kelompok_03.pdf',
+      })
+    );
+    unmountStudent();
+
+    // 3. Lecturer in NILAI TUGAS sees group badge, groupName, and groupMembers on submission card
+    mockAuthObj.currentUser = lecturerUser;
+    mockOnAuthStateChanged.mockImplementation((_auth, cb) => {
+      void cb(lecturerUser);
+      return () => {};
+    });
+    mockGetDoc.mockImplementation(async (ref) => {
+      if (ref?.path === 'users/uid_dosen_grp') {
+        return {
+          exists: () => true,
+          data: () => ({ uid: 'uid_dosen_grp', role: 'lecturer', displayName: 'Dr. Kelompok' }),
+        };
+      }
+      return { exists: () => false };
+    });
+    mockGetDocs.mockImplementation(async (qOrRef) => {
+      const colName = qOrRef?.col || qOrRef?.args?.[0]?.col;
+      if (colName === 'submissions') {
+        return {
+          docs: [
+            {
+              id: 'asg_kelompok_01_uid_mhs_grp',
+              data: () => ({
+                assignmentId: 'asg_kelompok_01',
+                classId: 'cls_grp_01',
+                meetingNo: 1,
+                uid: 'uid_mhs_grp',
+                studentName: 'Ketua Kelompok',
+                assignmentTitle: 'Tugas Proyek Kelompok 01',
+                taskType: 'kelompok',
+                groupName: 'Kelompok 03 Alpha',
+                groupMembers: ['Andi (230501)', 'Budi (230502)'],
+                fileUrl: 'https://res.cloudinary.com/smartsa_cloud/raw/upload/v5/berkas_upload.pdf',
+                fileName: 'laporan_kelompok_03.pdf',
+                status: 'submitted',
+                submittedAtLabel: 'Hari ini',
+              }),
+            },
+          ],
+        };
+      }
+      return { docs: [] };
+    });
+
+    const { unmount: unmountGrading } = render(
+      <LanguageProvider>
+        <AuthProvider>
+          <ClassDetailView
+            classData={{
+              id: 'cls_grp_01',
+              name: 'Rekayasa Perangkat Lunak',
+              code: 'RPL301',
+              lecturerId: 'uid_dosen_grp',
+              instructor: 'Dr. Kelompok',
+              meetings: [{ id: 'cls_grp_01_m1', order: 1, title: 'Sprint 1', status: 'open' }],
+            }}
+            onBack={vi.fn()}
+            onNavigateAI={vi.fn()}
+          />
+        </AuthProvider>
+      </LanguageProvider>
+    );
+
+    fireEvent.click(await screen.findByRole('button', { name: /NILAI TUGAS/i }));
+    expect(await screen.findByText(/Kelompok 03 Alpha/i)).toBeInTheDocument();
+    expect(screen.getByText(/Andi \(230501\) • Budi \(230502\)/i)).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: /laporan_kelompok_03\.pdf/i })).toBeInTheDocument();
+    unmountGrading();
+  });
+
+  it('parses valid 5-option Aiken format (A. & A)) and reports line-numbered validation errors without correctIndex', () => {
+    const validText = [
+      'Apa kepanjangan CPU?',
+      'A. Central Process Unit',
+      'B. Central Processing Unit',
+      'C. Computer Personal Unit',
+      'D. Control Program Unit',
+      'E. Core Peripheral Unit',
+      'answer: b',
+      '',
+      'Protokol lapisan transport untuk koneksi andal adalah?',
+      'A) HTTP',
+      'B) UDP',
+      'C) TCP',
+      'D) ICMP',
+      'ANSWER: C',
+    ].join('\r\n');
+
+    const okResult = parseAikenQuestions(validText);
+    expect(okResult.errors).toEqual([]);
+    expect(okResult.questions).toHaveLength(2);
+    expect(okResult.questions[0]).toMatchObject({
+      id: 'q1',
+      question: 'Apa kepanjangan CPU?',
+      options: [
+        'Central Process Unit',
+        'Central Processing Unit',
+        'Computer Personal Unit',
+        'Control Program Unit',
+        'Core Peripheral Unit',
+      ],
+      answerIdx: 1,
+    });
+    expect(okResult.questions[1].options).toEqual(['HTTP', 'UDP', 'TCP', 'ICMP']);
+    expect(okResult.answerKey).toEqual({ q1: 1, q2: 2 });
+    expect(JSON.stringify(okResult)).not.toContain('correctIndex');
+
+    const invalidText = [
+      'Soal valid hanya satu opsi?',
+      'A. Satu opsi saja',
+      'ANSWER: A',
+      '',
+      'Soal huruf jawaban di luar opsi?',
+      'A. Opsi Pertama',
+      'B. Opsi Kedua',
+      'C. Opsi Ketiga',
+      'D. Opsi Keempat',
+      'ANSWER: E',
+    ].join('\n');
+
+    const badResult = parseAikenQuestions(invalidText);
+    expect(badResult.questions).toHaveLength(0);
+    expect(badResult.errors).toHaveLength(2);
+    expect(badResult.errors[0].line).toBe(1);
+    expect(badResult.errors[0].message).toMatch(/Baris 1.*2 hingga 6 opsi/i);
+    expect(badResult.errors[1].line).toBe(10);
+    expect(badResult.errors[1].message).toMatch(/Baris 10.*"E".*A–D/i);
+  });
+
+  it('imports bulk Aiken questions in ClassDetailView, displays pointsPerQuestion weight, and syncs editor toggle UX', async () => {
+    const lecturerUser = {
+      uid: 'uid_dosen_aiken',
+      email: 'dosen.aiken@smartsa.edu',
+      displayName: 'Dr. Aiken',
+      emailVerified: true,
+      getIdToken: vi.fn(async () => 'token-aiken'),
+    };
+    mockAuthObj.currentUser = lecturerUser;
+    mockOnAuthStateChanged.mockImplementation((_auth, cb) => {
+      void cb(lecturerUser);
+      return () => {};
+    });
+    mockGetDoc.mockImplementation(async (ref) => {
+      if (ref?.path === 'users/uid_dosen_aiken') {
+        return {
+          exists: () => true,
+          data: () => ({ uid: 'uid_dosen_aiken', role: 'lecturer', displayName: 'Dr. Aiken' }),
+        };
+      }
+      return { exists: () => false };
+    });
+
+    let serverExam = null;
+    let serverKeys = {};
+    const fetchMock = vi.fn(async (_url, opts) => {
+      const parsed = JSON.parse(opts?.body || '{}');
+      if (parsed.action === 'save_exam') {
+        serverExam = {
+          classId: parsed.classId,
+          meetingNo: parsed.meetingNo,
+          examType: parsed.examType,
+          title: parsed.title,
+          status: parsed.status,
+          durationMinutes: parsed.durationMinutes,
+          questions: parsed.questions,
+          pointsPerQuestion: Number((100 / parsed.questions.length).toFixed(2)),
+        };
+        serverKeys = { ...parsed.answerKey };
+        return {
+          ok: true,
+          headers: { get: () => 'application/json' },
+          json: async () => ({ saved: true, ...serverExam }),
+        };
+      }
+      if (parsed.action === 'instructor_keys') {
+        return {
+          ok: true,
+          headers: { get: () => 'application/json' },
+          json: async () => ({ answerKey: serverKeys, source: 'firestore' }),
+        };
+      }
+      return { ok: true, headers: { get: () => 'application/json' }, json: async () => ({}) };
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    mockGetDoc.mockImplementation(async (ref) => {
+      if (ref?.path === 'users/uid_dosen_aiken') {
+        return {
+          exists: () => true,
+          data: () => ({ uid: 'uid_dosen_aiken', role: 'lecturer', displayName: 'Dr. Aiken' }),
+        };
+      }
+      if (ref?.path === 'exams/cls_aiken_m1_pretest' && serverExam) {
+        return { exists: () => true, data: () => serverExam };
+      }
+      return { exists: () => false };
+    });
+
+    const { unmount } = render(
+      <LanguageProvider>
+        <AuthProvider>
+          <ClassDetailView
+            classData={{
+              id: 'cls_aiken',
+              name: 'Struktur Data',
+              code: 'STD201',
+              lecturerId: 'uid_dosen_aiken',
+              meetings: [{ id: 'cls_aiken_m1', order: 1, title: 'Stack & Queue', status: 'open' }],
+            }}
+            onBack={vi.fn()}
+            onNavigateAI={vi.fn()}
+          />
+        </AuthProvider>
+      </LanguageProvider>
+    );
+
+    fireEvent.click(await screen.findByRole('button', { name: /KUNCI & STATISTIK/i }));
+
+    // Empty question bank starts open & toggle reflects active open label immediately
+    const toggleBtn = await screen.findByRole('button', {
+      name: /Tutup Editor & Lihat Rekap/i,
+    });
+    expect(toggleBtn).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.getByText(/1 Soal • 100 poin\/soal/i)).toBeInTheDocument();
+
+    // Closing editor reveals Rekap / empty summary even when 0 questions exist
+    fireEvent.click(toggleBtn);
+    expect(screen.getByRole('button', { name: /Buat \/ Edit Soal & Kunci/i })).toBeInTheDocument();
+    expect(screen.queryByLabelText(/Judul evaluasi/i)).toBeNull();
+
+    // Re-open editor and import 2 Aiken 5-option questions
+    fireEvent.click(screen.getByRole('button', { name: /Buat \/ Edit Soal & Kunci/i }));
+    fireEvent.click(screen.getByRole('button', { name: /Import Format Aiken/i }));
+
+    const aikenTextarea = screen.getByLabelText(/Teks soal format Aiken/i);
+    fireEvent.change(aikenTextarea, {
+      target: {
+        value: [
+          'Struktur LIFO digunakan oleh?',
+          'A. Queue',
+          'B. Stack',
+          'C. Heap',
+          'D. Trie',
+          'E. Graph',
+          'ANSWER: B',
+          '',
+          'Struktur FIFO digunakan oleh?',
+          'A) Queue',
+          'B) Stack',
+          'C) Tree',
+          'D) DAG',
+          'E) Set',
+          'ANSWER: A',
+        ].join('\n'),
+      },
+    });
+
+    expect(screen.getByText(/2 soal valid terdeteksi • 50 poin\/soal/i)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /Ganti Semua Soal/i }));
+
+    expect(await screen.findByText(/2 Soal • 50 poin\/soal \(Total 100\)/i)).toBeInTheDocument();
+    expect(screen.getByDisplayValue('Struktur LIFO digunakan oleh?')).toBeInTheDocument();
+    expect(screen.getByDisplayValue('Struktur FIFO digunakan oleh?')).toBeInTheDocument();
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /Simpan Soal & Kunci ke Server/i }));
+    });
+
+    await waitFor(() => {
+      expect(screen.getByText(/BOBOT: 50 POIN\/SOAL \(2 SOAL\)/i)).toBeInTheDocument();
+    });
+    expect(screen.getAllByText(/50 poin\/soal \(2 soal\)/i).length).toBeGreaterThanOrEqual(2);
+    unmount();
+  });
+
+  it('renders lecturer QR visual with Mode Proyektor and cleans up student camera scanner on decode or close', async () => {
+    // 1. Payload builder & parser round-trip
+    expect(buildAttendanceQrPayload('cls101-m01-9988')).toBe('SMARTSA_QR:CLS101-M01-9988');
+    expect(parseAttendanceQrPayload('SMARTSA_QR:IF101-M02-7766')).toBe('IF101-M02-7766');
+    expect(parseAttendanceQrPayload('if101-m02-7766')).toBe('IF101-M02-7766');
+    expect(parseAttendanceQrPayload('{"sessionCode":"ABC-999"}')).toBe('ABC-999');
+
+    // 2. Lecturer AttendanceQrModal renders QR <img> + opens Mode Proyektor without dangerouslySetInnerHTML
+    const onCloseSession = vi.fn();
+    const { container: qrContainer, unmount: unmountQr } = render(
+      <LanguageProvider>
+        <AttendanceQrModal
+          session={{
+            isOpen: true,
+            meetingNo: 3,
+            sessionCode: 'IF202-M03-4567',
+            expiresAt: Date.now() + 900_000,
+          }}
+          classCode="IF202"
+          className="Algoritma & Struktur Data"
+          onCloseSession={onCloseSession}
+        />
+      </LanguageProvider>
+    );
+
+    const qrImg = await screen.findByAltText('QR Code Presensi IF202-M03-4567');
+    expect(qrImg.getAttribute('src')).toContain('data:image/png;base64,MOCK_QR_');
+    expect(mockQrToDataUrl).toHaveBeenCalledWith(
+      'SMARTSA_QR:IF202-M03-4567',
+      expect.any(Object)
+    );
+    expect(screen.getByText(/Sisa waktu:/i)).toBeInTheDocument();
+    expect(qrContainer.innerHTML).not.toContain('dangerouslySetInnerHTML');
+
+    fireEvent.click(screen.getByRole('button', { name: /Mode Proyektor/i }));
+    expect(await screen.findByRole('dialog')).toBeInTheDocument();
+    expect(screen.getByAltText('QR Proyektor IF202-M03-4567')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /^Tutup Proyektor$/i }));
+    unmountQr();
+
+    // 3. QrScannerPanel stops and clears camera when scan succeeds OR when unmounted
+    mockHtml5QrcodeStart.mockResolvedValue(undefined);
+    mockHtml5QrcodeStop.mockClear();
+    mockHtml5QrcodeClear.mockClear();
+
+    const onScanSuccess = vi.fn();
+    const { unmount: unmountScannerOnly } = render(
+      <LanguageProvider>
+        <QrScannerPanel onScanSuccess={onScanSuccess} />
+      </LanguageProvider>
+    );
+
+    await waitFor(() => {
+      expect(mockHtml5QrcodeStart).toHaveBeenCalledTimes(1);
+    });
+
+    await act(async () => {
+      await lastScannerOnSuccessRef.current?.('SMARTSA_QR:IF202-M03-4567');
+    });
+
+    expect(onScanSuccess).toHaveBeenCalledWith('IF202-M03-4567', 'SMARTSA_QR:IF202-M03-4567');
+    expect(mockHtml5QrcodeStop).toHaveBeenCalled();
+    expect(mockHtml5QrcodeClear).toHaveBeenCalled();
+    unmountScannerOnly();
+
+    // 4. Student opens ScheduleTab modal -> switches to Scan QR Kamera -> closes modal via Escape/Close -> stops camera cleanly
+    const studentUser = {
+      uid: 'uid_mhs_qr',
+      email: 'mhs.qr@gmail.com',
+      displayName: 'Mahasiswa Scanner',
+      emailVerified: true,
+      getIdToken: vi.fn(async () => 'token-mhs-qr'),
+    };
+    mockAuthObj.currentUser = studentUser;
+    mockOnAuthStateChanged.mockImplementation((_auth, cb) => {
+      void cb(studentUser);
+      return () => {};
+    });
+    mockGetDoc.mockImplementation(async (ref) => {
+      if (ref?.path === 'users/uid_mhs_qr') {
+        return {
+          exists: () => true,
+          data: () => ({ uid: 'uid_mhs_qr', role: 'student', displayName: 'Mahasiswa Scanner' }),
+        };
+      }
+      if (ref?.path === 'classes/cls_qr_demo') {
+        return {
+          exists: () => true,
+          data: () => ({
+            activeAttendanceSession: {
+              isOpen: true,
+              meetingNo: 1,
+              sessionCode: 'QR101-M01-5555',
+              expiresAt: Date.now() + 600_000,
+            },
+          }),
+        };
+      }
+      return { exists: () => false };
+    });
+    mockGetDocs.mockImplementation(async (qOrRef) => {
+      const colName = qOrRef?.col || qOrRef?.args?.[0]?.col;
+      if (colName === 'class_members') {
+        return {
+          docs: [
+            {
+              id: 'cls_qr_demo_uid_mhs_qr',
+              data: () => ({ classId: 'cls_qr_demo', uid: 'uid_mhs_qr', status: 'approved' }),
+            },
+          ],
+        };
+      }
+      if (colName === 'classes') {
+        return {
+          docs: [
+            {
+              id: 'cls_qr_demo',
+              data: () => ({
+                name: 'Pemrograman Web',
+                code: 'QR101',
+                day: 'Senin',
+                time: '08.00',
+                instructor: 'Dr. QR',
+              }),
+            },
+          ],
+        };
+      }
+      return { docs: [] };
+    });
+
+    mockHtml5QrcodeStart.mockClear();
+    mockHtml5QrcodeStop.mockClear();
+    mockHtml5QrcodeClear.mockClear();
+
+    const { unmount: unmountSchedule } = render(
+      <LanguageProvider>
+        <AuthProvider>
+          <ScheduleTab />
+        </AuthProvider>
+      </LanguageProvider>
+    );
+
+    const openQrBtn = await screen.findByRole('button', { name: /Scan QR Presensi/i });
+    fireEvent.click(openQrBtn);
+
+    const switchToCamBtn = await screen.findByRole('button', { name: /Scan QR Kamera/i });
+    fireEvent.click(switchToCamBtn);
+
+    await waitFor(() => {
+      expect(mockHtml5QrcodeStart).toHaveBeenCalledTimes(1);
+    });
+
+    // Closing attendance modal before scan MUST stop and clear active camera scanner
+    fireEvent.click(screen.getByRole('button', { name: /^Batal$/i }));
+    await waitFor(() => {
+      expect(mockHtml5QrcodeStop).toHaveBeenCalled();
+      expect(mockHtml5QrcodeClear).toHaveBeenCalled();
+    });
+    unmountSchedule();
   });
 });

@@ -35,6 +35,8 @@ export default function Topbar({ currentView, onQuickAction, onOpenAuth }) {
         return t('topbar_title_materials');
       case 'diskusi':
         return t('topbar_title_discussions');
+      case 'manual-book':
+        return t('topbar_title_manual_book');
       case 'detail':
         return t('topbar_title_detail');
       case 'ai':

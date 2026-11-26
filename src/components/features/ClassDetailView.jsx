@@ -24,26 +24,32 @@ import {
   submitAssignmentToFirestore,
   cancelSubmissionInFirestore,
   normalizeHttpsImageUrl,
-  uploadHttpsImageToCloudinary,
   updateClassDetailsInFirestore,
   updateClassMeetingsInFirestore,
   upsertLearningProgress,
 } from '../../services/lmsFirestoreService';
-import {
-  deltaToEditableText,
-  plainTextToDelta,
-} from '../../services/deltaSerialization';
 import {
   closeAttendanceSession,
   fetchMeetingAttendees,
   getClassAttendanceSession,
   openAttendanceSession,
 } from '../../services/attendanceService';
-import { uploadMediaFile, isValidExternalUrl } from '../../services/cloudinaryService';
+import {
+  uploadMediaFile,
+  isValidExternalUrl,
+  detectMaterialFileType,
+  MATERIAL_ALLOWED_ACCEPT,
+  SUBMISSION_ALLOWED_ACCEPT,
+} from '../../services/cloudinaryService';
 import DeltaContentRenderer from '../common/DeltaContentRenderer';
 import CoverImageField from '../common/CoverImageField';
 import SafeImage from '../common/SafeImage';
+import AttendanceQrModal from '../common/AttendanceQrModal';
 import { AccessibleDialog } from '../common/AccessibleDialog';
+import {
+  parseAikenQuestions,
+  AIKEN_SAMPLE_TEMPLATE,
+} from '../../services/aikenParser';
 import DiscussionTab from './DiscussionTab';
 import {
   ArrowLeft,
@@ -78,6 +84,7 @@ import {
   Plus,
   TrendingUp,
   Image as ImageIcon,
+  Paperclip,
 } from 'lucide-react';
 
 const DEFAULT_EXAM_DURATION_MINUTES = 15;
@@ -163,7 +170,7 @@ function createEmptyExamQuestion(nextIndex = 1) {
   return {
     id: `q${nextIndex}`,
     question: '',
-    options: ['', '', '', ''],
+    options: ['', '', '', '', ''],
   };
 }
 
@@ -206,7 +213,7 @@ function resolveSafeVideoSource(rawUrl) {
   }
 }
 
-function getSafePdfUrl(rawUrl) {
+function getSafeHttpFileUrl(rawUrl) {
   if (!rawUrl || typeof rawUrl !== 'string') return '';
   try {
     const parsed = new URL(rawUrl.trim());
@@ -299,31 +306,39 @@ export default function ClassDetailView({
   // Instructor Task Creation, Edit & Delete State
   const [newTaskMeetingNo, setNewTaskMeetingNo] = useState(1);
   const [newTaskTitle, setNewTaskTitle] = useState('');
+  const [newTaskType, setNewTaskType] = useState('individu');
   const [newTaskDeadline, setNewTaskDeadline] = useState('2026-12-15T23:59');
   const [newTaskNote, setNewTaskNote] = useState('');
+  const [newTaskAttachmentUrl, setNewTaskAttachmentUrl] = useState('');
+  const [newTaskAttachmentName, setNewTaskAttachmentName] = useState('');
+  const [newTaskAttachmentSize, setNewTaskAttachmentSize] = useState('');
+  const [uploadingTaskAttachment, setUploadingTaskAttachment] = useState(false);
   const [creatingTask, setCreatingTask] = useState(false);
   const [createTaskNotice, setCreateTaskNotice] = useState(null);
   const [editingAssignment, setEditingAssignment] = useState(null);
+  const [uploadingEditTaskAttachment, setUploadingEditTaskAttachment] = useState(false);
   const [savingAssignmentEdit, setSavingAssignmentEdit] = useState(false);
   const [deleteAssignmentTarget, setDeleteAssignmentTarget] = useState(null);
   const [deletingAssignment, setDeletingAssignment] = useState(false);
 
-  // Instructor Per-Meeting Material, Video & PDF CRUD State
-  const [materialEditOpen, setMaterialEditOpen] = useState(false);
-  const [materialTextInput, setMaterialTextInput] = useState('');
-  const [materialImageUrlInput, setMaterialImageUrlInput] = useState('');
-  const [uploadingMaterialImage, setUploadingMaterialImage] = useState(false);
+  // Instructor Per-Meeting Material Files & Video CRUD State
+  const [materialTitleInput, setMaterialTitleInput] = useState('');
+  const [materialDescInput, setMaterialDescInput] = useState('');
+  const [materialFileUrlInput, setMaterialFileUrlInput] = useState('');
+  const [materialFileNameInput, setMaterialFileNameInput] = useState('');
+  const [materialFileTypeInput, setMaterialFileTypeInput] = useState('file');
+  const [materialMimeTypeInput, setMaterialMimeTypeInput] = useState('');
+  const [materialFileSizeInput, setMaterialFileSizeInput] = useState('');
+  const [materialStorageTypeInput, setMaterialStorageTypeInput] = useState('cloudinary');
+  const [uploadingMaterialFile, setUploadingMaterialFile] = useState(false);
   const [savingMaterial, setSavingMaterial] = useState(false);
   const [materialFeedback, setMaterialFeedback] = useState(null);
+  const [deleteMaterialTarget, setDeleteMaterialTarget] = useState(null);
+  const [previewMaterialFile, setPreviewMaterialFile] = useState(null);
 
   const [videoUrlInput, setVideoUrlInput] = useState('');
   const [savingVideo, setSavingVideo] = useState(false);
   const [videoFeedback, setVideoFeedback] = useState(null);
-
-  const [pdfUrlInput, setPdfUrlInput] = useState('');
-  const [pdfUploading, setPdfUploading] = useState(false);
-  const [savingPdf, setSavingPdf] = useState(false);
-  const [pdfFeedback, setPdfFeedback] = useState(null);
 
   // Instructor Exam Keys, Questions CRUD & Analytics State
   const [evalKeyType, setEvalKeyType] = useState('pretest');
@@ -334,6 +349,8 @@ export default function ClassDetailView({
   const [evalAnalyticsLoading, setEvalAnalyticsLoading] = useState(false);
   const [evalAnalyticsError, setEvalAnalyticsError] = useState('');
   const [showExamEditor, setShowExamEditor] = useState(false);
+  const [examEditorMode, setExamEditorMode] = useState('visual');
+  const [aikenInput, setAikenInput] = useState('');
   const [examDraftTitle, setExamDraftTitle] = useState('');
   const [examDraftStatus, setExamDraftStatus] = useState('published');
   const [examDraftDurationMinutes, setExamDraftDurationMinutes] = useState(
@@ -393,6 +410,8 @@ export default function ClassDetailView({
   const [uploadedFile, setUploadedFile] = useState(null);
   const [externalUrlInput, setExternalUrlInput] = useState('');
   const [taskNotes, setTaskNotes] = useState('');
+  const [groupNameInput, setGroupNameInput] = useState('');
+  const [groupMembersInput, setGroupMembersInput] = useState('');
   const [isUploading, setIsUploading] = useState(false);
   const [taskFeedback, setTaskFeedback] = useState(null);
   const [withdrawConfirmTaskId, setWithdrawConfirmTaskId] = useState(null);
@@ -426,6 +445,9 @@ export default function ClassDetailView({
       recoveredAttemptIdRef.current = '';
       setClassMembersList([]);
       setConfirmDeleteExam(false);
+      setShowExamEditor(false);
+      setExamEditorMode('visual');
+      setAikenInput('');
       setExamDraftStatus('published');
       setExamDraftDurationMinutes(DEFAULT_EXAM_DURATION_MINUTES);
       setExamDraftDeadline('');
@@ -440,8 +462,9 @@ export default function ClassDetailView({
       setEditingMeetingId(null);
       setExamSaveFeedback(null);
       setMaterialFeedback(null);
+      setDeleteMaterialTarget(null);
+      setPreviewMaterialFile(null);
       setVideoFeedback(null);
-      setPdfFeedback(null);
       const initialMatched = initialMeetingNo
         ? nextMeetings.find((m) => Number(m.order || 1) === Number(initialMeetingNo))
         : null;
@@ -631,15 +654,20 @@ export default function ClassDetailView({
   }, [classData?.id, currentMeetingNo, currentUser, meetingsList.length, isPreviewMode, loadMeetingExams]);
 
   useEffect(() => {
-    setMaterialTextInput(deltaToEditableText(selectedMeeting?.deltaContent));
-    setMaterialImageUrlInput('');
-    setMaterialEditOpen(false);
+    setMaterialTitleInput('');
+    setMaterialDescInput('');
+    setMaterialFileUrlInput('');
+    setMaterialFileNameInput('');
+    setMaterialFileTypeInput('file');
+    setMaterialMimeTypeInput('');
+    setMaterialFileSizeInput('');
+    setMaterialStorageTypeInput('cloudinary');
     setMaterialFeedback(null);
+    setDeleteMaterialTarget(null);
+    setPreviewMaterialFile(null);
     setVideoUrlInput(selectedMeeting?.videoUrl ?? '');
     setVideoFeedback(null);
-    setPdfUrlInput(selectedMeeting?.pdfUrl ?? '');
-    setPdfFeedback(null);
-  }, [selectedMeeting?.id, selectedMeeting?.deltaContent, selectedMeeting?.videoUrl, selectedMeeting?.pdfUrl]);
+  }, [selectedMeeting?.id, selectedMeeting?.videoUrl]);
 
   const loadInstructorEvalAnalytics = useCallback(
     async (targetExamType = evalKeyType, targetMeetingNo = currentMeetingNo) => {
@@ -693,16 +721,20 @@ export default function ClassDetailView({
             existingQuestions.map((q) => ({
               id: q.id,
               question: q.question || '',
-              options: Array.isArray(q.options) ? [...q.options] : ['', '', '', ''],
+              options: Array.isArray(q.options) ? [...q.options] : ['', '', '', '', ''],
             }))
           );
           setExamDraftAnswerKey({ ...loadedKeyMap });
+          setShowExamEditor(false);
+          setExamEditorMode('visual');
         } else {
           setExamDraftTitle(
             `${targetExamType === 'posttest' ? 'Post-test' : 'Pretest'} Pertemuan ${targetMeetingNo}`
           );
           setExamDraftQuestions([createEmptyExamQuestion(1)]);
           setExamDraftAnswerKey({ q1: 0 });
+          setShowExamEditor(true);
+          setExamEditorMode('visual');
         }
       } catch (err) {
         if (mountedRef.current && reqId === evalReqIdRef.current) {
@@ -1248,9 +1280,6 @@ export default function ClassDetailView({
 
   const activeMeetingVideoUrl =
     selectedMeeting?.videoUrl !== undefined ? selectedMeeting.videoUrl : classData?.videoUrl || '';
-  const activeMeetingPdfUrl =
-    selectedMeeting?.pdfUrl !== undefined ? selectedMeeting.pdfUrl : classData?.pdfUrl || '';
-  const safePdfUrl = getSafePdfUrl(activeMeetingPdfUrl);
   const videoSource = resolveSafeVideoSource(activeMeetingVideoUrl);
 
   const saveMeetingContentPatch = async (targetMeeting, patch) => {
@@ -1273,96 +1302,98 @@ export default function ClassDetailView({
     return result;
   };
 
-  const appendMaterialSnippet = (snippet, separator = '\n') => {
-    setMaterialTextInput((prev) => {
-      const trimmedPrev = String(prev || '').trimEnd();
-      return trimmedPrev ? `${trimmedPrev}${separator}${snippet}` : snippet;
-    });
-  };
-
-  const handleInsertMaterialImageUrl = () => {
-    if (!isEducatorOrAdmin || savingMaterial || uploadingMaterialImage) return;
-    const trimmed = materialImageUrlInput.trim();
-    if (!trimmed) {
-      setMaterialFeedback({
-        type: 'error',
-        text:
-          language === 'en'
-            ? 'Enter an https:// image URL before inserting.'
-            : 'Masukkan URL gambar berawalan https:// sebelum menyisipkan.',
-      });
-      return;
-    }
-    try {
-      const cleanUrl = normalizeHttpsImageUrl(
-        trimmed,
-        language === 'en' ? 'Material image URL' : 'URL gambar materi'
-      );
-      appendMaterialSnippet(`![Ilustrasi modul](${cleanUrl})`);
-      setMaterialImageUrlInput('');
-      setMaterialFeedback({
-        type: 'success',
-        text:
-          language === 'en'
-            ? 'Image inserted into editor. Click Save Material to publish.'
-            : 'Gambar disisipkan ke editor materi. Klik Simpan Materi untuk menyimpan.',
-      });
-    } catch (err) {
-      setMaterialFeedback({
-        type: 'error',
-        text: err.message,
-      });
-    }
-  };
-
-  const handleUploadMaterialImage = async (e) => {
+  const handleUploadMaterialFileToCloudinary = async (e) => {
     const file = e.target.files?.[0];
     e.target.value = '';
-    if (!file || !isEducatorOrAdmin || savingMaterial || uploadingMaterialImage) return;
+    if (!file || !isEducatorOrAdmin || savingMaterial || uploadingMaterialFile) return;
 
-    setUploadingMaterialImage(true);
+    setUploadingMaterialFile(true);
     setMaterialFeedback(null);
     try {
-      const uploadedUrl = await uploadHttpsImageToCloudinary(
-        file,
-        language === 'en' ? 'Material image' : 'Gambar materi'
-      );
-      const cleanAlt =
-        String(file.name || '')
-          .replace(/\.[^.]+$/, '')
-          .replace(/[[()\r\n\]]/g, '')
-          .trim() || 'Ilustrasi modul';
-      appendMaterialSnippet(`![${cleanAlt}](${uploadedUrl})`);
-      setMaterialFeedback({
-        type: 'success',
-        text:
-          language === 'en'
-            ? 'Image uploaded to Cloudinary CDN and inserted into editor. Click Save Material to publish.'
-            : 'Gambar berhasil diunggah ke Cloudinary CDN dan disisipkan ke editor. Klik Simpan Materi untuk menyimpan.',
-      });
+      const uploadResult = await uploadMediaFile(file, 'document');
+      if (uploadResult?.isLive && uploadResult.url) {
+        const cleanUrl = normalizeHttpsImageUrl(
+          uploadResult.url,
+          language === 'en' ? 'Material file URL' : 'URL berkas materi'
+        );
+        const detectedType = detectMaterialFileType(file.name, file.type);
+        setMaterialFileUrlInput(cleanUrl);
+        setMaterialFileNameInput(file.name);
+        setMaterialFileTypeInput(detectedType);
+        setMaterialMimeTypeInput(file.type || '');
+        setMaterialFileSizeInput(`${(file.size / (1024 * 1024)).toFixed(2)} MB`);
+        setMaterialStorageTypeInput('cloudinary');
+        if (!materialTitleInput.trim()) {
+          setMaterialTitleInput(file.name.replace(/\.[^.]+$/, '').replace(/[_-]+/g, ' ').trim());
+        }
+        setMaterialFeedback({
+          type: 'success',
+          text:
+            language === 'en'
+              ? `File "${file.name}" uploaded to Cloudinary CDN. Click Save Material File to publish.`
+              : `Berkas "${file.name}" berhasil diunggah ke Cloudinary CDN. Klik Simpan Materi File untuk menambahkan ke pertemuan.`,
+        });
+      } else {
+        setMaterialFeedback({
+          type: 'error',
+          text:
+            uploadResult?.note ||
+            (language === 'en'
+              ? 'Cloudinary upload is not active on the server. Paste a valid https:// file URL below.'
+              : 'Unggah Cloudinary tidak aktif di server; tempelkan tautan berkas https:// di kolom URL.'),
+        });
+      }
     } catch (err) {
       setMaterialFeedback({
         type: 'error',
         text:
           err.message ||
-          (language === 'en' ? 'Failed to upload material image.' : 'Gagal mengunggah gambar materi.'),
+          (language === 'en' ? 'Failed to upload material file.' : 'Gagal mengunggah berkas materi.'),
       });
     } finally {
-      setUploadingMaterialImage(false);
+      setUploadingMaterialFile(false);
     }
   };
 
-  const handleSaveMeetingDelta = async (e) => {
+  const handleAddMaterialFile = async (e) => {
     e.preventDefault();
-    if (!isEducatorOrAdmin || !selectedMeeting || savingMaterial || !classData?.id) return;
-    const nextDelta = plainTextToDelta(materialTextInput);
-    if (!nextDelta) {
+    if (
+      !isEducatorOrAdmin ||
+      !selectedMeeting ||
+      savingMaterial ||
+      uploadingMaterialFile ||
+      !classData?.id
+    ) {
+      return;
+    }
+
+    const cleanTitle = materialTitleInput.trim();
+    if (!cleanTitle) {
+      setMaterialFeedback({
+        type: 'error',
+        text: language === 'en' ? 'Material title is required.' : 'Judul materi wajib diisi.',
+      });
+      return;
+    }
+
+    let cleanUrl = '';
+    try {
+      cleanUrl = normalizeHttpsImageUrl(
+        materialFileUrlInput.trim(),
+        language === 'en' ? 'Material file URL' : 'URL berkas materi'
+      );
+    } catch (err) {
+      setMaterialFeedback({ type: 'error', text: err.message });
+      return;
+    }
+
+    if (!cleanUrl) {
       setMaterialFeedback({
         type: 'error',
         text:
           language === 'en'
-            ? 'Material text cannot be empty. Use Clear Material to remove.'
-            : 'Teks materi tidak boleh kosong. Gunakan Hapus Materi untuk mengosongkan.',
+            ? 'Upload a material file or enter a valid https:// file URL.'
+            : 'Unggah berkas materi atau masukkan URL berkas berawalan https:// terlebih dahulu.',
       });
       return;
     }
@@ -1370,46 +1401,93 @@ export default function ClassDetailView({
     setSavingMaterial(true);
     setMaterialFeedback(null);
     try {
-      await saveMeetingContentPatch(selectedMeeting, { deltaContent: nextDelta });
-      setMaterialEditOpen(false);
-      setMaterialImageUrlInput('');
+      const existingFiles = Array.isArray(selectedMeeting.materialFiles)
+        ? selectedMeeting.materialFiles
+        : [];
+      const resolvedFileName =
+        materialFileNameInput.trim() || cleanUrl.split('/').pop()?.split('?')[0] || cleanTitle;
+      const resolvedFileType =
+        materialFileTypeInput && materialFileTypeInput !== 'file'
+          ? materialFileTypeInput
+          : detectMaterialFileType(resolvedFileName, materialMimeTypeInput);
+
+      const newFileEntry = {
+        id: `mat_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+        title: cleanTitle,
+        description: materialDescInput.trim(),
+        fileUrl: cleanUrl,
+        fileName: resolvedFileName,
+        fileType: resolvedFileType,
+        mimeType: materialMimeTypeInput || '',
+        fileSize: materialFileSizeInput || '',
+        storageType: cleanUrl.includes('res.cloudinary.com')
+          ? materialStorageTypeInput
+          : 'external_url',
+        uploadedAt: new Date().toISOString(),
+      };
+
+      const nextMaterialFiles = [...existingFiles, newFileEntry];
+      await saveMeetingContentPatch(selectedMeeting, { materialFiles: nextMaterialFiles });
+
+      setMaterialTitleInput('');
+      setMaterialDescInput('');
+      setMaterialFileUrlInput('');
+      setMaterialFileNameInput('');
+      setMaterialFileTypeInput('file');
+      setMaterialMimeTypeInput('');
+      setMaterialFileSizeInput('');
+      setMaterialStorageTypeInput('cloudinary');
+      setPreviewMaterialFile(newFileEntry);
       setMaterialFeedback({
         type: 'success',
         text:
           language === 'en'
-            ? `Reading material for Meeting ${selectedMeeting.order} saved.`
-            : `Materi bacaan Pertemuan ${selectedMeeting.order} berhasil disimpan.`,
+            ? `Material "${newFileEntry.title}" added to Meeting ${selectedMeeting.order}.`
+            : `Materi "${newFileEntry.title}" berhasil ditambahkan ke Pertemuan ${selectedMeeting.order}.`,
       });
     } catch (err) {
       setMaterialFeedback({
         type: 'error',
-        text: err.message || 'Gagal menyimpan materi pertemuan.',
+        text: err.message || 'Gagal menyimpan materi file pertemuan.',
       });
     } finally {
       setSavingMaterial(false);
     }
   };
 
-  const handleClearMeetingDelta = async () => {
-    if (!isEducatorOrAdmin || !selectedMeeting || savingMaterial || !classData?.id) return;
+  const executeDeleteMaterialFile = async () => {
+    if (
+      !isEducatorOrAdmin ||
+      !selectedMeeting ||
+      savingMaterial ||
+      !deleteMaterialTarget?.id ||
+      !classData?.id
+    ) {
+      return;
+    }
     setSavingMaterial(true);
     setMaterialFeedback(null);
     try {
-      await saveMeetingContentPatch(selectedMeeting, { deltaContent: null });
-      setMaterialTextInput('');
-      setMaterialImageUrlInput('');
-      setMaterialEditOpen(false);
+      const targetId = deleteMaterialTarget.id;
+      const targetTitle = deleteMaterialTarget.title || deleteMaterialTarget.fileName || '';
+      const existingFiles = Array.isArray(selectedMeeting.materialFiles)
+        ? selectedMeeting.materialFiles
+        : [];
+      const nextMaterialFiles = existingFiles.filter((f) => f.id !== targetId);
+      await saveMeetingContentPatch(selectedMeeting, { materialFiles: nextMaterialFiles });
+      setDeleteMaterialTarget(null);
+      setPreviewMaterialFile((prev) => (prev?.id === targetId ? null : prev));
       setMaterialFeedback({
         type: 'success',
         text:
           language === 'en'
-            ? `Reading material for Meeting ${selectedMeeting.order} cleared.`
-            : `Materi bacaan Pertemuan ${selectedMeeting.order} telah dihapus.`,
+            ? `Material "${targetTitle}" removed.`
+            : `Materi "${targetTitle}" berhasil dihapus dari pertemuan.`,
       });
     } catch (err) {
       setMaterialFeedback({
         type: 'error',
-        text: err.message || 'Gagal menghapus materi pertemuan.',
+        text: err.message || 'Gagal menghapus berkas materi pertemuan.',
       });
     } finally {
       setSavingMaterial(false);
@@ -1492,123 +1570,6 @@ export default function ClassDetailView({
     }
   };
 
-  const handleSaveMeetingPdf = async (e) => {
-    e.preventDefault();
-    if (!isEducatorOrAdmin || !selectedMeeting || savingPdf || !classData?.id) return;
-    const trimmed = pdfUrlInput.trim();
-    if (!trimmed) {
-      setPdfFeedback({
-        type: 'error',
-        text:
-          language === 'en'
-            ? 'Enter a valid https:// PDF URL or upload a PDF document.'
-            : 'Masukkan tautan PDF https:// atau unggah dokumen PDF terlebih dahulu.',
-      });
-      return;
-    }
-    if (!isValidExternalUrl(trimmed)) {
-      setPdfFeedback({
-        type: 'error',
-        text:
-          language === 'en'
-            ? 'Invalid PDF URL. Only https:// or http:// URLs are allowed.'
-            : 'URL PDF tidak valid. Hanya tautan https:// atau http:// yang diperbolehkan.',
-      });
-      return;
-    }
-
-    setSavingPdf(true);
-    setPdfFeedback(null);
-    try {
-      await saveMeetingContentPatch(selectedMeeting, {
-        pdfUrl: trimmed,
-        hasPdf: true,
-      });
-      setPdfFeedback({
-        type: 'success',
-        text:
-          language === 'en'
-            ? `PDF module saved for Meeting ${selectedMeeting.order}.`
-            : `Modul PDF Pertemuan ${selectedMeeting.order} berhasil disimpan.`,
-      });
-    } catch (err) {
-      setPdfFeedback({
-        type: 'error',
-        text: err.message || 'Gagal menyimpan URL PDF pertemuan.',
-      });
-    } finally {
-      setSavingPdf(false);
-    }
-  };
-
-  const handleUploadMeetingPdfFile = async (file) => {
-    if (!file || !isEducatorOrAdmin || !selectedMeeting || pdfUploading || savingPdf || !classData?.id) {
-      return;
-    }
-    setPdfUploading(true);
-    setPdfFeedback(null);
-    try {
-      const uploadResult = await uploadMediaFile(file, 'document');
-      if (uploadResult.isLive && uploadResult.url && isValidExternalUrl(uploadResult.url)) {
-        setPdfUrlInput(uploadResult.url);
-        await saveMeetingContentPatch(selectedMeeting, {
-          pdfUrl: uploadResult.url,
-          hasPdf: true,
-        });
-        setPdfFeedback({
-          type: 'success',
-          text:
-            language === 'en'
-              ? `PDF "${file.name}" uploaded and saved to Meeting ${selectedMeeting.order}.`
-              : `PDF "${file.name}" berhasil diunggah dan disimpan ke Pertemuan ${selectedMeeting.order}.`,
-        });
-      } else {
-        setPdfFeedback({
-          type: 'error',
-          text:
-            uploadResult.note ||
-            (language === 'en'
-              ? 'Cloudinary upload is not active. Paste a valid https:// PDF URL below.'
-              : 'Unggah Cloudinary tidak aktif; silakan tempel tautan PDF https:// di kolom URL.'),
-        });
-      }
-    } catch (err) {
-      setPdfFeedback({
-        type: 'error',
-        text: err.message || 'Gagal mengunggah berkas PDF.',
-      });
-    } finally {
-      setPdfUploading(false);
-    }
-  };
-
-  const handleClearMeetingPdf = async () => {
-    if (!isEducatorOrAdmin || !selectedMeeting || savingPdf || !classData?.id) return;
-    setSavingPdf(true);
-    setPdfFeedback(null);
-    try {
-      await saveMeetingContentPatch(selectedMeeting, {
-        pdfUrl: '',
-        hasPdf: false,
-      });
-      setPdfUrlInput('');
-      setPdfFeedback({
-        type: 'success',
-        text:
-          language === 'en'
-            ? `PDF module removed from Meeting ${selectedMeeting.order}.`
-            : `Dokumen PDF Pertemuan ${selectedMeeting.order} telah dihapus.`,
-      });
-    } catch (err) {
-      setPdfFeedback({
-        type: 'error',
-        text: err.message || 'Gagal menghapus dokumen PDF.',
-      });
-    } finally {
-      setSavingPdf(false);
-    }
-  };
-
   const handleAddDraftQuestion = () => {
     setExamDraftQuestions((prev) => {
       const usedNums = prev.map((q) => Number(String(q.id || '').replace(/\D+/g, '')) || 0);
@@ -1638,7 +1599,7 @@ export default function ClassDetailView({
     setExamDraftQuestions((prev) =>
       prev.map((q) => {
         if (q.id !== qId) return q;
-        const nextOpts = [...(q.options || ['', '', '', ''])];
+        const nextOpts = [...(q.options || ['', '', '', '', ''])];
         nextOpts[optIdx] = value;
         return { ...q, options: nextOpts };
       })
@@ -1684,6 +1645,66 @@ export default function ClassDetailView({
       ...prev,
       [qId]: Number(optionIdx),
     }));
+  };
+
+  const handleUploadAikenTxtFile = async (e) => {
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    if (!file) return;
+    try {
+      const content = await file.text();
+      setAikenInput(content);
+      setExamSaveFeedback(null);
+    } catch (err) {
+      setExamSaveFeedback({
+        type: 'error',
+        text: err?.message || 'Gagal membaca isi berkas teks Aiken (.txt).',
+      });
+    }
+  };
+
+  const handleApplyAikenImport = (mode = 'append') => {
+    const usedNums = examDraftQuestions.map(
+      (q) => Number(String(q.id || '').replace(/\D+/g, '')) || 0
+    );
+    const maxNum = usedNums.length > 0 ? Math.max(...usedNums) : examDraftQuestions.length;
+    const startIndex = mode === 'replace' ? 1 : maxNum + 1;
+    const parsed = parseAikenQuestions(aikenInput, { startIndex });
+
+    if (parsed.questions.length === 0) {
+      setExamSaveFeedback({
+        type: 'error',
+        text:
+          language === 'en'
+            ? 'No valid Aiken questions found to import.'
+            : 'Tidak ada soal format Aiken valid yang dapat diimpor.',
+      });
+      return;
+    }
+
+    const sanitizedDrafts = parsed.questions.map((item) => ({
+      id: item.id,
+      question: item.question,
+      options: [...item.options],
+    }));
+
+    if (mode === 'replace') {
+      setExamDraftQuestions(sanitizedDrafts);
+      setExamDraftAnswerKey({ ...parsed.answerKey });
+    } else {
+      setExamDraftQuestions((prev) => [...prev, ...sanitizedDrafts]);
+      setExamDraftAnswerKey((prev) => ({ ...prev, ...parsed.answerKey }));
+    }
+
+    setAikenInput('');
+    setExamEditorMode('visual');
+    setExamSaveFeedback({
+      type: 'success',
+      text:
+        language === 'en'
+          ? `Imported ${sanitizedDrafts.length} questions from Aiken format into draft. Click Save Questions & Keys to publish.`
+          : `Berhasil mengimpor ${sanitizedDrafts.length} soal format Aiken ke draf. Klik Simpan Soal & Kunci ke Server untuk mempublikasikan.`,
+    });
   };
 
   const handleSaveMeetingExam = async (e) => {
@@ -1875,6 +1896,36 @@ export default function ClassDetailView({
       return;
     }
 
+    const activeTaskType = activeTaskModal.taskType === 'kelompok' ? 'kelompok' : 'individu';
+    const cleanGroupName = groupNameInput.trim();
+    const parsedGroupMembers = groupMembersInput
+      .split(/[\r\n,;]+/)
+      .map((item) => item.trim())
+      .filter(Boolean);
+
+    if (activeTaskType === 'kelompok') {
+      if (!cleanGroupName) {
+        setTaskFeedback({
+          type: 'error',
+          text:
+            language === 'en'
+              ? 'Group name is required for group assignments.'
+              : 'Nama Kelompok wajib diisi untuk tugas kelompok.',
+        });
+        return;
+      }
+      if (parsedGroupMembers.length === 0) {
+        setTaskFeedback({
+          type: 'error',
+          text:
+            language === 'en'
+              ? 'List at least one group member (Name / Student ID).'
+              : 'Daftar anggota kelompok (Nama / NIM) wajib diisi minimal 1 anggota.',
+        });
+        return;
+      }
+    }
+
     const cleanExternalUrl = externalUrlInput.trim();
     if (cleanExternalUrl && !isValidExternalUrl(cleanExternalUrl)) {
       setTaskFeedback({
@@ -1884,21 +1935,13 @@ export default function ClassDetailView({
       return;
     }
 
-    if (!isEducatorOrAdmin && !cleanExternalUrl && !activeTaskModal.submittedFile?.url) {
+    if (!uploadedFile && !cleanExternalUrl && !activeTaskModal.submittedFile?.url) {
       setTaskFeedback({
         type: 'error',
         text:
           language === 'en'
-            ? 'Enter a valid external URL (Google Drive / GitHub / OneDrive / Docs) for your submission.'
-            : 'Masukkan tautan URL eksternal yang valid (Google Drive / GitHub / OneDrive / Docs) untuk pengumpulan tugas.',
-      });
-      return;
-    }
-
-    if (!uploadedFile && !cleanExternalUrl) {
-      setTaskFeedback({
-        type: 'error',
-        text: 'Pilih berkas dokumen atau masukkan tautan URL eksternal tugas terlebih dahulu!',
+            ? 'Upload a file via Cloudinary or enter an external https:// submission URL first.'
+            : 'Pilih berkas dokumen atau masukkan tautan URL eksternal tugas terlebih dahulu!',
       });
       return;
     }
@@ -1907,14 +1950,19 @@ export default function ClassDetailView({
     setTaskFeedback(null);
 
     try {
-      let fileName = '';
-      let fileSize = '';
-      let fileUrl = '';
-      let storageType = 'external_url';
+      let fileName = activeTaskModal.submittedFile?.name || '';
+      let fileSize = activeTaskModal.submittedFile?.size || '';
+      let fileUrl = activeTaskModal.submittedFile?.url || '';
+      let storageType = activeTaskModal.submittedFile?.storageType || 'external_url';
       let extraNote = '';
 
       if (uploadedFile) {
-        const uploadResult = await uploadMediaFile(uploadedFile, 'document');
+        const uploadResult = isEducatorOrAdmin
+          ? await uploadMediaFile(uploadedFile, 'document')
+          : await uploadMediaFile(uploadedFile, 'submission', {
+              classId: classData?.id || activeTaskModal.classId || '',
+              assignmentId: activeTaskModal.id,
+            });
         fileName = uploadedFile.name;
         fileSize = `${(uploadedFile.size / (1024 * 1024)).toFixed(2)} MB`;
 
@@ -1935,7 +1983,7 @@ export default function ClassDetailView({
           storageType = 'external_url';
           extraNote = 'Disimpan menggunakan tautan URL eksternal.';
         }
-      } else {
+      } else if (cleanExternalUrl) {
         fileUrl = cleanExternalUrl;
         fileName = cleanExternalUrl;
         fileSize = 'Tautan Eksternal';
@@ -1951,6 +1999,9 @@ export default function ClassDetailView({
           assignmentTitle: activeTaskModal.title,
           className: classData?.name || classData?.title || '',
           studentName: userProfile?.displayName || currentUser.displayName || 'Mahasiswa',
+          taskType: activeTaskType,
+          groupName: cleanGroupName,
+          groupMembers: parsedGroupMembers,
           fileName,
           fileSize,
           fileUrl,
@@ -1979,6 +2030,8 @@ export default function ClassDetailView({
                 submittedAt: submittedAtLabel,
                 externalUrl: cleanExternalUrl || fileUrl,
                 notes: taskNotes.trim(),
+                groupName: activeTaskType === 'kelompok' ? cleanGroupName : '',
+                groupMembers: activeTaskType === 'kelompok' ? parsedGroupMembers : [],
               }
             : task
         )
@@ -1994,6 +2047,8 @@ export default function ClassDetailView({
         setUploadedFile(null);
         setExternalUrlInput('');
         setTaskNotes('');
+        setGroupNameInput('');
+        setGroupMembersInput('');
         setTaskFeedback(null);
       }, 1300);
     } catch (err) {
@@ -2054,6 +2109,69 @@ export default function ClassDetailView({
         : Number(meetingsList[0].order)
       : Number(newTaskMeetingNo || 1);
 
+  const handleUploadTaskAttachmentFile = async (file, targetMode = 'create') => {
+    if (!file || !isEducatorOrAdmin) return;
+    if (targetMode === 'edit') {
+      setUploadingEditTaskAttachment(true);
+    } else {
+      setUploadingTaskAttachment(true);
+    }
+    setCreateTaskNotice(null);
+    try {
+      const uploadResult = await uploadMediaFile(file, 'document');
+      if (uploadResult?.isLive && uploadResult.url) {
+        const cleanUrl = normalizeHttpsImageUrl(
+          uploadResult.url,
+          language === 'en' ? 'Assignment attachment URL' : 'URL lampiran tugas'
+        );
+        const sizeLabel = `${(file.size / (1024 * 1024)).toFixed(2)} MB`;
+        if (targetMode === 'edit') {
+          setEditingAssignment((prev) =>
+            prev
+              ? {
+                  ...prev,
+                  attachmentUrl: cleanUrl,
+                  attachmentName: file.name,
+                  attachmentSize: sizeLabel,
+                }
+              : prev
+          );
+        } else {
+          setNewTaskAttachmentUrl(cleanUrl);
+          setNewTaskAttachmentName(file.name);
+          setNewTaskAttachmentSize(sizeLabel);
+        }
+        setCreateTaskNotice({
+          type: 'success',
+          text:
+            language === 'en'
+              ? `Instruction file "${file.name}" attached via Cloudinary.`
+              : `Lampiran instruksi "${file.name}" berhasil diunggah ke Cloudinary.`,
+        });
+      } else {
+        setCreateTaskNotice({
+          type: 'error',
+          text:
+            uploadResult?.note ||
+            (language === 'en'
+              ? 'Cloudinary upload is unavailable for task attachment.'
+              : 'Unggah Cloudinary tidak tersedia untuk lampiran tugas.'),
+        });
+      }
+    } catch (err) {
+      setCreateTaskNotice({
+        type: 'error',
+        text: err.message || 'Gagal mengunggah lampiran instruksi tugas.',
+      });
+    } finally {
+      if (targetMode === 'edit') {
+        setUploadingEditTaskAttachment(false);
+      } else {
+        setUploadingTaskAttachment(false);
+      }
+    }
+  };
+
   const handleCreateMeetingTask = async (e) => {
     e.preventDefault();
     if (!isEducatorOrAdmin || creatingTask) return;
@@ -2075,12 +2193,20 @@ export default function ClassDetailView({
         title: newTaskTitle.trim(),
         subject: classData?.name || classData?.title || 'Mata Kuliah Smartsa',
         subjectCode: classData?.code || 'CLS',
+        taskType: newTaskType,
+        attachmentUrl: newTaskAttachmentUrl.trim(),
+        attachmentName: newTaskAttachmentName.trim(),
+        attachmentSize: newTaskAttachmentSize.trim(),
         deadline: newTaskDeadline,
         note: newTaskNote.trim(),
       });
       setTaskSubmissions((prev) => [created, ...prev]);
       setNewTaskTitle('');
       setNewTaskNote('');
+      setNewTaskType('individu');
+      setNewTaskAttachmentUrl('');
+      setNewTaskAttachmentName('');
+      setNewTaskAttachmentSize('');
       setCreateTaskNotice({
         type: 'success',
         text:
@@ -2104,6 +2230,10 @@ export default function ClassDetailView({
       id: task.id,
       title: task.title || '',
       meetingNo: Number(task.meetingNo || 1),
+      taskType: task.taskType === 'kelompok' ? 'kelompok' : 'individu',
+      attachmentUrl: task.attachmentUrl || '',
+      attachmentName: task.attachmentName || '',
+      attachmentSize: task.attachmentSize || '',
       deadline: toDateTimeLocalInputValue(task.rawDeadline || task.deadline),
       note: task.note || '',
     });
@@ -2127,6 +2257,10 @@ export default function ClassDetailView({
       const updated = await updateAssignmentInFirestore(editingAssignment.id, {
         title: editingAssignment.title.trim(),
         meetingNo: Number(editingAssignment.meetingNo || 1),
+        taskType: editingAssignment.taskType === 'kelompok' ? 'kelompok' : 'individu',
+        attachmentUrl: editingAssignment.attachmentUrl || '',
+        attachmentName: editingAssignment.attachmentName || '',
+        attachmentSize: editingAssignment.attachmentSize || '',
         deadline: editingAssignment.deadline,
         note: editingAssignment.note,
       });
@@ -2564,9 +2698,8 @@ export default function ClassDetailView({
   const tabsToRender = isEducatorOrAdmin
     ? [
         { id: 'meetings', icon: BookOpen, label: language === 'en' ? 'SYLLABUS & EDIT' : 'SILABUS & KELOLA' },
-        { id: 'material', icon: FileText, label: language === 'en' ? 'READING' : 'DELTA JSON' },
+        { id: 'material', icon: FileText, label: language === 'en' ? 'MATERIALS' : 'MATERI FILE' },
         { id: 'video', icon: PlayCircle, label: 'VIDEO CDN' },
-        { id: 'pdf', icon: Download, label: 'MANUAL BOOK' },
         { id: 'attendance', icon: QrCode, label: language === 'en' ? 'QR ATTENDANCE' : 'PRESENSI QR' },
         { id: 'grading', icon: Award, label: language === 'en' ? 'GRADING' : 'NILAI TUGAS' },
         {
@@ -2582,9 +2715,8 @@ export default function ClassDetailView({
       ]
     : [
         { id: 'meetings', icon: BookOpen, label: language === 'en' ? 'SYLLABUS' : 'SILABUS' },
-        { id: 'material', icon: FileText, label: language === 'en' ? 'READING' : 'DELTA JSON' },
+        { id: 'material', icon: FileText, label: language === 'en' ? 'MATERIALS' : 'MATERI FILE' },
         { id: 'video', icon: PlayCircle, label: 'VIDEO CDN' },
-        { id: 'pdf', icon: Download, label: 'MANUAL BOOK' },
         {
           id: 'exam',
           icon: HelpCircle,
@@ -2619,8 +2751,9 @@ export default function ClassDetailView({
     setEditingMeetingId(null);
     setExamSaveFeedback(null);
     setMaterialFeedback(null);
+    setDeleteMaterialTarget(null);
+    setPreviewMaterialFile(null);
     setVideoFeedback(null);
-    setPdfFeedback(null);
   };
 
   const renderEducatorMeetingToolbar = (labelId) => {
@@ -2719,6 +2852,23 @@ export default function ClassDetailView({
       />
 
       <AccessibleDialog
+        isOpen={Boolean(deleteMaterialTarget)}
+        variant="danger"
+        title={language === 'en' ? 'Delete Material File' : 'Hapus Materi File'}
+        message={
+          deleteMaterialTarget
+            ? language === 'en'
+              ? `Remove material file "${deleteMaterialTarget.title || deleteMaterialTarget.fileName}" from Meeting ${selectedMeeting?.order || 1}?`
+              : `Hapus berkas materi "${deleteMaterialTarget.title || deleteMaterialTarget.fileName}" dari Pertemuan ${selectedMeeting?.order || 1}?`
+            : ''
+        }
+        confirmLabel={language === 'en' ? 'Yes, Delete Material' : 'Ya, Hapus Materi'}
+        cancelLabel={t('dialog_cancel')}
+        onConfirm={() => void executeDeleteMaterialFile()}
+        onClose={() => setDeleteMaterialTarget(null)}
+      />
+
+      <AccessibleDialog
         isOpen={Boolean(deleteAssignmentTarget)}
         variant="danger"
         title={language === 'en' ? 'Delete Assignment' : 'Hapus Tugas Pertemuan'}
@@ -2797,18 +2947,35 @@ export default function ClassDetailView({
                 </div>
                 <div>
                   <label className="block text-[10px] font-bold text-slate-600 dark:text-slate-400 mb-1 uppercase">
-                    {language === 'en' ? 'Deadline' : 'Tenggat Waktu'}
+                    {language === 'en' ? 'Task Type' : 'Tipe Tugas'}
                   </label>
-                  <input
-                    type="datetime-local"
-                    aria-label={language === 'en' ? 'Edit assignment deadline' : 'Edit tenggat tugas'}
-                    value={editingAssignment.deadline}
+                  <select
+                    aria-label={language === 'en' ? 'Edit assignment task type' : 'Edit tipe tugas'}
+                    value={editingAssignment.taskType || 'individu'}
                     onChange={(e) =>
-                      setEditingAssignment((prev) => ({ ...prev, deadline: e.target.value }))
+                      setEditingAssignment((prev) => ({ ...prev, taskType: e.target.value }))
                     }
                     className="w-full px-2.5 py-2 rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-[#0b0f17] text-slate-900 dark:text-slate-100"
-                  />
+                  >
+                    <option value="individu">{language === 'en' ? 'Individual' : 'Individu'}</option>
+                    <option value="kelompok">{language === 'en' ? 'Group' : 'Kelompok'}</option>
+                  </select>
                 </div>
+              </div>
+
+              <div>
+                <label className="block text-[10px] font-bold text-slate-600 dark:text-slate-400 mb-1 uppercase">
+                  {language === 'en' ? 'Deadline' : 'Tenggat Waktu'}
+                </label>
+                <input
+                  type="datetime-local"
+                  aria-label={language === 'en' ? 'Edit assignment deadline' : 'Edit tenggat tugas'}
+                  value={editingAssignment.deadline}
+                  onChange={(e) =>
+                    setEditingAssignment((prev) => ({ ...prev, deadline: e.target.value }))
+                  }
+                  className="w-full px-2.5 py-2 rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-[#0b0f17] text-slate-900 dark:text-slate-100"
+                />
               </div>
 
               <div>
@@ -2826,6 +2993,63 @@ export default function ClassDetailView({
                 />
               </div>
 
+              <div className="p-2.5 rounded-lg bg-slate-50 dark:bg-[#0a0f18] border border-slate-200 dark:border-slate-700/80 space-y-2">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <span className="text-[10px] font-bold text-slate-600 dark:text-slate-400 uppercase flex items-center gap-1">
+                    <Paperclip className="w-3 h-3 text-amber-500" />
+                    {language === 'en' ? 'Instruction File (Optional)' : 'Lampiran Instruksi (Opsional)'}
+                  </span>
+                  <label className="cursor-pointer px-2 py-1 rounded bg-indigo-50 dark:bg-indigo-950/50 text-indigo-700 dark:text-indigo-300 border border-indigo-200 dark:border-indigo-500/40 text-[10px] font-bold inline-flex items-center gap-1">
+                    <Upload className="w-3 h-3" />
+                    {uploadingEditTaskAttachment
+                      ? language === 'en'
+                        ? 'Uploading...'
+                        : 'Mengunggah...'
+                      : language === 'en'
+                        ? 'Upload File'
+                        : 'Unggah File'}
+                    <input
+                      type="file"
+                      accept={MATERIAL_ALLOWED_ACCEPT}
+                      disabled={uploadingEditTaskAttachment}
+                      onChange={(e) => {
+                        const file = e.target.files?.[0];
+                        if (file) void handleUploadTaskAttachmentFile(file, 'edit');
+                        e.target.value = '';
+                      }}
+                      className="sr-only"
+                    />
+                  </label>
+                </div>
+                <div className="flex gap-1.5 items-center">
+                  <input
+                    type="text"
+                    placeholder="https://.../instruksi-tugas.pdf"
+                    value={editingAssignment.attachmentUrl || ''}
+                    onChange={(e) =>
+                      setEditingAssignment((prev) => ({ ...prev, attachmentUrl: e.target.value }))
+                    }
+                    className="flex-1 px-2 py-1 text-[11px] rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-[#121822] text-slate-900 dark:text-slate-100"
+                  />
+                  {editingAssignment.attachmentUrl && (
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setEditingAssignment((prev) => ({
+                          ...prev,
+                          attachmentUrl: '',
+                          attachmentName: '',
+                          attachmentSize: '',
+                        }))
+                      }
+                      className="px-2 py-1 text-[10px] rounded bg-rose-50 dark:bg-rose-950/40 text-rose-700 dark:text-rose-300 border border-rose-200 dark:border-rose-500/40"
+                    >
+                      {language === 'en' ? 'Clear' : 'Hapus'}
+                    </button>
+                  )}
+                </div>
+              </div>
+
               <div className="flex justify-end gap-2 pt-2 border-t border-slate-200 dark:border-[#1b263b]">
                 <button
                   type="button"
@@ -2836,7 +3060,7 @@ export default function ClassDetailView({
                 </button>
                 <button
                   type="submit"
-                  disabled={savingAssignmentEdit || !editingAssignment.title.trim()}
+                  disabled={savingAssignmentEdit || uploadingEditTaskAttachment || !editingAssignment.title.trim()}
                   className="bg-[#f59e0b] hover:bg-[#d97706] text-black font-bold px-4 py-1.5 rounded flex items-center gap-1.5 disabled:opacity-50"
                 >
                   <Save className="w-3.5 h-3.5" />
@@ -3642,13 +3866,24 @@ export default function ClassDetailView({
         </div>
       )}
 
-      {/* TAB: Delta JSON Reading Module (Pure React JSX, Zero dangerouslySetInnerHTML) */}
-      {!isPreviewMode && activeTab === 'material' && (
+      {/* TAB: Meeting Course Material Files (Cloudinary + Legacy Delta Read-Only Fallback) */}
+      {!isPreviewMode && activeTab === 'material' && (() => {
+        const currentMaterialFiles = Array.isArray(selectedMeeting?.materialFiles)
+          ? selectedMeeting.materialFiles
+          : [];
+        const activeDeltaContent = selectedMeeting
+          ? selectedMeeting.deltaContent || null
+          : classData?.deltaContent || null;
+        const hasLegacyDelta = Boolean(
+          Array.isArray(activeDeltaContent?.ops) && activeDeltaContent.ops.length > 0
+        );
+
+        return (
         <div className="bg-white dark:bg-[#121822] p-5 sm:p-6 rounded-xl border border-slate-200 dark:border-[#232f42] space-y-4">
           <div className="flex flex-wrap items-center justify-between gap-2 pb-3 border-b border-slate-200 dark:border-[#1b263b]">
             <div>
               <span className="text-[9px] font-mono font-bold text-sky-700 dark:text-[#00e5ff] uppercase tracking-wider">
-                // QUILL DELTA JSON PROTOCOL (PURE REACT RENDERER)
+                // COURSE MATERIALS REPOSITORY (CLOUDINARY CDN)
               </span>
               <h3 className="text-base font-mono font-bold text-slate-900 dark:text-slate-100 mt-0.5">
                 {selectedMeeting
@@ -3658,184 +3893,130 @@ export default function ClassDetailView({
                     : 'Belum Ada Pertemuan'}
               </h3>
             </div>
-            <div className="flex items-center gap-2">
-              {isEducatorOrAdmin && selectedMeeting && (
-                <button
-                  type="button"
-                  onClick={() =>
-                    setMaterialEditOpen((prev) => {
-                      const nextOpen = !prev;
-                      if (nextOpen) {
-                        setMaterialTextInput(deltaToEditableText(selectedMeeting?.deltaContent));
-                        setMaterialImageUrlInput('');
-                      }
-                      return nextOpen;
-                    })
-                  }
-                  className="bg-slate-100 dark:bg-[#1c2432] hover:bg-slate-200 dark:hover:bg-[#253245] text-slate-800 dark:text-slate-200 border border-slate-300 dark:border-slate-700 text-xs font-mono font-bold px-3 py-1.5 rounded-xs transition flex items-center gap-1.5"
-                >
-                  <Edit3 className="w-3.5 h-3.5" />
-                  {materialEditOpen
-                    ? language === 'en'
-                      ? 'Close Editor'
-                      : 'Tutup Editor'
-                    : language === 'en'
-                      ? 'Edit Reading Material'
-                      : 'Kelola Materi'}
-                </button>
-              )}
-              <button
-                type="button"
-                onClick={() => onNavigateAI?.()}
-                className="bg-amber-50 dark:bg-[#172133] hover:bg-amber-100 dark:hover:bg-[#202f48] text-amber-800 dark:text-[#f59e0b] border border-amber-300 dark:border-[#f59e0b]/40 text-xs font-mono font-bold px-3 py-1.5 rounded-xs transition flex items-center gap-1.5"
-              >
-                <Sparkles className="w-3.5 h-3.5 text-amber-600 dark:text-[#f59e0b]" />
-                {language === 'en' ? 'AI CONSULT' : 'KONSULTASI AI'}
-              </button>
-            </div>
+            <button
+              type="button"
+              onClick={() => onNavigateAI?.()}
+              className="bg-amber-50 dark:bg-[#172133] hover:bg-amber-100 dark:hover:bg-[#202f48] text-amber-800 dark:text-[#f59e0b] border border-amber-300 dark:border-[#f59e0b]/40 text-xs font-mono font-bold px-3 py-1.5 rounded-xs transition flex items-center gap-1.5"
+            >
+              <Sparkles className="w-3.5 h-3.5 text-amber-600 dark:text-[#f59e0b]" />
+              {language === 'en' ? 'AI CONSULT' : 'KONSULTASI AI'}
+            </button>
           </div>
 
           {renderEducatorMeetingToolbar('educator-material-meeting')}
 
-          {isEducatorOrAdmin && selectedMeeting && (materialEditOpen || !selectedMeeting.deltaContent) && (
+          {isEducatorOrAdmin && selectedMeeting && (
             <form
-              onSubmit={handleSaveMeetingDelta}
+              onSubmit={handleAddMaterialFile}
               className="p-4 rounded-xl bg-slate-50 dark:bg-[#0a0f18] border border-slate-200 dark:border-[#1e2a3f] space-y-3 font-mono"
             >
               <div className="flex flex-wrap items-center justify-between gap-2">
-                <h4 className="text-xs font-bold text-amber-700 dark:text-[#f59e0b] uppercase">
-                  {language === 'en'
-                    ? `Manage Meeting ${selectedMeeting.order} Material`
-                    : `Kelola Materi Pertemuan ${selectedMeeting.order}`}
-                </h4>
-                <span className="text-[10px] text-slate-500 dark:text-slate-400">
-                  {language === 'en'
-                    ? 'Supports # H1..### H3, **bold**, *italic*, `code`, [link](https://), > quote, lists, ```code-block```, images'
-                    : 'Mendukung # H1..### H3, **tebal**, *miring*, `kode`, [tautan](https://), > kutipan, daftar, ```blok kode```, gambar'}
-                </span>
-              </div>
-
-              <div className="flex flex-wrap items-center gap-1.5">
-                {[
-                  { label: '## Subbab', snippet: '## Subbab Materi' },
-                  { label: '**Tebal**', snippet: '**teks tebal**', sep: ' ' },
-                  { label: '*Miring*', snippet: '*teks miring*', sep: ' ' },
-                  { label: '[Tautan]', snippet: '[Referensi](https://smartsa.edu)', sep: ' ' },
-                  { label: '> Kutipan', snippet: '> Catatan penting perkuliahan.' },
-                  { label: '1. Urutan', snippet: '1. Langkah pertama' },
-                  { label: '``` Kode', snippet: '```\nconsole.log("Smartsa");\n```' },
-                ].map((tool) => (
-                  <button
-                    key={tool.label}
-                    type="button"
-                    disabled={savingMaterial || uploadingMaterialImage}
-                    onClick={() => appendMaterialSnippet(tool.snippet, tool.sep || '\n')}
-                    className="px-2 py-1 text-[10px] font-bold rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-[#121822] hover:bg-slate-100 dark:hover:bg-[#1c2536] text-slate-700 dark:text-slate-300 transition disabled:opacity-50"
-                  >
-                    {tool.label}
-                  </button>
-                ))}
-              </div>
-
-              <textarea
-                rows={7}
-                aria-label={language === 'en' ? 'Meeting reading material text' : 'Teks materi pertemuan'}
-                value={materialTextInput}
-                onChange={(e) => setMaterialTextInput(e.target.value)}
-                placeholder={
-                  language === 'en'
-                    ? '# Topic Heading\nWrite structured reading material with **bold**, *italic*, [link](https://example.com)...\n- Key takeaway 1'
-                    : '# Judul Materi Pertemuan\nTuliskan pembahasan materi dengan **tebal**, *miring*, [tautan](https://example.com)...\n- Poin penting 1'
-                }
-                className="w-full px-3 py-2 text-xs rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-[#121822] text-slate-900 dark:text-slate-100"
-              />
-
-              <div className="p-3 rounded-lg bg-white dark:bg-[#121822] border border-slate-200 dark:border-[#1e2a3f] space-y-2">
-                <div className="flex items-center justify-between gap-2">
-                  <span className="text-[11px] font-bold text-slate-700 dark:text-slate-300 flex items-center gap-1.5">
-                    <ImageIcon className="w-3.5 h-3.5 text-amber-500" />
-                    {language === 'en' ? 'Insert Image into Delta Material' : 'Sisipkan Gambar ke Materi'}
-                  </span>
-                  <span className="text-[10px] text-slate-500 dark:text-slate-400">
-                    {language === 'en' ? 'HTTPS URL or Cloudinary CDN' : 'URL https:// atau Cloudinary'}
-                  </span>
+                <div>
+                  <h4 className="text-xs font-bold text-amber-700 dark:text-[#f59e0b] uppercase">
+                    {language === 'en'
+                      ? `Upload Material File for Meeting ${selectedMeeting.order}`
+                      : `Tambah Materi File Pertemuan ${selectedMeeting.order}`}
+                  </h4>
+                  <p className="text-[10px] text-slate-500 dark:text-slate-400">
+                    {language === 'en'
+                      ? 'Supports PDF, PPTX, DOCX, ZIP, and images (PNG/JPG/WEBP).'
+                      : 'Mendukung PDF, PPTX, DOCX, ZIP, dan gambar (PNG/JPG/WEBP).'}
+                  </p>
                 </div>
-                <div className="flex flex-col sm:flex-row gap-2">
+
+                <label
+                  className={`inline-flex items-center justify-center gap-1.5 px-3 py-1.5 text-[11px] font-bold rounded border transition cursor-pointer ${
+                    savingMaterial || uploadingMaterialFile
+                      ? 'opacity-50 cursor-not-allowed bg-slate-100 dark:bg-slate-800 text-slate-500 border-slate-300 dark:border-slate-700'
+                      : 'bg-indigo-50 dark:bg-indigo-950/50 hover:bg-indigo-100 dark:hover:bg-indigo-900/60 text-indigo-700 dark:text-indigo-300 border-indigo-200 dark:border-indigo-500/40'
+                  }`}
+                >
+                  <Upload className="w-3.5 h-3.5" />
+                  <span>
+                    {uploadingMaterialFile
+                      ? language === 'en'
+                        ? 'Uploading...'
+                        : 'Mengunggah...'
+                      : language === 'en'
+                        ? 'Upload via Cloudinary'
+                        : 'Unggah Berkas Cloudinary'}
+                  </span>
+                  <input
+                    type="file"
+                    accept={MATERIAL_ALLOWED_ACCEPT}
+                    aria-label={language === 'en' ? 'Upload meeting material file' : 'Unggah berkas materi pertemuan'}
+                    disabled={savingMaterial || uploadingMaterialFile}
+                    onChange={(e) => void handleUploadMaterialFileToCloudinary(e)}
+                    className="sr-only"
+                  />
+                </label>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                <div>
+                  <label className="block text-[10px] font-bold text-slate-600 dark:text-slate-400 mb-1 uppercase">
+                    {language === 'en' ? 'Material Title' : 'Judul Materi File'}
+                  </label>
+                  <input
+                    type="text"
+                    required
+                    aria-label={language === 'en' ? 'Material file title' : 'Judul berkas materi'}
+                    disabled={savingMaterial || uploadingMaterialFile}
+                    value={materialTitleInput}
+                    onChange={(e) => setMaterialTitleInput(e.target.value)}
+                    placeholder="Contoh: Slide Kuliah 01 — Pengantar"
+                    className="w-full px-2.5 py-2 text-xs rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-[#121822] text-slate-900 dark:text-slate-100"
+                  />
+                </div>
+                <div>
+                  <label className="block text-[10px] font-bold text-slate-600 dark:text-slate-400 mb-1 uppercase">
+                    {language === 'en' ? 'File URL (https://)' : 'URL Berkas Materi (https://)'}
+                  </label>
                   <input
                     type="text"
                     inputMode="url"
-                    aria-label={
-                      language === 'en' ? 'Material image URL (https://)' : 'URL gambar materi (https://)'
-                    }
-                    disabled={savingMaterial || uploadingMaterialImage}
-                    placeholder="https://res.cloudinary.com/.../diagram.png"
-                    value={materialImageUrlInput}
-                    onChange={(e) => setMaterialImageUrlInput(e.target.value)}
-                    className="flex-1 px-2.5 py-1.5 text-xs rounded border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-[#0a0f18] text-slate-900 dark:text-slate-100"
+                    required
+                    aria-label={language === 'en' ? 'Material file URL (https://)' : 'URL berkas materi (https://)'}
+                    disabled={savingMaterial || uploadingMaterialFile}
+                    value={materialFileUrlInput}
+                    onChange={(e) => setMaterialFileUrlInput(e.target.value)}
+                    placeholder="https://res.cloudinary.com/.../modul.pdf"
+                    className="w-full px-2.5 py-2 text-xs rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-[#121822] text-slate-900 dark:text-slate-100"
                   />
-                  <button
-                    type="button"
-                    disabled={savingMaterial || uploadingMaterialImage}
-                    onClick={handleInsertMaterialImageUrl}
-                    className="px-3 py-1.5 text-[11px] font-bold rounded border border-amber-300 dark:border-[#f59e0b]/40 bg-amber-50 dark:bg-amber-950/30 hover:bg-amber-100 text-amber-800 dark:text-[#f59e0b] transition disabled:opacity-50"
-                  >
-                    {language === 'en' ? 'Insert Image URL' : 'Sisipkan URL Gambar'}
-                  </button>
-                  <label
-                    className={`inline-flex items-center justify-center gap-1.5 px-3 py-1.5 text-[11px] font-bold rounded border transition cursor-pointer ${
-                      savingMaterial || uploadingMaterialImage
-                        ? 'opacity-50 cursor-not-allowed bg-slate-100 dark:bg-slate-800 text-slate-500 border-slate-300 dark:border-slate-700'
-                        : 'bg-indigo-50 dark:bg-indigo-950/50 hover:bg-indigo-100 dark:hover:bg-indigo-900/60 text-indigo-700 dark:text-indigo-300 border-indigo-200 dark:border-indigo-500/40'
-                    }`}
-                  >
-                    <Upload className="w-3.5 h-3.5" />
-                    <span>
-                      {uploadingMaterialImage
-                        ? language === 'en'
-                          ? 'Uploading...'
-                          : 'Mengunggah...'
-                        : language === 'en'
-                          ? 'Upload Image'
-                          : 'Unggah Gambar'}
-                    </span>
-                    <input
-                      type="file"
-                      accept="image/png,image/jpeg,image/webp,image/gif"
-                      aria-label={language === 'en' ? 'Upload material image' : 'Unggah gambar materi'}
-                      disabled={savingMaterial || uploadingMaterialImage}
-                      onChange={handleUploadMaterialImage}
-                      className="sr-only"
-                    />
-                  </label>
                 </div>
               </div>
 
-              <div className="flex flex-wrap items-center gap-2">
+              <div className="flex flex-col sm:flex-row gap-2.5 items-stretch sm:items-end">
+                <div className="flex-1">
+                  <label className="block text-[10px] font-bold text-slate-600 dark:text-slate-400 mb-1 uppercase">
+                    {language === 'en' ? 'Short Description (Optional)' : 'Deskripsi Singkat (Opsional)'}
+                  </label>
+                  <input
+                    type="text"
+                    aria-label={language === 'en' ? 'Material file description' : 'Deskripsi berkas materi'}
+                    disabled={savingMaterial || uploadingMaterialFile}
+                    value={materialDescInput}
+                    onChange={(e) => setMaterialDescInput(e.target.value)}
+                    placeholder="Catatan ringkas isi modul atau slide presentasi..."
+                    className="w-full px-2.5 py-2 text-xs rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-[#121822] text-slate-900 dark:text-slate-100"
+                  />
+                </div>
                 <button
                   type="submit"
-                  disabled={savingMaterial || uploadingMaterialImage}
-                  className="bg-[#f59e0b] hover:bg-[#d97706] text-black text-xs font-bold px-3.5 py-1.5 rounded flex items-center gap-1.5 disabled:opacity-50"
+                  disabled={savingMaterial || uploadingMaterialFile}
+                  className="bg-[#f59e0b] hover:bg-[#d97706] text-black text-xs font-bold px-4 py-2 rounded flex items-center justify-center gap-1.5 disabled:opacity-50 shrink-0"
                 >
                   <Save className="w-3.5 h-3.5" />
-                  {savingMaterial
-                    ? language === 'en'
-                      ? 'Saving...'
-                      : 'Menyimpan...'
-                    : language === 'en'
-                      ? 'Save Material'
-                      : 'Simpan Materi'}
+                  <span>
+                    {savingMaterial
+                      ? language === 'en'
+                        ? 'Saving...'
+                        : 'Menyimpan...'
+                      : language === 'en'
+                        ? 'Save Material File'
+                        : 'Simpan Materi File'}
+                  </span>
                 </button>
-                {selectedMeeting.deltaContent && (
-                  <button
-                    type="button"
-                    disabled={savingMaterial || uploadingMaterialImage}
-                    onClick={() => void handleClearMeetingDelta()}
-                    className="bg-rose-50 dark:bg-rose-950/40 hover:bg-rose-100 text-rose-700 dark:text-rose-300 border border-rose-200 dark:border-rose-500/40 text-xs font-bold px-3 py-1.5 rounded flex items-center gap-1.5 disabled:opacity-50"
-                  >
-                    <Trash2 className="w-3.5 h-3.5" />
-                    {language === 'en' ? 'Delete Material' : 'Hapus Materi'}
-                  </button>
-                )}
               </div>
             </form>
           )}
@@ -3857,26 +4038,184 @@ export default function ClassDetailView({
             </div>
           )}
 
-          <DeltaContentRenderer
-            delta={selectedMeeting ? selectedMeeting.deltaContent || null : classData?.deltaContent || null}
-            fallbackText={selectedMeeting ? '' : classData?.description || ''}
-            emptyMessage={
-              language === 'en'
-                ? 'No reading material has been added for this meeting yet.'
-                : 'Belum ada materi bacaan untuk pertemuan ini.'
-            }
-          />
+          {currentMaterialFiles.length > 0 ? (
+            <div className="space-y-2.5">
+              {currentMaterialFiles.map((fileItem) => {
+                const safeItemUrl = getSafeHttpFileUrl(fileItem.fileUrl);
+                const fileKind =
+                  fileItem.fileType || detectMaterialFileType(fileItem.fileName, fileItem.mimeType);
+                const isPreviewable = fileKind === 'image' || fileKind === 'pdf';
+                const isSelectedPreview = previewMaterialFile?.id === fileItem.id;
+                return (
+                  <div
+                    key={fileItem.id || fileItem.fileUrl}
+                    className={`p-3.5 rounded-xl border transition flex flex-col sm:flex-row sm:items-center justify-between gap-3 ${
+                      isSelectedPreview
+                        ? 'bg-amber-50/70 dark:bg-[#1a2232] border-amber-400 dark:border-[#f59e0b]'
+                        : 'bg-slate-50 dark:bg-[#0a0f18] border-slate-200 dark:border-[#1e2a3f]'
+                    }`}
+                  >
+                    <div className="flex items-start gap-3 min-w-0">
+                      <div className="w-9 h-9 rounded-lg bg-white dark:bg-[#121822] border border-slate-200 dark:border-slate-700 flex items-center justify-center shrink-0">
+                        {fileKind === 'image' ? (
+                          <ImageIcon className="w-4 h-4 text-sky-600 dark:text-[#00e5ff]" />
+                        ) : (
+                          <FileText className="w-4 h-4 text-amber-600 dark:text-[#f59e0b]" />
+                        )}
+                      </div>
+                      <div className="min-w-0">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <span className="text-xs sm:text-sm font-bold text-slate-900 dark:text-slate-100">
+                            {fileItem.title || fileItem.fileName}
+                          </span>
+                          <span className="text-[9px] font-mono font-bold uppercase px-1.5 py-0.5 rounded bg-slate-200 dark:bg-slate-800 text-slate-700 dark:text-slate-300">
+                            {String(fileKind || 'file').toUpperCase()}
+                          </span>
+                        </div>
+                        {fileItem.description && (
+                          <p className="text-xs text-slate-600 dark:text-slate-400 mt-0.5">
+                            {fileItem.description}
+                          </p>
+                        )}
+                        <div className="flex flex-wrap items-center gap-2 mt-1 text-[10px] font-mono text-slate-500 dark:text-slate-400">
+                          {fileItem.fileName && <span>{fileItem.fileName}</span>}
+                          {fileItem.fileSize && <span>• {fileItem.fileSize}</span>}
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="flex flex-wrap items-center gap-2 font-mono shrink-0">
+                      {safeItemUrl && isPreviewable && (
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setPreviewMaterialFile((prev) =>
+                              prev?.id === fileItem.id ? null : fileItem
+                            )
+                          }
+                          className="px-2.5 py-1.5 text-[11px] font-bold rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-[#121822] text-slate-800 dark:text-slate-200 inline-flex items-center gap-1"
+                        >
+                          <Eye className="w-3.5 h-3.5" />
+                          <span>
+                            {isSelectedPreview
+                              ? language === 'en'
+                                ? 'Hide'
+                                : 'Tutup'
+                              : language === 'en'
+                                ? 'Preview'
+                                : 'Pratinjau'}
+                          </span>
+                        </button>
+                      )}
+                      {safeItemUrl && (
+                        <a
+                          href={safeItemUrl}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          download={fileItem.fileName || undefined}
+                          className="px-2.5 py-1.5 text-[11px] font-bold rounded bg-[#f59e0b] hover:bg-[#d97706] text-black inline-flex items-center gap-1"
+                        >
+                          <Download className="w-3.5 h-3.5" />
+                          <span>{language === 'en' ? 'Download' : 'Unduh'}</span>
+                        </a>
+                      )}
+                      {isEducatorOrAdmin && (
+                        <button
+                          type="button"
+                          aria-label={`Hapus Materi ${fileItem.title || fileItem.fileName}`}
+                          onClick={() => setDeleteMaterialTarget(fileItem)}
+                          className="px-2.5 py-1.5 text-[11px] font-bold rounded border border-rose-300 dark:border-rose-500/40 bg-rose-50 dark:bg-rose-950/30 text-rose-700 dark:text-rose-300 inline-flex items-center gap-1"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                          <span>{language === 'en' ? 'Delete' : 'Hapus'}</span>
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          ) : !hasLegacyDelta ? (
+            <div className="border border-dashed border-slate-300 dark:border-[#1e2a3f] rounded-lg p-8 text-center bg-slate-50 dark:bg-[#070b12] font-mono space-y-1.5">
+              <FileText className="w-9 h-9 text-amber-500 mx-auto" />
+              <h4 className="text-xs font-bold text-slate-900 dark:text-slate-200">
+                {language === 'en'
+                  ? 'No material files uploaded for this meeting yet.'
+                  : 'Belum ada materi file untuk pertemuan ini.'}
+              </h4>
+              <p className="text-[11px] text-slate-500 dark:text-slate-400">
+                {isEducatorOrAdmin
+                  ? language === 'en'
+                    ? 'Upload PDF, PPTX, DOCX, ZIP, or images via Cloudinary above.'
+                    : 'Unggah berkas PDF, PPTX, DOCX, ZIP, atau gambar via formulir Cloudinary di atas.'
+                  : language === 'en'
+                    ? 'Your lecturer has not uploaded files for this meeting yet.'
+                    : 'Dosen pengampu belum mengunggah berkas materi untuk pertemuan ini.'}
+              </p>
+            </div>
+          ) : null}
+
+          {previewMaterialFile && (() => {
+            const safePreviewUrl = getSafeHttpFileUrl(previewMaterialFile.fileUrl);
+            const previewKind =
+              previewMaterialFile.fileType ||
+              detectMaterialFileType(previewMaterialFile.fileName, previewMaterialFile.mimeType);
+            if (!safePreviewUrl) return null;
+            return (
+              <div className="p-4 rounded-xl bg-slate-50 dark:bg-[#070b12] border border-slate-200 dark:border-[#1e2a3f] space-y-2.5">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-xs font-mono font-bold text-slate-800 dark:text-slate-200 truncate">
+                    {language === 'en' ? 'Preview:' : 'Pratinjau:'}{' '}
+                    {previewMaterialFile.title || previewMaterialFile.fileName}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => setPreviewMaterialFile(null)}
+                    className="px-2 py-1 text-[11px] font-mono rounded bg-slate-200 dark:bg-slate-800 text-slate-700 dark:text-slate-300"
+                  >
+                    {language === 'en' ? 'Close' : 'Tutup'}
+                  </button>
+                </div>
+                {previewKind === 'image' ? (
+                  <img
+                    src={safePreviewUrl}
+                    alt={previewMaterialFile.title || previewMaterialFile.fileName || 'Materi Gambar'}
+                    className="max-h-96 rounded-lg border border-slate-200 dark:border-slate-700 object-contain mx-auto bg-white dark:bg-[#121822]"
+                  />
+                ) : previewKind === 'pdf' ? (
+                  <iframe
+                    title={`Pratinjau PDF ${previewMaterialFile.title || previewMaterialFile.fileName}`}
+                    src={safePreviewUrl}
+                    className="w-full h-96 rounded-lg border border-slate-200 dark:border-[#1e2a3f] bg-white"
+                  />
+                ) : null}
+              </div>
+            );
+          })()}
+
+          {hasLegacyDelta && (
+            <div className="space-y-2 pt-2 border-t border-slate-200 dark:border-[#1b263b]">
+              <span className="text-[10px] font-mono font-bold text-slate-500 dark:text-slate-400 uppercase block">
+                // {language === 'en' ? 'LEGACY TEXT MATERIAL (READ-ONLY)' : 'CATATAN TEKS MODUL (ARSIP READ-ONLY)'}
+              </span>
+              <DeltaContentRenderer
+                delta={activeDeltaContent}
+                fallbackText={selectedMeeting ? '' : classData?.description || ''}
+                emptyMessage=""
+              />
+            </div>
+          )}
 
           {!isEducatorOrAdmin && selectedMeeting && (
             <div className="pt-4 border-t border-slate-200 dark:border-[#1b263b] flex flex-wrap items-center justify-between gap-3 font-mono">
               <div className="text-[11px] text-slate-600 dark:text-slate-400">
                 {activeCycle.materialDone
                   ? language === 'en'
-                    ? `Reading material for Meeting ${currentMeetingNo} is completed.`
+                    ? `Course materials for Meeting ${currentMeetingNo} completed.`
                     : `Materi Pertemuan ${currentMeetingNo} telah selesai dipelajari.`
                   : language === 'en'
-                    ? `Mark this reading material completed to progress toward Post-test.`
-                    : `Tandai materi selesai setelah membaca untuk membuka syarat Post-test.`}
+                    ? 'Mark this material completed to progress toward Post-test.'
+                    : 'Tandai materi selesai setelah mempelajari berkas untuk membuka syarat Post-test.'}
               </div>
               <button
                 type="button"
@@ -3913,7 +4252,8 @@ export default function ClassDetailView({
             </div>
           )}
         </div>
-      )}
+        );
+      })()}
 
       {/* TAB: Video Learning Player */}
       {!isPreviewMode && activeTab === 'video' && (
@@ -4077,163 +4417,6 @@ export default function ClassDetailView({
                     ? 'Mark Video Completed'
                     : 'Tandai Video Selesai'}
               </button>
-            </div>
-          )}
-        </div>
-      )}
-
-      {/* TAB: Manual Book PDF */}
-      {!isPreviewMode && activeTab === 'pdf' && (
-        <div className="bg-white dark:bg-[#121822] p-5 rounded-xl border border-slate-200 dark:border-[#232f42] space-y-4">
-          <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-200 dark:border-[#1b263b] pb-3">
-            <div>
-              <h3 className="text-xs font-mono font-bold text-amber-700 dark:text-[#f59e0b] uppercase tracking-wider">
-                // DOKUMEN PRAKTIKUM &amp; MANUAL BOOK (PDF)
-              </h3>
-              <p className="text-[10px] font-mono text-slate-500 dark:text-slate-400">
-                {language === 'en'
-                  ? 'Preview or open external PDF module configured for this meeting.'
-                  : 'Pratinjau atau buka dokumen PDF resmi yang ditambahkan dosen untuk pertemuan ini.'}
-              </p>
-            </div>
-            {safePdfUrl && (
-              <div className="flex items-center gap-2">
-                <a
-                  href={safePdfUrl}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="bg-slate-100 dark:bg-[#1c2432] hover:bg-slate-200 dark:hover:bg-[#253245] text-slate-800 dark:text-slate-200 border border-slate-300 dark:border-slate-700 text-xs font-mono font-bold px-3 py-1.5 rounded-xs transition flex items-center gap-1.5"
-                >
-                  <ExternalLink className="w-3.5 h-3.5" />
-                  {language === 'en' ? 'OPEN PDF' : 'BUKA PDF'}
-                </a>
-                <a
-                  href={safePdfUrl}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  download
-                  className="bg-[#f59e0b] hover:bg-[#d97706] text-black text-xs font-mono font-bold px-3 py-1.5 rounded-xs transition flex items-center gap-1.5"
-                >
-                  <Download className="w-3.5 h-3.5" />
-                  {language === 'en' ? 'DOWNLOAD PDF' : 'UNDUH PDF'}
-                </a>
-              </div>
-            )}
-          </div>
-
-          {renderEducatorMeetingToolbar('educator-pdf-meeting')}
-
-          {isEducatorOrAdmin && selectedMeeting && (
-            <form
-              onSubmit={handleSaveMeetingPdf}
-              className="p-4 rounded-xl bg-slate-50 dark:bg-[#0a0f18] border border-slate-200 dark:border-[#1e2a3f] space-y-3 font-mono"
-            >
-              <div className="flex flex-wrap items-center justify-between gap-2">
-                <h4 className="text-xs font-bold text-amber-700 dark:text-[#f59e0b] uppercase">
-                  {language === 'en'
-                    ? `Manage PDF Module for Meeting ${selectedMeeting.order}`
-                    : `Kelola Dokumen PDF Pertemuan ${selectedMeeting.order}`}
-                </h4>
-                <label className="cursor-pointer bg-slate-200 dark:bg-[#1c2432] hover:bg-slate-300 dark:hover:bg-[#253245] text-slate-800 dark:text-slate-200 text-[11px] font-bold px-2.5 py-1 rounded inline-flex items-center gap-1.5">
-                  <Upload className="w-3.5 h-3.5" />
-                  {pdfUploading
-                    ? language === 'en'
-                      ? 'Uploading...'
-                      : 'Mengunggah...'
-                    : language === 'en'
-                      ? 'Upload PDF'
-                      : 'Unggah Berkas PDF'}
-                  <input
-                    type="file"
-                    accept="application/pdf,.pdf"
-                    disabled={pdfUploading || savingPdf}
-                    onChange={(e) => {
-                      const file = e.target.files?.[0];
-                      if (file) void handleUploadMeetingPdfFile(file);
-                      e.target.value = '';
-                    }}
-                    className="hidden"
-                  />
-                </label>
-              </div>
-              <div className="flex flex-col sm:flex-row gap-2">
-                <input
-                  type="text"
-                  aria-label={language === 'en' ? 'Meeting PDF URL' : 'URL PDF pertemuan'}
-                  value={pdfUrlInput}
-                  onChange={(e) => setPdfUrlInput(e.target.value)}
-                  placeholder="https://.../manual-book-pertemuan.pdf"
-                  className="flex-1 px-3 py-2 text-xs rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-[#121822] text-slate-900 dark:text-slate-100"
-                />
-                <button
-                  type="submit"
-                  disabled={savingPdf || pdfUploading}
-                  className="bg-[#f59e0b] hover:bg-[#d97706] text-black text-xs font-bold px-3.5 py-2 rounded flex items-center justify-center gap-1.5 disabled:opacity-50"
-                >
-                  <Save className="w-3.5 h-3.5" />
-                  {savingPdf
-                    ? language === 'en'
-                      ? 'Saving...'
-                      : 'Menyimpan...'
-                    : language === 'en'
-                      ? 'Save PDF'
-                      : 'Simpan PDF'}
-                </button>
-                {safePdfUrl && (
-                  <button
-                    type="button"
-                    disabled={savingPdf || pdfUploading}
-                    onClick={() => void handleClearMeetingPdf()}
-                    className="bg-rose-50 dark:bg-rose-950/40 hover:bg-rose-100 text-rose-700 dark:text-rose-300 border border-rose-200 dark:border-rose-500/40 text-xs font-bold px-3 py-2 rounded flex items-center justify-center gap-1.5 disabled:opacity-50"
-                  >
-                    <Trash2 className="w-3.5 h-3.5" />
-                    {language === 'en' ? 'Delete PDF' : 'Hapus PDF'}
-                  </button>
-                )}
-              </div>
-            </form>
-          )}
-
-          {pdfFeedback && (
-            <div
-              className={`p-3 rounded-lg text-xs font-mono flex items-center gap-2 border ${
-                pdfFeedback.type === 'success'
-                  ? 'bg-emerald-50 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-300 border-emerald-200 dark:border-emerald-500/40'
-                  : 'bg-rose-50 dark:bg-rose-950/40 text-rose-700 dark:text-rose-300 border-rose-200 dark:border-rose-500/40'
-              }`}
-            >
-              {pdfFeedback.type === 'success' ? (
-                <CheckCircle2 className="w-4 h-4 shrink-0" />
-              ) : (
-                <AlertTriangle className="w-4 h-4 shrink-0" />
-              )}
-              <span>{pdfFeedback.text}</span>
-            </div>
-          )}
-
-          {safePdfUrl ? (
-            <iframe
-              title="Manual Book PDF Viewer"
-              src={safePdfUrl}
-              className="w-full h-96 rounded-lg border border-slate-200 dark:border-[#1e2a3f] bg-slate-50 dark:bg-[#070b12]"
-            />
-          ) : (
-            <div className="border border-dashed border-slate-300 dark:border-[#1e2a3f] rounded-lg p-8 text-center bg-slate-50 dark:bg-[#070b12] font-mono space-y-1.5">
-              <FileText className="w-9 h-9 text-amber-500 mx-auto" />
-              <h4 className="text-xs font-bold text-slate-900 dark:text-slate-200">
-                {language === 'en'
-                  ? 'No PDF Document Available'
-                  : 'Belum Ada Dokumen PDF untuk Pertemuan Ini'}
-              </h4>
-              <p className="text-[11px] text-slate-500 dark:text-slate-400">
-                {isEducatorOrAdmin
-                  ? language === 'en'
-                    ? 'Upload a PDF file or save an https:// PDF URL using the form above.'
-                    : 'Unggah berkas PDF atau simpan tautan PDF https:// melalui formulir di atas.'
-                  : language === 'en'
-                    ? 'Your lecturer has not attached a PDF manual book for this meeting yet.'
-                    : 'Dosen pengampu belum menambahkan dokumen PDF untuk pertemuan ini.'}
-              </p>
             </div>
           )}
         </div>
@@ -4680,6 +4863,15 @@ export default function ClassDetailView({
                               PERTEMUAN {Number(task.meetingNo || 1)}
                             </span>
                             <span
+                              className={`text-[9px] font-mono font-bold px-2 py-0.5 rounded-xs uppercase border ${
+                                task.taskType === 'kelompok'
+                                  ? 'bg-indigo-50 dark:bg-indigo-950/60 text-indigo-700 dark:text-indigo-300 border-indigo-200 dark:border-indigo-500/40'
+                                  : 'bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 border-slate-200 dark:border-slate-700'
+                              }`}
+                            >
+                              {task.taskType === 'kelompok' ? 'KELOMPOK' : 'INDIVIDU'}
+                            </span>
+                            <span
                               className={`text-[9px] font-mono font-bold px-2 py-0.5 rounded-xs uppercase ${
                                 isDone
                                   ? 'bg-emerald-100 dark:bg-emerald-950 text-emerald-700 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-500/40'
@@ -4706,6 +4898,26 @@ export default function ClassDetailView({
                         <p className="text-xs text-slate-600 dark:text-slate-400 mt-1 leading-relaxed">
                           {task.note}
                         </p>
+                        {task.attachmentUrl && getSafeHttpFileUrl(task.attachmentUrl) && (
+                          <a
+                            href={getSafeHttpFileUrl(task.attachmentUrl)}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            download={task.attachmentName || undefined}
+                            className="inline-flex items-center gap-1.5 mt-1.5 text-[11px] font-mono font-bold text-amber-700 dark:text-[#f59e0b] hover:underline"
+                          >
+                            <Paperclip className="w-3.5 h-3.5" />
+                            <span>{task.attachmentName || 'Unduh Lampiran Instruksi'}</span>
+                          </a>
+                        )}
+                        {task.groupName && (
+                          <p className="text-[11px] font-mono text-indigo-700 dark:text-indigo-300 mt-1">
+                            Kelompok: <strong>{task.groupName}</strong>
+                            {Array.isArray(task.groupMembers) && task.groupMembers.length > 0
+                              ? ` (${task.groupMembers.join(', ')})`
+                              : ''}
+                          </p>
+                        )}
                         {task.feedback && (
                           <p className="text-[11px] font-mono text-indigo-700 dark:text-indigo-300 mt-1.5">
                             Catatan Dosen: {task.feedback}
@@ -4723,6 +4935,12 @@ export default function ClassDetailView({
                                 setUploadedFile(null);
                                 setExternalUrlInput(task.externalUrl || task.submittedFile?.url || '');
                                 setTaskNotes(task.notes || '');
+                                setGroupNameInput(task.groupName || '');
+                                setGroupMembersInput(
+                                  Array.isArray(task.groupMembers)
+                                    ? task.groupMembers.join('\n')
+                                    : task.groupMembers || ''
+                                );
                                 setTaskFeedback(null);
                               }}
                               className="bg-slate-100 dark:bg-[#1c2432] hover:bg-slate-200 dark:hover:bg-[#253245] text-slate-700 dark:text-slate-300 text-[10px] font-bold px-3 py-1.5 rounded-xs border border-slate-300 dark:border-slate-600 transition flex items-center gap-1 uppercase"
@@ -4749,6 +4967,12 @@ export default function ClassDetailView({
                               setUploadedFile(null);
                               setExternalUrlInput(task.externalUrl || '');
                               setTaskNotes(task.notes || '');
+                              setGroupNameInput(task.groupName || '');
+                              setGroupMembersInput(
+                                Array.isArray(task.groupMembers)
+                                  ? task.groupMembers.join('\n')
+                                  : task.groupMembers || ''
+                              );
                               setTaskFeedback(null);
                             }}
                             className="bg-[#f59e0b] hover:bg-[#d97706] text-black text-[11px] font-bold px-3.5 py-1.5 rounded-xs transition flex items-center gap-1.5 uppercase shadow-md"
@@ -4843,37 +5067,15 @@ export default function ClassDetailView({
             </div>
           )}
 
-          {/* Active Session Banner OR Open Session Form */}
+          {/* Active Session QR Card & Projector Modal OR Open Session Form */}
           {attSession?.isOpen ? (
-            <div className="p-4 rounded-xl bg-emerald-50/70 dark:bg-emerald-950/30 border border-emerald-300 dark:border-emerald-500/40 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-              <div className="space-y-1 font-mono">
-                <span className="text-[10px] font-bold text-emerald-700 dark:text-emerald-300 uppercase">
-                  ● {language === 'en' ? 'ATTENDANCE SESSION OPEN' : 'SESI PRESENSI SEDANG AKTIF'} —{' '}
-                  {language === 'en' ? 'MEETING' : 'PERTEMUAN'} {attSession.meetingNo}
-                </span>
-                <div className="text-xl sm:text-2xl font-black tracking-widest text-slate-900 dark:text-white">
-                  {attSession.sessionCode}
-                </div>
-                <p className="text-[11px] text-slate-600 dark:text-slate-400">
-                  {language === 'en' ? 'Expires at' : 'Berakhir pada'}:{' '}
-                  {attSession.expiresAt
-                    ? new Date(attSession.expiresAt).toLocaleTimeString('id-ID', {
-                        hour: '2-digit',
-                        minute: '2-digit',
-                      })
-                    : '-'}{' '}
-                  WIB
-                </p>
-              </div>
-              <button
-                type="button"
-                onClick={handleCloseAttendance}
-                disabled={attLoading}
-                className="bg-rose-600 hover:bg-rose-500 text-white text-xs font-mono font-bold px-4 py-2 rounded-lg shadow-sm transition shrink-0"
-              >
-                {language === 'en' ? 'CLOSE SESSION' : 'TUTUP SESI PRESENSI'}
-              </button>
-            </div>
+            <AttendanceQrModal
+              session={attSession}
+              classCode={classData?.code || ''}
+              className={classData?.name || classData?.title || ''}
+              onCloseSession={handleCloseAttendance}
+              closing={attLoading}
+            />
           ) : (
             <form
               onSubmit={handleOpenAttendance}
@@ -5037,7 +5239,7 @@ export default function ClassDetailView({
               </div>
             )}
 
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
+            <div className="grid grid-cols-1 sm:grid-cols-4 gap-2.5">
               <div>
                 <label className="block text-[10px] font-bold text-slate-600 dark:text-slate-400 mb-1 uppercase">
                   Pertemuan
@@ -5065,6 +5267,20 @@ export default function ClassDetailView({
                       );
                     })
                   )}
+                </select>
+              </div>
+              <div>
+                <label className="block text-[10px] font-bold text-slate-600 dark:text-slate-400 mb-1 uppercase">
+                  {language === 'en' ? 'Task Type' : 'Tipe Tugas'}
+                </label>
+                <select
+                  aria-label={language === 'en' ? 'New assignment task type' : 'Tipe tugas baru'}
+                  value={newTaskType}
+                  onChange={(e) => setNewTaskType(e.target.value)}
+                  className="w-full px-2.5 py-2 text-xs rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-[#121822] text-slate-900 dark:text-slate-100"
+                >
+                  <option value="individu">{language === 'en' ? 'Individual' : 'Individu'}</option>
+                  <option value="kelompok">{language === 'en' ? 'Group' : 'Kelompok'}</option>
                 </select>
               </div>
               <div className="sm:col-span-2">
@@ -5102,18 +5318,68 @@ export default function ClassDetailView({
                   type="text"
                   value={newTaskNote}
                   onChange={(e) => setNewTaskNote(e.target.value)}
-                  placeholder="Format PDF/ZIP atau link GitHub..."
+                  placeholder="Format PDF/DOCX/ZIP atau catatan kelompok..."
                   className="w-full px-2.5 py-2 text-xs rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-[#121822] text-slate-900 dark:text-slate-100"
                 />
               </div>
               <button
                 type="submit"
-                disabled={creatingTask || meetingsList.length === 0}
+                disabled={creatingTask || uploadingTaskAttachment || meetingsList.length === 0}
                 className="bg-[#f59e0b] hover:bg-[#d97706] text-black text-xs font-bold px-4 py-2 rounded-lg transition flex items-center justify-center gap-1.5 disabled:opacity-50"
               >
                 <Plus className="w-4 h-4" />
                 {creatingTask ? 'Menerbitkan...' : 'Terbitkan Tugas'}
               </button>
+            </div>
+
+            <div className="p-2.5 rounded-lg bg-white dark:bg-[#121822] border border-slate-200 dark:border-slate-700/80 flex flex-wrap items-center justify-between gap-2 text-[11px]">
+              <div className="flex items-center gap-2 min-w-0">
+                <Paperclip className="w-3.5 h-3.5 text-amber-500 shrink-0" />
+                <span className="text-slate-600 dark:text-slate-300 truncate">
+                  {newTaskAttachmentName
+                    ? `${newTaskAttachmentName}${newTaskAttachmentSize ? ` (${newTaskAttachmentSize})` : ''}`
+                    : language === 'en'
+                      ? 'Optional instruction file attachment (Cloudinary)'
+                      : 'Lampiran berkas instruksi tugas opsional (Cloudinary)'}
+                </span>
+              </div>
+              <div className="flex items-center gap-1.5 shrink-0">
+                {newTaskAttachmentUrl && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setNewTaskAttachmentUrl('');
+                      setNewTaskAttachmentName('');
+                      setNewTaskAttachmentSize('');
+                    }}
+                    className="px-2 py-1 rounded bg-rose-50 dark:bg-rose-950/40 text-rose-700 dark:text-rose-300 border border-rose-200 dark:border-rose-500/40 text-[10px] font-bold"
+                  >
+                    {language === 'en' ? 'Clear' : 'Hapus'}
+                  </button>
+                )}
+                <label className="cursor-pointer px-2.5 py-1 rounded bg-indigo-50 dark:bg-indigo-950/50 text-indigo-700 dark:text-indigo-300 border border-indigo-200 dark:border-indigo-500/40 text-[10px] font-bold inline-flex items-center gap-1">
+                  <Upload className="w-3 h-3" />
+                  {uploadingTaskAttachment
+                    ? language === 'en'
+                      ? 'Uploading...'
+                      : 'Mengunggah...'
+                    : language === 'en'
+                      ? 'Attach File'
+                      : 'Unggah Lampiran'}
+                  <input
+                    type="file"
+                    accept={MATERIAL_ALLOWED_ACCEPT}
+                    aria-label={language === 'en' ? 'Upload assignment instruction attachment' : 'Unggah lampiran instruksi tugas'}
+                    disabled={uploadingTaskAttachment || creatingTask}
+                    onChange={(e) => {
+                      const f = e.target.files?.[0];
+                      if (f) void handleUploadTaskAttachmentFile(f, 'create');
+                      e.target.value = '';
+                    }}
+                    className="sr-only"
+                  />
+                </label>
+              </div>
             </div>
           </form>
 
@@ -5212,6 +5478,15 @@ export default function ClassDetailView({
                               <span className="text-[9px] font-mono font-bold px-2 py-0.5 rounded-xs bg-sky-50 dark:bg-[#00e5ff]/10 text-sky-700 dark:text-[#00e5ff] border border-sky-200 dark:border-[#00e5ff]/30">
                                 P{Number(taskItem.meetingNo || 1)}
                               </span>
+                              <span
+                                className={`text-[9px] font-mono font-bold px-2 py-0.5 rounded-xs uppercase border ${
+                                  taskItem.taskType === 'kelompok'
+                                    ? 'bg-indigo-50 dark:bg-indigo-950/60 text-indigo-700 dark:text-indigo-300 border-indigo-200 dark:border-indigo-500/40'
+                                    : 'bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 border-slate-200 dark:border-slate-700'
+                                }`}
+                              >
+                                {taskItem.taskType === 'kelompok' ? 'KELOMPOK' : 'INDIVIDU'}
+                              </span>
                               <span className="text-xs font-bold text-slate-900 dark:text-slate-100 truncate">
                                 {taskItem.title}
                               </span>
@@ -5221,6 +5496,17 @@ export default function ClassDetailView({
                               {taskItem.deadline || 'Sesuai jadwal'}
                               {taskItem.note ? ` • ${taskItem.note}` : ''}
                             </p>
+                            {taskItem.attachmentUrl && getSafeHttpFileUrl(taskItem.attachmentUrl) && (
+                              <a
+                                href={getSafeHttpFileUrl(taskItem.attachmentUrl)}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="inline-flex items-center gap-1 mt-1 text-[10px] font-mono font-bold text-amber-700 dark:text-[#f59e0b] hover:underline"
+                              >
+                                <Paperclip className="w-3 h-3" />
+                                <span>{taskItem.attachmentName || 'Lampiran Instruksi'}</span>
+                              </a>
+                            )}
                           </div>
                           <div className="flex items-center gap-1.5 font-mono">
                             <button
@@ -5403,9 +5689,18 @@ export default function ClassDetailView({
                       >
                         <div className="flex flex-wrap items-start justify-between gap-2">
                           <div>
-                            <div className="flex items-center gap-2">
+                            <div className="flex flex-wrap items-center gap-2">
                               <span className="text-xs font-bold text-slate-900 dark:text-slate-100">
                                 {sub.studentName}
+                              </span>
+                              <span
+                                className={`text-[9px] font-mono font-bold px-2 py-0.5 rounded-xs uppercase border ${
+                                  sub.taskType === 'kelompok' || sub.groupName
+                                    ? 'bg-indigo-50 dark:bg-indigo-950/60 text-indigo-700 dark:text-indigo-300 border-indigo-200 dark:border-indigo-500/40'
+                                    : 'bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 border-slate-200 dark:border-slate-700'
+                                }`}
+                              >
+                                {sub.taskType === 'kelompok' || sub.groupName ? 'KELOMPOK' : 'INDIVIDU'}
                               </span>
                               <span
                                 className={`text-[9px] font-mono font-bold px-2 py-0.5 rounded-xs border ${
@@ -5420,6 +5715,20 @@ export default function ClassDetailView({
                             <p className="text-xs font-mono text-slate-600 dark:text-slate-300 mt-0.5">
                               {sub.assignment} • {sub.submittedAt}
                             </p>
+                            {sub.groupName && (
+                              <div className="mt-1.5 p-2 rounded bg-indigo-50/70 dark:bg-indigo-950/30 border border-indigo-200 dark:border-indigo-500/30 text-[11px] font-mono text-indigo-800 dark:text-indigo-200">
+                                <div>
+                                  <strong>{language === 'en' ? 'Group:' : 'Kelompok:'}</strong>{' '}
+                                  {sub.groupName}
+                                </div>
+                                {Array.isArray(sub.groupMembers) && sub.groupMembers.length > 0 && (
+                                  <div className="text-[10px] text-indigo-700 dark:text-indigo-300 mt-0.5">
+                                    <strong>{language === 'en' ? 'Members:' : 'Anggota:'}</strong>{' '}
+                                    {sub.groupMembers.join(' • ')}
+                                  </div>
+                                )}
+                              </div>
+                            )}
                             {sub.notes && (
                               <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-1">
                                 Catatan: {sub.notes}
@@ -5533,14 +5842,19 @@ export default function ClassDetailView({
               {selectedMeeting && (
                 <button
                   type="button"
+                  aria-pressed={showExamEditor}
                   onClick={() => setShowExamEditor((prev) => !prev)}
-                  className="px-3 py-1.5 rounded-xs text-[10px] font-bold uppercase border border-sky-300 dark:border-[#00e5ff]/40 bg-sky-50 dark:bg-[#00e5ff]/10 text-sky-700 dark:text-[#00e5ff] flex items-center gap-1"
+                  className={`px-3 py-1.5 rounded-xs text-[10px] font-bold uppercase border flex items-center gap-1 transition ${
+                    showExamEditor
+                      ? 'border-sky-500 dark:border-[#00e5ff] bg-sky-600 dark:bg-[#00e5ff] text-white dark:text-black shadow-xs'
+                      : 'border-sky-300 dark:border-[#00e5ff]/40 bg-sky-50 dark:bg-[#00e5ff]/10 text-sky-700 dark:text-[#00e5ff]'
+                  }`}
                 >
                   <Edit3 className="w-3 h-3" />
                   {showExamEditor
                     ? language === 'en'
-                      ? 'Hide Exam Editor'
-                      : 'Tutup Editor Soal'
+                      ? 'Close Editor & View Summary'
+                      : 'Tutup Editor & Lihat Rekap'
                     : language === 'en'
                       ? 'Create / Edit Exam'
                       : 'Buat / Edit Soal & Kunci'}
@@ -5581,29 +5895,41 @@ export default function ClassDetailView({
 
           {renderEducatorMeetingToolbar('educator-exam-meeting')}
 
-          {selectedMeeting && activeInstructorExam && (
-            <div className="flex flex-wrap items-center gap-2 text-[10px] font-mono">
-              <span
-                className={`px-2 py-0.5 rounded-xs font-bold uppercase border ${
-                  activeInstructorExam.status === 'archived'
-                    ? 'bg-slate-200 dark:bg-slate-800 text-slate-700 dark:text-slate-300 border-slate-300 dark:border-slate-700'
-                    : activeInstructorExam.status === 'draft'
-                      ? 'bg-amber-50 dark:bg-amber-950/40 text-amber-700 dark:text-amber-300 border-amber-300 dark:border-amber-500/40'
-                      : 'bg-emerald-50 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-300 border-emerald-300 dark:border-emerald-500/40'
-                }`}
-              >
-                STATUS: {String(activeInstructorExam.status || 'published').toUpperCase()}
-              </span>
-              <span className="px-2 py-0.5 rounded-xs font-bold bg-sky-50 dark:bg-[#00e5ff]/10 text-sky-700 dark:text-[#00e5ff] border border-sky-200 dark:border-[#00e5ff]/30">
-                DURASI: {activeInstructorExam.durationMinutes || DEFAULT_EXAM_DURATION_MINUTES} MENIT
-              </span>
-              {activeInstructorExam.deadline && (
-                <span className="px-2 py-0.5 rounded-xs font-bold bg-purple-50 dark:bg-purple-950/40 text-purple-700 dark:text-purple-300 border border-purple-200 dark:border-purple-500/30">
-                  DEADLINE: {new Date(activeInstructorExam.deadline).toLocaleString('id-ID')}
+          {selectedMeeting && activeInstructorExam && (() => {
+            const activePointsPerQuestion =
+              Number.isFinite(Number(activeInstructorExam.pointsPerQuestion)) &&
+              Number(activeInstructorExam.pointsPerQuestion) > 0
+                ? Number(activeInstructorExam.pointsPerQuestion)
+                : instructorExamQuestions.length > 0
+                  ? Number((100 / instructorExamQuestions.length).toFixed(2))
+                  : 0;
+            return (
+              <div className="flex flex-wrap items-center gap-2 text-[10px] font-mono">
+                <span
+                  className={`px-2 py-0.5 rounded-xs font-bold uppercase border ${
+                    activeInstructorExam.status === 'archived'
+                      ? 'bg-slate-200 dark:bg-slate-800 text-slate-700 dark:text-slate-300 border-slate-300 dark:border-slate-700'
+                      : activeInstructorExam.status === 'draft'
+                        ? 'bg-amber-50 dark:bg-amber-950/40 text-amber-700 dark:text-amber-300 border-amber-300 dark:border-amber-500/40'
+                        : 'bg-emerald-50 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-300 border-emerald-300 dark:border-emerald-500/40'
+                  }`}
+                >
+                  STATUS: {String(activeInstructorExam.status || 'published').toUpperCase()}
                 </span>
-              )}
-            </div>
-          )}
+                <span className="px-2 py-0.5 rounded-xs font-bold bg-sky-50 dark:bg-[#00e5ff]/10 text-sky-700 dark:text-[#00e5ff] border border-sky-200 dark:border-[#00e5ff]/30">
+                  DURASI: {activeInstructorExam.durationMinutes || DEFAULT_EXAM_DURATION_MINUTES} MENIT
+                </span>
+                <span className="px-2 py-0.5 rounded-xs font-bold bg-amber-50 dark:bg-amber-950/40 text-amber-700 dark:text-[#f59e0b] border border-amber-200 dark:border-[#f59e0b]/40">
+                  BOBOT: {activePointsPerQuestion} POIN/SOAL ({instructorExamQuestions.length} SOAL)
+                </span>
+                {activeInstructorExam.deadline && (
+                  <span className="px-2 py-0.5 rounded-xs font-bold bg-purple-50 dark:bg-purple-950/40 text-purple-700 dark:text-purple-300 border border-purple-200 dark:border-purple-500/30">
+                    DEADLINE: {new Date(activeInstructorExam.deadline).toLocaleString('id-ID')}
+                  </span>
+                )}
+              </div>
+            );
+          })()}
 
           {examSaveFeedback && (
             <div
@@ -5629,26 +5955,153 @@ export default function ClassDetailView({
             </div>
           )}
 
-          {selectedMeeting && (showExamEditor || instructorExamQuestions.length === 0) && (
+          {selectedMeeting && showExamEditor && (() => {
+            const draftPointsPerQuestion =
+              examDraftQuestions.length > 0
+                ? Number((100 / examDraftQuestions.length).toFixed(2))
+                : 0;
+            const parsedAikenPreview =
+              examEditorMode === 'aiken' ? parseAikenQuestions(aikenInput) : { questions: [], errors: [] };
+            return (
             <form
               onSubmit={handleSaveMeetingExam}
               className="p-4 rounded-xl bg-slate-50 dark:bg-[#0a0f18] border border-slate-200 dark:border-[#1e2a3f] space-y-4 font-mono"
             >
-              <div className="flex flex-wrap items-center justify-between gap-2">
-                <h4 className="text-xs font-bold text-amber-700 dark:text-[#f59e0b] uppercase">
-                  {language === 'en'
-                    ? `Manage ${evalKeyType.toUpperCase()} Questions (Meeting ${currentMeetingNo})`
-                    : `Kelola Soal & Kunci ${evalKeyType.toUpperCase()} — Pertemuan ${currentMeetingNo}`}
-                </h4>
-                <button
-                  type="button"
-                  onClick={handleAddDraftQuestion}
-                  className="bg-slate-200 dark:bg-[#1c2432] hover:bg-slate-300 dark:hover:bg-[#253245] text-slate-800 dark:text-slate-200 text-[11px] font-bold px-2.5 py-1 rounded flex items-center gap-1"
-                >
-                  <Plus className="w-3.5 h-3.5" />
-                  {language === 'en' ? 'Add Question' : 'Tambah Soal'}
-                </button>
+              <div className="flex flex-wrap items-center justify-between gap-2 pb-2 border-b border-slate-200 dark:border-[#1b263b]">
+                <div className="space-y-0.5">
+                  <h4 className="text-xs font-bold text-amber-700 dark:text-[#f59e0b] uppercase">
+                    {language === 'en'
+                      ? `Manage ${evalKeyType.toUpperCase()} Questions (Meeting ${currentMeetingNo})`
+                      : `Kelola Soal & Kunci ${evalKeyType.toUpperCase()} — Pertemuan ${currentMeetingNo}`}
+                  </h4>
+                  <span className="text-[10px] font-bold text-emerald-700 dark:text-emerald-300 bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-200 dark:border-emerald-500/40 px-2 py-0.5 rounded inline-block">
+                    {examDraftQuestions.length} Soal • {draftPointsPerQuestion} poin/soal (Total 100)
+                  </span>
+                </div>
+                <div className="flex flex-wrap items-center gap-1.5">
+                  <button
+                    type="button"
+                    onClick={() => setExamEditorMode('visual')}
+                    className={`text-[11px] font-bold px-2.5 py-1 rounded border transition ${
+                      examEditorMode === 'visual'
+                        ? 'bg-[#f59e0b] text-black border-[#f59e0b]'
+                        : 'bg-white dark:bg-[#121822] text-slate-700 dark:text-slate-300 border-slate-300 dark:border-slate-700'
+                    }`}
+                  >
+                    {language === 'en' ? 'Visual Editor' : 'Editor Visual'}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setExamEditorMode('aiken')}
+                    className={`text-[11px] font-bold px-2.5 py-1 rounded border transition ${
+                      examEditorMode === 'aiken'
+                        ? 'bg-sky-600 dark:bg-[#00e5ff] text-white dark:text-black border-sky-600 dark:border-[#00e5ff]'
+                        : 'bg-white dark:bg-[#121822] text-slate-700 dark:text-slate-300 border-slate-300 dark:border-slate-700'
+                    }`}
+                  >
+                    {language === 'en' ? 'Import Aiken Format' : 'Import Format Aiken'}
+                  </button>
+                  {examEditorMode === 'visual' && (
+                    <button
+                      type="button"
+                      onClick={handleAddDraftQuestion}
+                      className="bg-slate-200 dark:bg-[#1c2432] hover:bg-slate-300 dark:hover:bg-[#253245] text-slate-800 dark:text-slate-200 text-[11px] font-bold px-2.5 py-1 rounded flex items-center gap-1"
+                    >
+                      <Plus className="w-3.5 h-3.5" />
+                      {language === 'en' ? 'Add Question' : 'Tambah Soal'}
+                    </button>
+                  )}
+                </div>
               </div>
+
+              {examEditorMode === 'aiken' ? (
+                <div className="p-3.5 rounded-lg bg-white dark:bg-[#121822] border border-sky-200 dark:border-[#00e5ff]/40 space-y-3">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div>
+                      <span className="text-[11px] font-bold text-sky-700 dark:text-[#00e5ff] uppercase block">
+                        // {language === 'en' ? 'BULK IMPORT AIKEN FORMAT' : 'IMPOR MASSAL FORMAT AIKEN'}
+                      </span>
+                      <p className="text-[10px] text-slate-500 dark:text-slate-400">
+                        {language === 'en'
+                          ? 'Supports A. / A) options (2–6 options, default A–E) and ANSWER: X.'
+                          : 'Mendukung opsi A. atau A) (2–6 opsi, default 5 opsi A–E) dan baris ANSWER: X.'}
+                      </p>
+                    </div>
+                    <div className="flex flex-wrap items-center gap-1.5">
+                      <button
+                        type="button"
+                        onClick={() => setAikenInput(AIKEN_SAMPLE_TEMPLATE)}
+                        className="px-2.5 py-1 rounded border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-[#0a0f18] text-[10px] font-bold text-slate-700 dark:text-slate-300"
+                      >
+                        {language === 'en' ? 'Load Sample' : 'Muat Contoh'}
+                      </button>
+                      <label className="cursor-pointer px-2.5 py-1 rounded border border-indigo-200 dark:border-indigo-500/40 bg-indigo-50 dark:bg-indigo-950/50 text-[10px] font-bold text-indigo-700 dark:text-indigo-300 inline-flex items-center gap-1">
+                        <Upload className="w-3 h-3" />
+                        <span>{language === 'en' ? 'Upload .txt' : 'Unggah .txt'}</span>
+                        <input
+                          type="file"
+                          accept=".txt,text/plain"
+                          aria-label={language === 'en' ? 'Upload Aiken text file' : 'Unggah file teks Aiken'}
+                          onChange={(e) => void handleUploadAikenTxtFile(e)}
+                          className="sr-only"
+                        />
+                      </label>
+                    </div>
+                  </div>
+
+                  <textarea
+                    rows={8}
+                    aria-label={language === 'en' ? 'Aiken format text input' : 'Teks soal format Aiken'}
+                    value={aikenInput}
+                    onChange={(e) => setAikenInput(e.target.value)}
+                    placeholder={AIKEN_SAMPLE_TEMPLATE}
+                    className="w-full px-3 py-2 text-xs rounded border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-[#0a0f18] text-slate-900 dark:text-slate-100"
+                  />
+
+                  <div className="flex flex-wrap items-center justify-between gap-2 text-[11px]">
+                    <span className="font-bold text-emerald-700 dark:text-emerald-300">
+                      {parsedAikenPreview.questions.length}{' '}
+                      {language === 'en' ? 'valid questions parsed' : 'soal valid terdeteksi'}
+                      {parsedAikenPreview.questions.length > 0 &&
+                        ` • ${Number((100 / parsedAikenPreview.questions.length).toFixed(2))} poin/soal`}
+                    </span>
+                    {aikenInput.trim() && parsedAikenPreview.errors.length > 0 && (
+                      <span className="font-bold text-rose-600 dark:text-rose-400">
+                        {parsedAikenPreview.errors.length}{' '}
+                        {language === 'en' ? 'format errors' : 'baris error'}
+                      </span>
+                    )}
+                  </div>
+
+                  {aikenInput.trim() && parsedAikenPreview.errors.length > 0 && (
+                    <div className="p-2.5 rounded bg-rose-50 dark:bg-rose-950/40 border border-rose-200 dark:border-rose-500/40 text-[11px] text-rose-700 dark:text-rose-300 space-y-1">
+                      {parsedAikenPreview.errors.map((errItem, errIdx) => (
+                        <div key={`${errItem.line}_${errIdx}`}>{errItem.message}</div>
+                      ))}
+                    </div>
+                  )}
+
+                  <div className="flex flex-wrap justify-end gap-2 pt-1">
+                    <button
+                      type="button"
+                      disabled={parsedAikenPreview.questions.length === 0}
+                      onClick={() => handleApplyAikenImport('append')}
+                      className="px-3.5 py-1.5 rounded bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold disabled:opacity-40"
+                    >
+                      {language === 'en' ? 'Append to Questions' : 'Tambahkan ke Daftar Soal'}
+                    </button>
+                    <button
+                      type="button"
+                      disabled={parsedAikenPreview.questions.length === 0}
+                      onClick={() => handleApplyAikenImport('replace')}
+                      className="px-3.5 py-1.5 rounded bg-[#f59e0b] hover:bg-[#d97706] text-black text-xs font-bold disabled:opacity-40"
+                    >
+                      {language === 'en' ? 'Replace All Questions' : 'Ganti Semua Soal'}
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <>
 
               <div>
                 <label className="block text-[10px] font-bold text-slate-600 dark:text-slate-400 mb-1 uppercase">
@@ -5839,8 +6292,11 @@ export default function ClassDetailView({
                       : 'Simpan Soal & Kunci ke Server'}
                 </button>
               </div>
+                </>
+              )}
             </form>
-          )}
+            );
+          })()}
 
           {/* Class Exam Statistics Summary & Scoped Rekap */}
           {(() => {
@@ -5917,9 +6373,18 @@ export default function ClassDetailView({
                     <span className="text-[10px] text-slate-500 dark:text-slate-400 block">
                       RATA-RATA SKOR
                     </span>
-                    <span className="text-lg font-black text-amber-600 dark:text-[#f59e0b]">
+                    <span className="text-lg font-black text-amber-600 dark:text-[#f59e0b] block">
                       {avgScore} / 100
                     </span>
+                    {instructorExamQuestions.length > 0 && (
+                      <span className="text-[10px] text-slate-500 dark:text-slate-400 block mt-0.5">
+                        {(Number.isFinite(Number(activeInstructorExam?.pointsPerQuestion)) &&
+                        Number(activeInstructorExam?.pointsPerQuestion) > 0
+                          ? Number(activeInstructorExam.pointsPerQuestion)
+                          : Number((100 / instructorExamQuestions.length).toFixed(2)))}{' '}
+                        poin/soal ({instructorExamQuestions.length} soal)
+                      </span>
+                    )}
                   </div>
                   <div className="p-3 rounded-xl bg-slate-50 dark:bg-[#0a0f18] border border-slate-200 dark:border-[#1e2a3f]">
                     <span className="text-[10px] text-slate-500 dark:text-slate-400 block">
@@ -6198,13 +6663,36 @@ export default function ClassDetailView({
             )}
 
             <form onSubmit={handleTaskFileSubmit} className="p-4 space-y-3.5">
-              <div className="p-3 bg-slate-50 dark:bg-[#0a0f18] rounded-lg border border-slate-200 dark:border-[#232f42] text-xs space-y-1">
-                <span className="text-[10px] font-mono font-bold text-slate-500 dark:text-slate-400 uppercase block">
-                  PETUNJUK PENUGASAN:
-                </span>
+              <div className="p-3 bg-slate-50 dark:bg-[#0a0f18] rounded-lg border border-slate-200 dark:border-[#232f42] text-xs space-y-1.5">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-[10px] font-mono font-bold text-slate-500 dark:text-slate-400 uppercase block">
+                    PETUNJUK PENUGASAN:
+                  </span>
+                  <span
+                    className={`text-[9px] font-mono font-bold px-2 py-0.5 rounded-xs uppercase border ${
+                      activeTaskModal.taskType === 'kelompok'
+                        ? 'bg-indigo-50 dark:bg-indigo-950/60 text-indigo-700 dark:text-indigo-300 border-indigo-200 dark:border-indigo-500/40'
+                        : 'bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 border-slate-200 dark:border-slate-700'
+                    }`}
+                  >
+                    {activeTaskModal.taskType === 'kelompok' ? 'TUGAS KELOMPOK' : 'TUGAS INDIVIDU'}
+                  </span>
+                </div>
                 <p className="text-slate-700 dark:text-slate-300 text-[11px] leading-relaxed">
                   {activeTaskModal.note}
                 </p>
+                {activeTaskModal.attachmentUrl && getSafeHttpFileUrl(activeTaskModal.attachmentUrl) && (
+                  <a
+                    href={getSafeHttpFileUrl(activeTaskModal.attachmentUrl)}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    download={activeTaskModal.attachmentName || undefined}
+                    className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-[#f59e0b]/40 text-[11px] font-mono font-bold text-amber-800 dark:text-[#f59e0b] hover:underline"
+                  >
+                    <Paperclip className="w-3.5 h-3.5" />
+                    <span>{activeTaskModal.attachmentName || 'Unduh Lampiran Instruksi'}</span>
+                  </a>
+                )}
                 <div className="flex items-center justify-between text-[10px] font-mono text-slate-500 dark:text-slate-400 pt-1 border-t border-slate-200 dark:border-[#192433]">
                   <span>Maks: {activeTaskModal.maxSize}</span>
                   <span className="text-amber-600 dark:text-[#f59e0b]">
@@ -6227,7 +6715,46 @@ export default function ClassDetailView({
                 </div>
               )}
 
-              {isEducatorOrAdmin && !isActiveTaskGraded && (
+              {activeTaskModal.taskType === 'kelompok' && (
+                <div className="p-3 bg-indigo-50/60 dark:bg-indigo-950/20 rounded-lg border border-indigo-200 dark:border-indigo-500/40 space-y-2.5">
+                  <div>
+                    <label className="block text-[11px] font-mono font-bold text-indigo-900 dark:text-indigo-200 mb-1 uppercase">
+                      {language === 'en' ? 'GROUP NAME' : 'NAMA KELOMPOK'}
+                    </label>
+                    <input
+                      type="text"
+                      required={!isActiveTaskGraded}
+                      readOnly={isActiveTaskGraded}
+                      disabled={isActiveTaskGraded}
+                      aria-label={language === 'en' ? 'Group name' : 'Nama kelompok'}
+                      value={groupNameInput}
+                      onChange={(e) => setGroupNameInput(e.target.value)}
+                      placeholder="Contoh: Kelompok 03 — Sistem Terdistribusi"
+                      className="w-full p-2 bg-white dark:bg-[#070b12] border border-indigo-300 dark:border-indigo-700 rounded-md text-xs text-slate-900 dark:text-slate-100 disabled:opacity-70"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[11px] font-mono font-bold text-indigo-900 dark:text-indigo-200 mb-1 uppercase">
+                      {language === 'en'
+                        ? 'GROUP MEMBERS (NAME / STUDENT ID)'
+                        : 'DAFTAR ANGGOTA KELOMPOK (NAMA / NIM)'}
+                    </label>
+                    <textarea
+                      rows="2"
+                      required={!isActiveTaskGraded}
+                      readOnly={isActiveTaskGraded}
+                      disabled={isActiveTaskGraded}
+                      aria-label={language === 'en' ? 'Group members list' : 'Daftar anggota kelompok'}
+                      value={groupMembersInput}
+                      onChange={(e) => setGroupMembersInput(e.target.value)}
+                      placeholder="Andi Pratama (23051204001), Budi Santoso (23051204002)"
+                      className="w-full p-2 bg-white dark:bg-[#070b12] border border-indigo-300 dark:border-indigo-700 rounded-md text-xs text-slate-900 dark:text-slate-100 disabled:opacity-70"
+                    />
+                  </div>
+                </div>
+              )}
+
+              {!isActiveTaskGraded && (
                 <div>
                   <label className="block text-[11px] font-mono font-bold text-slate-700 dark:text-slate-300 mb-1.5 uppercase">
                     UNGGAH DOKUMEN VIA CLOUDINARY
@@ -6235,7 +6762,8 @@ export default function ClassDetailView({
                   <div className="border-2 border-dashed border-slate-300 dark:border-slate-700 hover:border-[#f59e0b] rounded-xl p-4 text-center bg-slate-50 dark:bg-[#0d121a] transition cursor-pointer relative group">
                     <input
                       type="file"
-                      accept={activeTaskModal.allowedFormats}
+                      aria-label={language === 'en' ? 'Upload assignment submission file' : 'Unggah berkas pengumpulan tugas'}
+                      accept={isEducatorOrAdmin ? MATERIAL_ALLOWED_ACCEPT : SUBMISSION_ALLOWED_ACCEPT}
                       onChange={(e) => {
                         const f = e.target.files?.[0];
                         if (f) setUploadedFile(f);
@@ -6244,12 +6772,12 @@ export default function ClassDetailView({
                     />
                     <FileUp className="w-7 h-7 text-[#f59e0b] mx-auto mb-1.5 group-hover:scale-110 transition-transform" />
                     <p className="text-xs font-bold text-slate-800 dark:text-slate-200">
-                      {uploadedFile ? uploadedFile.name : 'Klik atau seret file PDF / ZIP ke sini'}
+                      {uploadedFile ? uploadedFile.name : 'Klik atau seret file PDF / DOCX / ZIP / Gambar ke sini'}
                     </p>
                     <p className="text-[10px] text-slate-500 dark:text-slate-400 mt-1 font-mono">
                       {uploadedFile
-                        ? `Ukuran: ${(uploadedFile.size / (1024 * 1024)).toFixed(2)} MB • Siap diunggah`
-                        : `Maksimal ukuran file: ${activeTaskModal.maxSize}`}
+                        ? `Ukuran: ${(uploadedFile.size / (1024 * 1024)).toFixed(2)} MB • Siap diunggah ke Cloudinary`
+                        : `Maksimal ukuran file: ${activeTaskModal.maxSize || '15 MB'}`}
                     </p>
                   </div>
                 </div>
@@ -6260,13 +6788,13 @@ export default function ClassDetailView({
                   <LinkIcon className="w-3 h-3 text-sky-600 dark:text-[#00e5ff]" />
                   <span>
                     {language === 'en'
-                      ? 'EXTERNAL SUBMISSION URL (GOOGLE DRIVE / GITHUB / ONEDRIVE / DOCS)'
-                      : 'TAUTAN URL EKSTERNAL (GOOGLE DRIVE / GITHUB / ONEDRIVE / DOCS)'}
+                      ? 'EXTERNAL SUBMISSION URL (OPTIONAL IF FILE UPLOADED)'
+                      : 'TAUTAN URL EKSTERNAL (OPSIONAL JIKA UNGGAH FILE)'}
                   </span>
                 </label>
                 <input
                   type="url"
-                  required={!isEducatorOrAdmin && !isActiveTaskGraded}
+                  required={!isActiveTaskGraded && !uploadedFile && !activeTaskModal.submittedFile?.url}
                   readOnly={isActiveTaskGraded}
                   disabled={isActiveTaskGraded}
                   value={externalUrlInput}
@@ -6274,11 +6802,11 @@ export default function ClassDetailView({
                   placeholder="https://drive.google.com/... atau https://github.com/..."
                   className="w-full p-2.5 bg-white dark:bg-[#070b12] border border-slate-300 dark:border-slate-700 rounded-md text-xs text-slate-900 dark:text-slate-100 placeholder-slate-400 dark:placeholder-slate-600 focus:outline-none focus:border-[#00e5ff] font-mono disabled:opacity-70"
                 />
-                {!isEducatorOrAdmin && !isActiveTaskGraded && (
+                {!isActiveTaskGraded && (
                   <p className="text-[10px] text-slate-500 dark:text-slate-400 mt-1">
                     {language === 'en'
-                      ? 'Share an accessible Google Drive, GitHub, OneDrive, or Google Docs link.'
-                      : 'Tempel tautan Google Drive, GitHub, OneDrive, atau Docs yang dapat diakses dosen.'}
+                      ? 'Upload directly via Cloudinary above or share a Google Drive, GitHub, OneDrive, or Docs link.'
+                      : 'Unggah berkas lewat Cloudinary di atas atau tempel tautan Google Drive, GitHub, OneDrive, atau Docs.'}
                   </p>
                 )}
               </div>
@@ -6304,6 +6832,8 @@ export default function ClassDetailView({
                   onClick={() => {
                     setActiveTaskModal(null);
                     setUploadedFile(null);
+                    setGroupNameInput('');
+                    setGroupMembersInput('');
                     setTaskFeedback(null);
                   }}
                   className="px-3 py-1.5 text-xs text-slate-500 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white transition"
@@ -6315,9 +6845,7 @@ export default function ClassDetailView({
                     type="submit"
                     disabled={
                       isUploading ||
-                      (!isEducatorOrAdmin
-                        ? !externalUrlInput.trim()
-                        : !uploadedFile && !externalUrlInput.trim())
+                      (!uploadedFile && !externalUrlInput.trim() && !activeTaskModal.submittedFile?.url)
                     }
                     className="bg-[#f59e0b] hover:bg-[#d97706] text-black text-xs font-bold px-4 py-2 rounded-sm transition flex items-center gap-1.5 uppercase shadow-md disabled:opacity-40"
                   >
@@ -6327,8 +6855,8 @@ export default function ClassDetailView({
                         ? 'Submitting...'
                         : 'Mengirim...'
                       : language === 'en'
-                        ? 'Submit Assignment Link'
-                        : 'Kirim Tautan Tugas'}
+                        ? 'Submit Assignment'
+                        : 'Kirim Pengumpulan Tugas'}
                   </button>
                 )}
               </div>

@@ -5,6 +5,7 @@ import SafeImage from './SafeImage';
 import {
   LayoutDashboard,
   BookOpen,
+  BookMarked,
   Sparkles,
   Calendar,
   FileText,
@@ -30,6 +31,8 @@ export default function Sidebar({ currentView, setCurrentView }) {
         { id: 'dashboard', label: t('sidebar_admin_dash'), icon: ShieldCheck },
         { id: 'classes-all', label: t('sidebar_manage_classes'), icon: BookOpen },
         { id: 'diskusi', label: t('sidebar_discussions'), icon: MessageSquare },
+        { id: 'manual-book', label: t('sidebar_manual_book'), icon: BookMarked },
+        { id: 'ai', label: t('sidebar_ai_admin'), icon: Sparkles, highlight: true },
         { id: 'profil', label: t('sidebar_profile'), icon: Settings },
       ];
     }
@@ -41,6 +44,7 @@ export default function Sidebar({ currentView, setCurrentView }) {
         { id: 'materi', label: t('sidebar_materials'), icon: FileText },
         { id: 'kelas', label: t('sidebar_schedule'), icon: Calendar },
         { id: 'diskusi', label: t('sidebar_discussions'), icon: MessageSquare },
+        { id: 'manual-book', label: t('sidebar_manual_book'), icon: BookMarked },
         { id: 'ai', label: t('sidebar_ai_lecturer'), icon: Sparkles, highlight: true },
         { id: 'profil', label: t('sidebar_profile'), icon: Settings },
       ];
@@ -52,6 +56,7 @@ export default function Sidebar({ currentView, setCurrentView }) {
       { id: 'kelas', label: t('sidebar_schedule'), icon: Calendar },
       { id: 'materi', label: t('sidebar_materials'), icon: FileText },
       { id: 'diskusi', label: t('sidebar_discussions'), icon: MessageSquare },
+      { id: 'manual-book', label: t('sidebar_manual_book'), icon: BookMarked },
       { id: 'ai', label: t('sidebar_ai_student'), icon: Sparkles, highlight: true },
       { id: 'profil', label: t('sidebar_profile'), icon: Settings },
     ];

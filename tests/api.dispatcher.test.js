@@ -60,7 +60,9 @@ function createMockRes() {
 describe('Backend API Dispatcher (api/index.js)', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    vi.unstubAllGlobals();
     delete process.env.GEMINI_API_KEY;
+    delete process.env.GEMINI_MODEL;
     delete process.env.CLOUDINARY_CLOUD_NAME;
     delete process.env.CLOUDINARY_API_KEY;
     delete process.env.CLOUDINARY_API_SECRET;
@@ -143,6 +145,7 @@ describe('Backend API Dispatcher (api/index.js)', () => {
   it('returns 200 OK local_frozen fallback on POST /api/ai when GEMINI_API_KEY is empty', async () => {
     mockVerifyIdToken.mockResolvedValueOnce({ uid: 'student_02', role: 'student' });
 
+    const rateLimitsDb = new Map();
     mockCollection.mockImplementation((name) => {
       if (name === 'exam_attempts') {
         return {
@@ -151,8 +154,24 @@ describe('Backend API Dispatcher (api/index.js)', () => {
           })),
         };
       }
+      if (name === 'rate_limits') {
+        return {
+          doc: vi.fn((docId) => ({ _col: 'rate_limits', id: docId })),
+        };
+      }
       return {};
     });
+    mockRunTransaction.mockImplementation(async (callback) =>
+      callback({
+        get: vi.fn(async (ref) => {
+          const existing = rateLimitsDb.get(ref.id);
+          return existing ? { exists: true, data: () => existing } : { exists: false };
+        }),
+        set: vi.fn((ref, data) => {
+          rateLimitsDb.set(ref.id, { ...(rateLimitsDb.get(ref.id) || {}), ...data });
+        }),
+      })
+    );
 
     const req = {
       method: 'POST',
@@ -168,6 +187,7 @@ describe('Backend API Dispatcher (api/index.js)', () => {
     const data = res.json();
     expect(data.mode).toBe('local_frozen');
     expect(data.is_live).toBe(false);
+    expect(data.remaining_quota).toBe(19);
     expect(data.response_text).toContain('Clean Architecture');
   });
 
@@ -1005,6 +1025,7 @@ describe('Backend API Dispatcher (api/index.js)', () => {
 
     // 4. Configured ALLOWED_ORIGINS works on 2xx (/api/ai frozen local fallback)
     mockVerifyIdToken.mockResolvedValueOnce({ uid: 'student_cors', role: 'student' });
+    const corsRateDb = new Map();
     mockCollection.mockImplementation((name) => {
       if (name === 'exam_attempts') {
         return {
@@ -1013,8 +1034,24 @@ describe('Backend API Dispatcher (api/index.js)', () => {
           })),
         };
       }
+      if (name === 'rate_limits') {
+        return {
+          doc: vi.fn((docId) => ({ _col: 'rate_limits', id: docId })),
+        };
+      }
       return {};
     });
+    mockRunTransaction.mockImplementationOnce(async (callback) =>
+      callback({
+        get: vi.fn(async (ref) => {
+          const existing = corsRateDb.get(ref.id);
+          return existing ? { exists: true, data: () => existing } : { exists: false };
+        }),
+        set: vi.fn((ref, data) => {
+          corsRateDb.set(ref.id, { ...(corsRateDb.get(ref.id) || {}), ...data });
+        }),
+      })
+    );
     const okRes = createMockRes();
     await handler(
       {
@@ -2624,5 +2661,497 @@ describe('Backend API Dispatcher (api/index.js)', () => {
         },
       })
     );
+  });
+
+  it('enforces persistent rate limiting, gemini-2.5-flash live execution with context/history, and upstream error reporting on POST /api/ai', async () => {
+    process.env.GEMINI_API_KEY = 'secret-gemini-key';
+    const rateLimitsDb = new Map();
+
+    mockCollection.mockImplementation((name) => {
+      if (name === 'exam_attempts') {
+        return {
+          where: vi.fn(() => ({
+            get: vi.fn(async () => ({ docs: [] })),
+          })),
+        };
+      }
+      if (name === 'rate_limits') {
+        return {
+          doc: vi.fn((docId) => ({ _col: 'rate_limits', id: docId })),
+        };
+      }
+      return {};
+    });
+    mockRunTransaction.mockImplementation(async (callback) =>
+      callback({
+        get: vi.fn(async (ref) => {
+          const existing = rateLimitsDb.get(ref.id);
+          return existing ? { exists: true, data: () => existing } : { exists: false };
+        }),
+        set: vi.fn((ref, data) => {
+          rateLimitsDb.set(ref.id, { ...(rateLimitsDb.get(ref.id) || {}), ...data });
+        }),
+      })
+    );
+
+    const fetchMock = vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        candidates: [{ content: { parts: [{ text: 'Penjelasan Firestore NoSQL akurat.' }] } }],
+        usageMetadata: { totalTokenCount: 210 },
+      }),
+    }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    // 1. Overly long prompt hits 400 PROMPT_TOO_LONG without invoking Gemini or burning quota
+    mockVerifyIdToken.mockResolvedValueOnce({ uid: 'uid_ai_live', role: 'student' });
+    const tooLongRes = createMockRes();
+    await handler(
+      {
+        method: 'POST',
+        url: '/api/ai',
+        headers: { authorization: 'Bearer valid-token' },
+        body: { prompt: 'x'.repeat(2005) },
+      },
+      tooLongRes
+    );
+    expect(tooLongRes.statusCode).toBe(400);
+    expect(tooLongRes.json().code).toBe('PROMPT_TOO_LONG');
+    expect(fetchMock).not.toHaveBeenCalled();
+
+    // 2. Valid live Gemini request with context & multi-turn history uses default gemini-2.5-flash
+    mockVerifyIdToken.mockResolvedValueOnce({ uid: 'uid_ai_live', role: 'student' });
+    const liveRes = createMockRes();
+    await handler(
+      {
+        method: 'POST',
+        url: '/api/ai',
+        headers: { authorization: 'Bearer valid-token' },
+        body: {
+          mode: 'learning',
+          prompt: 'Apa beda subcollection dan dokumen?',
+          context: 'Mata Kuliah: Basis Data Cloud',
+          history: [
+            { role: 'user', text: 'Halo AI' },
+            { role: 'ai', text: 'Halo! Ada yang bisa dibantu?' },
+          ],
+        },
+      },
+      liveRes
+    );
+    expect(liveRes.statusCode).toBe(200);
+    expect(liveRes.json()).toMatchObject({
+      response_text: 'Penjelasan Firestore NoSQL akurat.',
+      mode: 'gemini_live',
+      is_live: true,
+      model: 'gemini-2.5-flash',
+      tokens_consumed: 210,
+      remaining_quota: 19,
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [calledUrl, calledInit] = fetchMock.mock.calls[0];
+    expect(calledUrl).toContain('/models/gemini-2.5-flash:generateContent');
+    const parsedGeminiBody = JSON.parse(calledInit.body);
+    expect(parsedGeminiBody.systemInstruction.parts[0].text).toContain('Basis Data Cloud');
+    expect(parsedGeminiBody.contents).toHaveLength(3);
+    expect(parsedGeminiBody.contents[1]).toEqual({
+      role: 'model',
+      parts: [{ text: 'Halo! Ada yang bisa dibantu?' }],
+    });
+
+    // 3. GEMINI_MODEL env override & upstream 503 maps to 502 GEMINI_UPSTREAM_ERROR
+    process.env.GEMINI_MODEL = 'gemini-2.5-pro';
+    fetchMock.mockResolvedValueOnce({
+      ok: false,
+      status: 503,
+      text: async () => JSON.stringify({ error: { message: 'Model overloaded' } }),
+    });
+    mockVerifyIdToken.mockResolvedValueOnce({ uid: 'uid_ai_live', role: 'student' });
+    const upstreamErrRes = createMockRes();
+    await handler(
+      {
+        method: 'POST',
+        url: '/api/ai',
+        headers: { authorization: 'Bearer valid-token' },
+        body: { prompt: 'Test error upstream' },
+      },
+      upstreamErrRes
+    );
+    expect(upstreamErrRes.statusCode).toBe(502);
+    expect(upstreamErrRes.json().code).toBe('GEMINI_UPSTREAM_ERROR');
+    expect(upstreamErrRes.json().error).toContain('Model overloaded');
+    expect(fetchMock.mock.calls[1][0]).toContain('/models/gemini-2.5-pro:generateContent');
+
+    // 4. Exhausted persistent rate limit (20 requests) returns 429 RATE_LIMIT_EXCEEDED + Retry-After
+    rateLimitsDb.set('ai_uid_ai_live', {
+      count: 20,
+      windowStartMs: Date.now() - 1000,
+      resetAtMs: Date.now() + 60_000,
+    });
+    mockVerifyIdToken.mockResolvedValueOnce({ uid: 'uid_ai_live', role: 'student' });
+    const limitedRes = createMockRes();
+    await handler(
+      {
+        method: 'POST',
+        url: '/api/ai',
+        headers: { authorization: 'Bearer valid-token' },
+        body: { prompt: 'Prompt ke-21' },
+      },
+      limitedRes
+    );
+    expect(limitedRes.statusCode).toBe(429);
+    expect(limitedRes.json().code).toBe('RATE_LIMIT_EXCEEDED');
+    expect(Number(limitedRes.headers['Retry-After'])).toBeGreaterThan(0);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('allows verified student limited category submission Cloudinary sign with locked folder while rejecting unsafe files and document/image roles', async () => {
+    const { createHash } = await import('node:crypto');
+    process.env.CLOUDINARY_CLOUD_NAME = 'smartsa-cloud';
+    process.env.CLOUDINARY_API_KEY = 'cloud-key';
+    process.env.CLOUDINARY_API_SECRET = 'cloud-secret';
+
+    const rateLimitsDb = new Map();
+    mockCollection.mockImplementation((name) => {
+      if (name === 'users') {
+        return {
+          doc: vi.fn(() => ({
+            get: vi.fn(async () => ({ exists: true, data: () => ({ role: 'student' }) })),
+          })),
+        };
+      }
+      if (name === 'assignments') {
+        return {
+          doc: vi.fn((docId) => ({
+            get: vi.fn(async () =>
+              docId === 'asg_valid'
+                ? { exists: true, data: () => ({ id: 'asg_valid', classId: 'cls_sub' }) }
+                : { exists: false }
+            ),
+          })),
+        };
+      }
+      if (name === 'class_members') {
+        return {
+          doc: vi.fn((memberId) => ({
+            get: vi.fn(async () => {
+              if (memberId === 'cls_sub_uid_mhs_ok') {
+                return { exists: true, data: () => ({ classId: 'cls_sub', uid: 'uid_mhs_ok', status: 'approved' }) };
+              }
+              if (memberId === 'cls_sub_uid_mhs_pending') {
+                return { exists: true, data: () => ({ classId: 'cls_sub', uid: 'uid_mhs_pending', status: 'pending' }) };
+              }
+              return { exists: false };
+            }),
+          })),
+        };
+      }
+      if (name === 'rate_limits') {
+        return {
+          doc: vi.fn((docId) => ({ _col: 'rate_limits', id: docId })),
+        };
+      }
+      return {};
+    });
+
+    mockRunTransaction.mockImplementation(async (callback) =>
+      callback({
+        get: vi.fn(async (ref) => {
+          const existing = rateLimitsDb.get(ref.id);
+          return existing ? { exists: true, data: () => existing } : { exists: false };
+        }),
+        set: vi.fn((ref, data) => {
+          rateLimitsDb.set(ref.id, { ...(rateLimitsDb.get(ref.id) || {}), ...data });
+        }),
+      })
+    );
+
+    // 1. Student remains blocked (403 FORBIDDEN_ROLE) on category 'document' & 'image'
+    for (const forbiddenCat of ['document', 'image']) {
+      mockVerifyIdToken.mockResolvedValueOnce({ uid: 'uid_mhs_ok', role: 'student' });
+      const res = createMockRes();
+      await handler(
+        {
+          method: 'POST',
+          url: '/api/upload-sign',
+          headers: { authorization: 'Bearer valid-token' },
+          body: { category: forbiddenCat },
+        },
+        res
+      );
+      expect(res.statusCode).toBe(403);
+      expect(res.json().code).toBe('FORBIDDEN_ROLE');
+    }
+
+    // 2. Non-member or pending student gets 403 NOT_CLASS_MEMBER
+    mockVerifyIdToken.mockResolvedValueOnce({ uid: 'uid_mhs_pending', role: 'student' });
+    const pendingRes = createMockRes();
+    await handler(
+      {
+        method: 'POST',
+        url: '/api/upload-sign',
+        headers: { authorization: 'Bearer valid-token' },
+        body: {
+          category: 'submission',
+          classId: 'cls_sub',
+          assignmentId: 'asg_valid',
+          fileName: 'tugas.pdf',
+          mimeType: 'application/pdf',
+          fileSize: 2048,
+        },
+      },
+      pendingRes
+    );
+    expect(pendingRes.statusCode).toBe(403);
+    expect(pendingRes.json().code).toBe('NOT_CLASS_MEMBER');
+
+    // 3. Disallowed extension (.exe) & oversized file (>15MB) rejected cleanly
+    mockVerifyIdToken.mockResolvedValueOnce({ uid: 'uid_mhs_ok', role: 'student' });
+    const badExtRes = createMockRes();
+    await handler(
+      {
+        method: 'POST',
+        url: '/api/upload-sign',
+        headers: { authorization: 'Bearer valid-token' },
+        body: {
+          category: 'submission',
+          classId: 'cls_sub',
+          assignmentId: 'asg_valid',
+          fileName: 'payload.exe',
+          mimeType: 'application/x-msdownload',
+          fileSize: 2048,
+        },
+      },
+      badExtRes
+    );
+    expect(badExtRes.statusCode).toBe(400);
+    expect(badExtRes.json().code).toBe('INVALID_FILE_TYPE');
+
+    mockVerifyIdToken.mockResolvedValueOnce({ uid: 'uid_mhs_ok', role: 'student' });
+    const bigFileRes = createMockRes();
+    await handler(
+      {
+        method: 'POST',
+        url: '/api/upload-sign',
+        headers: { authorization: 'Bearer valid-token' },
+        body: {
+          category: 'submission',
+          classId: 'cls_sub',
+          assignmentId: 'asg_valid',
+          fileName: 'arsip.zip',
+          mimeType: 'application/zip',
+          fileSize: 20 * 1024 * 1024,
+        },
+      },
+      bigFileRes
+    );
+    expect(bigFileRes.statusCode).toBe(413);
+    expect(bigFileRes.json().code).toBe('FILE_TOO_LARGE');
+
+    // 4. Approved student with valid PDF receives folder-locked HMAC signature
+    mockVerifyIdToken.mockResolvedValueOnce({ uid: 'uid_mhs_ok', role: 'student' });
+    const okRes = createMockRes();
+    await handler(
+      {
+        method: 'POST',
+        url: '/api/upload-sign',
+        headers: { authorization: 'Bearer valid-token' },
+        body: {
+          category: 'submission',
+          classId: 'cls_sub',
+          assignmentId: 'asg_valid',
+          fileName: 'laporan_akhir.pdf',
+          mimeType: 'application/pdf',
+          fileSize: 512_000,
+        },
+      },
+      okRes
+    );
+    expect(okRes.statusCode).toBe(200);
+    const signPayload = okRes.json();
+    expect(signPayload.folder).toBe('smartsa/submissions/cls_sub/asg_valid/uid_mhs_ok');
+    const expectedSig = createHash('sha1')
+      .update(`folder=smartsa/submissions/cls_sub/asg_valid/uid_mhs_ok&timestamp=${signPayload.timestamp}cloud-secret`)
+      .digest('hex');
+    expect(signPayload.signature).toBe(expectedSig);
+
+    // 5. Rate limit after 10 requests returns 429 RATE_LIMIT_EXCEEDED
+    rateLimitsDb.set('upload_sign_submission_uid_mhs_ok', {
+      count: 10,
+      windowStartMs: Date.now() - 500,
+      resetAtMs: Date.now() + 30_000,
+    });
+    mockVerifyIdToken.mockResolvedValueOnce({ uid: 'uid_mhs_ok', role: 'student' });
+    const rateRes = createMockRes();
+    await handler(
+      {
+        method: 'POST',
+        url: '/api/upload-sign',
+        headers: { authorization: 'Bearer valid-token' },
+        body: {
+          category: 'submission',
+          classId: 'cls_sub',
+          assignmentId: 'asg_valid',
+          fileName: 'laporan_akhir.pdf',
+          mimeType: 'application/pdf',
+          fileSize: 512_000,
+        },
+      },
+      rateRes
+    );
+    expect(rateRes.statusCode).toBe(429);
+    expect(rateRes.json().code).toBe('RATE_LIMIT_EXCEEDED');
+    expect(Number(rateRes.headers['Retry-After'])).toBeGreaterThan(0);
+  });
+
+  it('persists and returns consistent pointsPerQuestion (100 / totalQuestions) across save_exam, submit, and idempotent re-submit on POST /api/grade', async () => {
+    let savedExamDoc = null;
+    let savedAttemptDoc = null;
+    let savedKeyDoc = null;
+
+    mockCollection.mockImplementation((name) => {
+      if (name === 'users') {
+        return {
+          doc: vi.fn((uid) => ({
+            get: vi.fn(async () => ({
+              exists: true,
+              data: () => ({ role: uid === 'lec_ppq' ? 'lecturer' : 'student', displayName: 'Tester PPQ' }),
+            })),
+          })),
+        };
+      }
+      if (name === 'classes') {
+        return {
+          doc: vi.fn(() => ({
+            get: vi.fn(async () => ({ exists: true, data: () => ({ id: 'cls_ppq', lecturerId: 'lec_ppq' }) })),
+          })),
+        };
+      }
+      if (name === 'class_members') {
+        return {
+          doc: vi.fn(() => ({
+            get: vi.fn(async () => ({ exists: true, data: () => ({ classId: 'cls_ppq', uid: 'mhs_ppq', status: 'approved' }) })),
+          })),
+        };
+      }
+      if (name === 'exams') {
+        return {
+          doc: vi.fn((id) => ({
+            id,
+            get: vi.fn(async () => (savedExamDoc ? { exists: true, data: () => savedExamDoc } : { exists: false })),
+          })),
+        };
+      }
+      if (name === 'exam_keys') {
+        return {
+          doc: vi.fn((id) => ({
+            id,
+            get: vi.fn(async () => (savedKeyDoc ? { exists: true, data: () => savedKeyDoc } : { exists: false })),
+          })),
+        };
+      }
+      if (name === 'exam_attempts') {
+        return {
+          doc: vi.fn((id) => ({
+            id,
+            get: vi.fn(async () => (savedAttemptDoc ? { exists: true, data: () => savedAttemptDoc } : { exists: false })),
+            set: vi.fn(async (data) => {
+              savedAttemptDoc = { ...(savedAttemptDoc || {}), ...data };
+            }),
+          })),
+        };
+      }
+      return {};
+    });
+
+    mockRunTransaction.mockImplementationOnce(async (callback) =>
+      callback({
+        get: vi.fn(async () => ({ exists: false })),
+        set: vi.fn((ref, data) => {
+          if (ref.id === 'cls_ppq_m1_pretest') savedExamDoc = data;
+          if (ref.id === 'cls_ppq') savedKeyDoc = data;
+        }),
+      })
+    );
+
+    mockVerifyIdToken.mockResolvedValueOnce({ uid: 'lec_ppq', email: 'dosen@smartsa.edu' });
+    const saveRes = createMockRes();
+    await handler(
+      {
+        method: 'POST',
+        url: '/api/grade',
+        headers: { authorization: 'Bearer valid-token' },
+        body: {
+          action: 'save_exam',
+          classId: 'cls_ppq',
+          meetingNo: 1,
+          examType: 'pretest',
+          questions: [
+            { id: 'q1', question: 'Q1?', options: ['A', 'B', 'C', 'D', 'E'] },
+            { id: 'q2', question: 'Q2?', options: ['A', 'B', 'C', 'D', 'E'] },
+            { id: 'q3', question: 'Q3?', options: ['A', 'B', 'C', 'D', 'E'] },
+          ],
+          answerKey: { q1: 0, q2: 2, q3: 4 },
+        },
+      },
+      saveRes
+    );
+    expect(saveRes.statusCode).toBe(200);
+    expect(saveRes.json()).toMatchObject({ totalQuestions: 3, pointsPerQuestion: 33.33 });
+    expect(savedExamDoc.pointsPerQuestion).toBe(33.33);
+
+    // Student submits 2 correct answers out of 3
+    mockVerifyIdToken.mockResolvedValueOnce({ uid: 'mhs_ppq', role: 'student' });
+    const submitRes = createMockRes();
+    await handler(
+      {
+        method: 'POST',
+        url: '/api/grade',
+        headers: { authorization: 'Bearer valid-token' },
+        body: {
+          action: 'submit',
+          classId: 'cls_ppq',
+          meetingNo: 1,
+          examType: 'pretest',
+          answers: { q1: 0, q2: 2, q3: 1 },
+        },
+      },
+      submitRes
+    );
+    expect(submitRes.statusCode).toBe(200);
+    expect(submitRes.json()).toMatchObject({
+      score: 67,
+      correctCount: 2,
+      totalQuestions: 3,
+      pointsPerQuestion: 33.33,
+      status: 'submitted',
+    });
+
+    // Idempotent second submit preserves pointsPerQuestion
+    mockVerifyIdToken.mockResolvedValueOnce({ uid: 'mhs_ppq', role: 'student' });
+    const idemRes = createMockRes();
+    await handler(
+      {
+        method: 'POST',
+        url: '/api/grade',
+        headers: { authorization: 'Bearer valid-token' },
+        body: {
+          action: 'submit',
+          classId: 'cls_ppq',
+          meetingNo: 1,
+          examType: 'pretest',
+          answers: { q1: 0, q2: 2, q3: 4 },
+        },
+      },
+      idemRes
+    );
+    expect(idemRes.statusCode).toBe(200);
+    expect(idemRes.json()).toMatchObject({
+      idempotent: true,
+      score: 67,
+      totalQuestions: 3,
+      pointsPerQuestion: 33.33,
+    });
   });
 });
