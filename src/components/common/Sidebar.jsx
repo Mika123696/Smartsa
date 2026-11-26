@@ -20,6 +20,10 @@ export default function Sidebar({ currentView, setCurrentView }) {
   const { role, userProfile, currentUser } = useAuth();
   const { t, getRoleLabel } = useLanguage();
 
+  if (!currentUser) {
+    return null;
+  }
+
   const getNavItems = () => {
     if (role === ROLES.ADMIN) {
       return [
@@ -54,16 +58,11 @@ export default function Sidebar({ currentView, setCurrentView }) {
   };
 
   const navItems = getNavItems();
-  const neutralRoleFallback =
-    role === ROLES.ADMIN
-      ? 'Administrator'
-      : role === ROLES.LECTURER
-        ? 'Dosen Pengajar'
-        : 'Mahasiswa';
   const displayName =
     userProfile?.displayName ||
-    currentUser?.displayName ||
-    neutralRoleFallback;
+    currentUser.displayName ||
+    currentUser.email ||
+    '';
 
   return (
     <aside className="hidden md:flex md:flex-col w-64 shrink-0 bg-white dark:bg-[#12161f] border-r border-slate-200 dark:border-[#232b38] sticky top-0 h-screen justify-between transition-colors">
@@ -78,7 +77,7 @@ export default function Sidebar({ currentView, setCurrentView }) {
               SMARTSA <span className="text-[#f59e0b]">LMS</span>
             </span>
             <span className="text-[10px] font-mono text-slate-500 dark:text-slate-400 block mt-1 truncate">
-              {currentUser ? 'CLOUD SYNC' : 'DEMO CORE'}
+              CLOUD SYNC
             </span>
           </div>
         </div>
@@ -86,7 +85,7 @@ export default function Sidebar({ currentView, setCurrentView }) {
         {/* User mini profile box */}
         <div className="p-4 border-b border-slate-200 dark:border-[#232b38] flex items-center gap-3">
           <SafeImage
-            src={userProfile?.photoURL || currentUser?.photoURL || null}
+            src={userProfile?.photoURL || currentUser.photoURL || null}
             alt={displayName}
             fallbackLabel={displayName}
             variant="avatar"
@@ -96,13 +95,15 @@ export default function Sidebar({ currentView, setCurrentView }) {
             <p className="text-xs font-bold text-slate-900 dark:text-white truncate">
               {displayName}
             </p>
-            <span
-              className={`inline-block text-[10px] font-semibold px-2 py-0.5 rounded-md border mt-0.5 ${
-                ROLE_BADGE_COLORS[role] || 'bg-slate-100 text-slate-700 border-slate-200'
-              }`}
-            >
-              {getRoleLabel(role)}
-            </span>
+            {role && (
+              <span
+                className={`inline-block text-[10px] font-semibold px-2 py-0.5 rounded-md border mt-0.5 ${
+                  ROLE_BADGE_COLORS[role] || 'bg-slate-100 text-slate-700 border-slate-200'
+                }`}
+              >
+                {getRoleLabel(role)}
+              </span>
+            )}
           </div>
         </div>
 

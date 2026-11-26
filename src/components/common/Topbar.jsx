@@ -16,7 +16,7 @@ import {
 } from 'lucide-react';
 
 export default function Topbar({ currentView, onQuickAction, onOpenAuth }) {
-  const { role, isDemoMode, currentUser } = useAuth();
+  const { role, currentUser } = useAuth();
   const { theme, toggleTheme } = useTheme();
   const { t, language, setLanguage } = useLanguage();
   const [notifOpen, setNotifOpen] = useState(false);
@@ -58,7 +58,7 @@ export default function Topbar({ currentView, onQuickAction, onOpenAuth }) {
       {/* Right Controls */}
       <div className="flex items-center gap-2.5">
         {/* Quick Action Button */}
-        {role === ROLES.STUDENT ? (
+        {currentUser && role === ROLES.STUDENT ? (
           <button
             type="button"
             onClick={onQuickAction}
@@ -67,7 +67,7 @@ export default function Topbar({ currentView, onQuickAction, onOpenAuth }) {
             <Plus className="w-3.5 h-3.5" />
             <span>{t('topbar_join_class')}</span>
           </button>
-        ) : role === ROLES.ADMIN ? (
+        ) : currentUser && role === ROLES.ADMIN ? (
           <button
             type="button"
             onClick={onQuickAction}
@@ -76,7 +76,7 @@ export default function Topbar({ currentView, onQuickAction, onOpenAuth }) {
             <ShieldCheck className="w-3.5 h-3.5" />
             <span>{t('topbar_admin_panel')}</span>
           </button>
-        ) : (
+        ) : currentUser && role === ROLES.LECTURER ? (
           <button
             type="button"
             onClick={onQuickAction}
@@ -85,7 +85,7 @@ export default function Topbar({ currentView, onQuickAction, onOpenAuth }) {
             <Plus className="w-3.5 h-3.5" />
             <span>{t('topbar_create_class')}</span>
           </button>
-        )}
+        ) : null}
 
         {/* Language Toggle */}
         <button
@@ -162,7 +162,7 @@ export default function Topbar({ currentView, onQuickAction, onOpenAuth }) {
           )}
         </div>
 
-        {/* Auth / Demo Pill */}
+        {/* Auth Pill */}
         {!currentUser && onOpenAuth ? (
           <button
             type="button"
@@ -172,10 +172,6 @@ export default function Topbar({ currentView, onQuickAction, onOpenAuth }) {
             <LogIn className="w-3.5 h-3.5" />
             <span>{t('tab_login')}</span>
           </button>
-        ) : isDemoMode ? (
-          <span className="hidden xl:inline-flex items-center text-[11px] font-semibold text-amber-700 dark:text-amber-300 bg-amber-50 dark:bg-amber-950/50 border border-amber-200 dark:border-amber-500/40 px-2.5 py-1 rounded-full">
-            {t('topbar_demo_active')}
-          </span>
         ) : null}
       </div>
     </header>

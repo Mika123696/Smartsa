@@ -69,6 +69,7 @@ vi.mock('firebase/firestore', () => ({
 }));
 
 import DeltaContentRenderer from '../src/components/common/DeltaContentRenderer';
+import App from '../src/App';
 import SafeImage from '../src/components/common/SafeImage';
 import Navbar from '../src/components/common/Navbar';
 import { ThemeProvider } from '../src/context/ThemeContext';
@@ -110,6 +111,10 @@ describe('Frontend Security & UI Components', () => {
     localStorage.clear();
     sessionStorage.clear();
     clearDemoAttendanceStore();
+    if (typeof window !== 'undefined') {
+      window.history.replaceState(null, '', '/');
+      window.scrollTo = vi.fn();
+    }
     mockCollection.mockImplementation((_db, col) => ({ col }));
     mockGetDocs.mockResolvedValue({ docs: [] });
     mockQuery.mockImplementation((...args) => ({ type: 'query', args }));
@@ -1732,5 +1737,212 @@ describe('Frontend Security & UI Components', () => {
     expect(uploadResult.requiresExternalUrl).toBe(true);
     expect(uploadResult.storageType).toBe('external_url_required');
     expect(uploadResult.note).toMatch(/Dosen\/Admin/i);
+  });
+
+  it('enforces Strict Auth Guard on #dashboard, #detail, and Landing CTAs/cards without fake identities when Firebase session is null', async () => {
+    // 1. Direct visit to #dashboard with null Firebase session redirects to #landing and opens AuthModal
+    window.location.hash = '#dashboard';
+    mockAuthObj.currentUser = null;
+    mockOnAuthStateChanged.mockImplementation((_auth, cb) => {
+      void cb(null);
+      return () => {};
+    });
+
+    const { unmount } = render(<App />);
+
+    await waitFor(() => {
+      expect(window.location.hash).toBe('#landing');
+      expect(screen.getByText(/Masuk ke Smartsa LMS/i)).toBeInTheDocument();
+    });
+
+    expect(screen.queryByText(/Pengguna Smartsa/i)).toBeNull();
+    expect(screen.queryByText(/DEMO CORE/i)).toBeNull();
+    expect(screen.queryByText(/MODE DEMO/i)).toBeNull();
+    expect(screen.queryByText(/Semester Aktif/i)).toBeNull();
+    expect(screen.queryByRole('button', { name: /Buka Dashboard/i })).toBeNull();
+    unmount();
+
+    // 2. Direct visit to #detail with null Firebase session redirects to #landing and opens AuthModal
+    window.location.hash = '#detail';
+    const detailMount = render(<App />);
+
+    await waitFor(() => {
+      expect(window.location.hash).toBe('#landing');
+      expect(screen.getByText(/Masuk ke Smartsa LMS/i)).toBeInTheDocument();
+    });
+    expect(screen.queryByText(/Belum Ada Kelas Dipilih/i)).toBeNull();
+    detailMount.unmount();
+
+    // 3. Landing "Jelajahi Dashboard LMS" and public course cards open AuthModal without entering dashboard/#detail
+    window.location.hash = '#landing';
+    mockGetDocs.mockResolvedValue({
+      docs: [
+        {
+          id: 'cls_pub_1',
+          data: () => ({
+            id: 'cls_pub_1',
+            name: 'Pemrograman Web Publik',
+            title: 'Pemrograman Web Publik',
+            code: 'PW101',
+            category: 'Teknologi Informasi',
+            instructor: 'Dr. Publik',
+            isPublic: true,
+            lecturerId: 'lec_1',
+            meetings: [],
+          }),
+        },
+      ],
+    });
+
+    render(<App />);
+
+    await waitFor(() => {
+      expect(screen.getByText('Pemrograman Web Publik')).toBeInTheDocument();
+    });
+    expect(screen.queryByRole('button', { name: /Buka Dashboard/i })).toBeNull();
+
+    fireEvent.click(screen.getByRole('button', { name: /Jelajahi Dashboard LMS/i }));
+    await waitFor(() => {
+      expect(screen.getByText(/Masuk ke Smartsa LMS/i)).toBeInTheDocument();
+    });
+    expect(window.location.hash).toBe('#landing');
+    expect(screen.queryByText(/Semester Aktif/i)).toBeNull();
+
+    // Close modal and click a public course card -> still triggers AuthModal instead of #detail preview
+    fireEvent.click(screen.getByRole('button', { name: /Tutup modal autentikasi/i }));
+    expect(screen.queryByText(/Masuk ke Smartsa LMS/i)).toBeNull();
+
+    fireEvent.click(screen.getByText('Pemrograman Web Publik'));
+    await waitFor(() => {
+      expect(screen.getByText(/Masuk ke Smartsa LMS/i)).toBeInTheDocument();
+    });
+    expect(window.location.hash).toBe('#landing');
+  });
+
+  it('holds rendering and avoids premature #dashboard redirect/AuthModal while Firebase auth state is loading', async () => {
+    window.location.hash = '#dashboard';
+    let emitAuth = null;
+    mockOnAuthStateChanged.mockImplementation((_auth, cb) => {
+      emitAuth = cb;
+      return () => {};
+    });
+
+    render(<App />);
+
+    expect(screen.getByText(/SMARTSA LMS \/\/ INITIALIZING/i)).toBeInTheDocument();
+    expect(window.location.hash).toBe('#dashboard');
+    expect(screen.queryByText(/Masuk ke Smartsa LMS/i)).toBeNull();
+    expect(screen.queryByText(/Semester Aktif/i)).toBeNull();
+
+    // Resolve Firebase session with a valid authenticated user -> opens Dashboard directly without landing bounce
+    const authedUser = {
+      uid: 'uid_auth_reload',
+      email: 'siti@kampus.ac.id',
+      displayName: 'Siti Mahasiswa',
+      emailVerified: true,
+    };
+    mockAuthObj.currentUser = authedUser;
+    mockGetDoc.mockImplementation(async (ref) => {
+      if (ref?.path === 'users/uid_auth_reload') {
+        return {
+          exists: () => true,
+          data: () => ({
+            uid: 'uid_auth_reload',
+            email: 'siti@kampus.ac.id',
+            displayName: 'Siti Mahasiswa',
+            role: 'student',
+            nim: '25050974999',
+          }),
+        };
+      }
+      return { exists: () => false };
+    });
+
+    await act(async () => {
+      await emitAuth(authedUser);
+    });
+
+    await waitFor(() => {
+      expect(screen.getByText('SITI MAHASISWA')).toBeInTheDocument();
+      expect(screen.getByText('Siti Mahasiswa')).toBeInTheDocument();
+    });
+    expect(window.location.hash).toBe('#dashboard');
+    expect(screen.queryByText(/Masuk ke Smartsa LMS/i)).toBeNull();
+  });
+
+  it('ignores legacy localStorage auth cache when Firebase session is null and renders active account controls in Navbar when signed in', async () => {
+    // Seed legacy localStorage keys that older builds used
+    localStorage.setItem(
+      'smartsa_active_profile',
+      JSON.stringify({
+        uid: 'legacy_spoof',
+        email: 'hacker@smartsa.edu',
+        role: 'admin',
+        displayName: 'Fake Stored Admin',
+      })
+    );
+    localStorage.setItem('smartsa_registered_accounts', JSON.stringify([{ email: 'hacker@smartsa.edu' }]));
+    localStorage.setItem('smartsa_user', 'FakeUser');
+    localStorage.setItem('smartsa_role', 'admin');
+
+    window.location.hash = '#dashboard';
+    mockAuthObj.currentUser = null;
+    mockOnAuthStateChanged.mockImplementation((_auth, cb) => {
+      void cb(null);
+      return () => {};
+    });
+
+    const { unmount } = render(<App />);
+
+    await waitFor(() => {
+      expect(window.location.hash).toBe('#landing');
+      expect(screen.getByText(/Masuk ke Smartsa LMS/i)).toBeInTheDocument();
+    });
+
+    expect(screen.queryByText(/Fake Stored Admin/i)).toBeNull();
+    expect(localStorage.getItem('smartsa_active_profile')).toBeNull();
+    expect(localStorage.getItem('smartsa_registered_accounts')).toBeNull();
+    expect(localStorage.getItem('smartsa_user')).toBeNull();
+    expect(localStorage.getItem('smartsa_role')).toBeNull();
+    unmount();
+
+    // Authenticated Navbar renders active account indicator + Buka Dashboard + Keluar instead of Masuk / Daftar
+    const signedInUser = {
+      uid: 'uid_nav_user',
+      email: 'budi@kampus.ac.id',
+      displayName: 'Budi Terautentikasi',
+      emailVerified: true,
+    };
+    mockAuthObj.currentUser = signedInUser;
+    mockGetDoc.mockResolvedValue({
+      exists: () => true,
+      data: () => ({
+        uid: 'uid_nav_user',
+        email: 'budi@kampus.ac.id',
+        displayName: 'Budi Terautentikasi',
+        role: 'student',
+      }),
+    });
+    mockOnAuthStateChanged.mockImplementation((_auth, cb) => {
+      void cb(signedInUser);
+      return () => {};
+    });
+
+    render(
+      <ThemeProvider>
+        <LanguageProvider>
+          <AuthProvider>
+            <Navbar activeTab="landing" setActiveTab={vi.fn()} onOpenAuth={vi.fn()} />
+          </AuthProvider>
+        </LanguageProvider>
+      </ThemeProvider>
+    );
+
+    await waitFor(() => {
+      expect(screen.getByText('Budi Terautentikasi')).toBeInTheDocument();
+    });
+    expect(screen.getByRole('button', { name: /Buka Dashboard/i })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Keluar/i })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Masuk \/ Daftar/i })).toBeNull();
   });
 });

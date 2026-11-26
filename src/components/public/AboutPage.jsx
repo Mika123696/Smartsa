@@ -1,4 +1,5 @@
 import { useLanguage } from '../../context/useLanguage';
+import { useAuth } from '../../context/useAuth';
 import {
   GraduationCap,
   ShieldCheck,
@@ -9,8 +10,9 @@ import {
   ArrowRight,
 } from 'lucide-react';
 
-export default function AboutPage({ onGoToDashboard }) {
+export default function AboutPage({ onGoToDashboard, onOpenAuth }) {
   const { t, language } = useLanguage();
+  const { currentUser } = useAuth();
 
   return (
     <div className="max-w-5xl mx-auto px-4 sm:px-6 lg:px-8 py-12 space-y-12">
@@ -111,10 +113,16 @@ export default function AboutPage({ onGoToDashboard }) {
         <div className="pt-4">
           <button
             type="button"
-            onClick={onGoToDashboard}
+            onClick={() => {
+              if (!currentUser) {
+                onOpenAuth?.();
+                return;
+              }
+              onGoToDashboard?.();
+            }}
             className="bg-blue-600 hover:bg-blue-500 text-white text-xs font-semibold px-5 py-2.5 rounded-xl transition inline-flex items-center gap-2"
           >
-            <span>{t('nav_open_dashboard')}</span>
+            <span>{currentUser ? t('nav_open_dashboard') : t('public_login_btn')}</span>
             <ArrowRight className="w-4 h-4" />
           </button>
         </div>

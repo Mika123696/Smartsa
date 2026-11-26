@@ -1,11 +1,13 @@
 import { useState, useEffect, useMemo } from 'react';
 import { Search, Users } from 'lucide-react';
 import { useLanguage } from '../../context/useLanguage';
+import { useAuth } from '../../context/useAuth';
 import { fetchPublicClasses } from '../../services/lmsFirestoreService';
 import SafeImage from '../common/SafeImage';
 
-export default function PublicCatalog({ onSelectClass }) {
+export default function PublicCatalog({ onSelectClass, onOpenAuth }) {
   const { t, language } = useLanguage();
+  const { currentUser } = useAuth();
   const [classes, setClasses] = useState([]);
   const [loading, setLoading] = useState(true);
   const [searchTerm, setSearchTerm] = useState('');
@@ -104,7 +106,13 @@ export default function PublicCatalog({ onSelectClass }) {
             <button
               key={cls.id}
               type="button"
-              onClick={() => onSelectClass(cls)}
+              onClick={() => {
+                if (!currentUser) {
+                  onOpenAuth?.();
+                  return;
+                }
+                onSelectClass?.(cls);
+              }}
               className="text-left bg-white dark:bg-[#121822] border border-slate-200 dark:border-[#232f42] rounded-2xl overflow-hidden shadow-xs hover:shadow-md transition cursor-pointer flex flex-col justify-between group"
             >
               <div className="relative h-40 w-full overflow-hidden">

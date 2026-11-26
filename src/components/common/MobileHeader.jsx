@@ -15,7 +15,7 @@ import {
 } from 'lucide-react';
 
 export default function MobileHeader() {
-  const { role, userProfile } = useAuth();
+  const { role, userProfile, currentUser } = useAuth();
   const { t, getRoleLabel } = useLanguage();
   const { theme, toggleTheme } = useTheme();
   const [notifOpen, setNotifOpen] = useState(false);
@@ -87,19 +87,21 @@ export default function MobileHeader() {
           </button>
 
           {/* Static Authenticated Role Badge */}
-          <div
-            className={`flex items-center gap-1 text-[10px] font-mono font-bold px-2 py-1 rounded-sm border shadow-xs select-none ${roleBadgeClass}`}
-            title={`${userProfile?.displayName || getRoleLabel(role)} (${getRoleLabel(role)})`}
-          >
-            {role === ROLES.ADMIN ? (
-              <Shield className="w-3 h-3" />
-            ) : role === ROLES.LECTURER ? (
-              <GraduationCap className="w-3 h-3" />
-            ) : (
-              <ShieldCheck className="w-3 h-3" />
-            )}
-            <span className="tracking-wide uppercase">{getRoleLabel(role)}</span>
-          </div>
+          {currentUser && role && (
+            <div
+              className={`flex items-center gap-1 text-[10px] font-mono font-bold px-2 py-1 rounded-sm border shadow-xs select-none ${roleBadgeClass}`}
+              title={`${userProfile?.displayName || getRoleLabel(role)} (${getRoleLabel(role)})`}
+            >
+              {role === ROLES.ADMIN ? (
+                <Shield className="w-3 h-3" />
+              ) : role === ROLES.LECTURER ? (
+                <GraduationCap className="w-3 h-3" />
+              ) : (
+                <ShieldCheck className="w-3 h-3" />
+              )}
+              <span className="tracking-wide uppercase">{getRoleLabel(role)}</span>
+            </div>
+          )}
 
           {/* Notification Bell Button */}
           <div className="relative">

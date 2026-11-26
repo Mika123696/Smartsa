@@ -13,7 +13,7 @@ import {
 } from 'lucide-react';
 
 export default function FloatingActionButton({ onOpenAI, onOpenJoinModal }) {
-  const { role } = useAuth();
+  const { role, currentUser } = useAuth();
   const { t } = useLanguage();
   const [drawerOpen, setDrawerOpen] = useState(false);
 
@@ -25,6 +25,10 @@ export default function FloatingActionButton({ onOpenAI, onOpenJoinModal }) {
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
   }, [drawerOpen]);
+
+  if (!currentUser) {
+    return null;
+  }
 
   return (
     <>

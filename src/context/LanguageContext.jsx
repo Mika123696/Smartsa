@@ -28,7 +28,7 @@ export function LanguageProvider({ children }) {
       [ROLES.ADMIN]: 'role_admin',
     };
     const key = roleKeys[role];
-    return key ? t(key) : t('role_student');
+    return key ? t(key) : '';
   };
 
   return (

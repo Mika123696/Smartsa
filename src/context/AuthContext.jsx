@@ -21,6 +21,10 @@ import { AuthContext } from './authContextDef';
 const LEGACY_STORAGE_KEYS = [
   'smartsa_active_profile',
   'smartsa_registered_accounts',
+  'smartsa_user',
+  'smartsa_role',
+  'smartsa_demo_user',
+  'userProfile',
 ];
 
 const clearLegacyAuthStorage = () => {
@@ -175,9 +179,9 @@ async function syncProfileViaBootstrap(firebaseUser, bootstrapPayload = {}) {
 export function AuthProvider({ children }) {
   const [currentUser, setCurrentUser] = useState(null);
   const [userProfile, setUserProfile] = useState(null);
-  const [role, setRole] = useState(ROLES.STUDENT);
+  const [role, setRole] = useState(null);
   const [loading, setLoading] = useState(() => Boolean(auth));
-  const [isDemoMode, setIsDemoMode] = useState(true);
+  const [isDemoMode, setIsDemoMode] = useState(false);
   const [authError, setAuthError] = useState(null);
   const lastAuthUidRef = useRef(null);
   const authSyncSeqRef = useRef(0);
@@ -192,6 +196,7 @@ export function AuthProvider({ children }) {
     let isMounted = true;
     const unsubscribe = onAuthStateChanged(auth, async (user) => {
       const seq = ++authSyncSeqRef.current;
+      clearLegacyAuthStorage();
       if (user) {
         if (lastAuthUidRef.current !== null && lastAuthUidRef.current !== user.uid) {
           setLocalExamSession({ active: false });
@@ -211,9 +216,9 @@ export function AuthProvider({ children }) {
         setLocalExamSession({ active: false });
         clearDemoAttendanceStore();
         setCurrentUser(null);
-        setIsDemoMode(true);
+        setIsDemoMode(false);
         setUserProfile(null);
-        setRole(ROLES.STUDENT);
+        setRole(null);
       }
       if (isMounted) {
         setLoading(false);
@@ -383,9 +388,9 @@ export function AuthProvider({ children }) {
     setLocalExamSession({ active: false });
     clearDemoAttendanceStore();
     setCurrentUser(null);
-    setIsDemoMode(true);
+    setIsDemoMode(false);
     setUserProfile(null);
-    setRole(ROLES.STUDENT);
+    setRole(null);
   };
 
   // 6. Reset Kata Sandi via Email

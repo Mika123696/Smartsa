@@ -194,10 +194,26 @@ export default function StudentDashboard({ onNavigateTab, onSelectActivity }) {
     return 'Selamat Malam';
   };
 
+  if (!currentUser) {
+    return (
+      <div className="bg-white dark:bg-[#121822] p-8 rounded-2xl border border-slate-200 dark:border-[#232f42] text-center space-y-2 shadow-xs">
+        <h2 className="text-base font-bold text-slate-900 dark:text-slate-100">
+          {language === 'en' ? 'Authentication Required' : 'Autentikasi Diperlukan'}
+        </h2>
+        <p className="text-xs text-slate-500 dark:text-slate-400">
+          {language === 'en'
+            ? 'Please sign in with your registered account to access the LMS Dashboard.'
+            : 'Silakan masuk dengan akun terdaftar untuk mengakses Dashboard LMS.'}
+        </p>
+      </div>
+    );
+  }
+
   const activeDisplayName =
     userProfile?.displayName ||
-    currentUser?.displayName ||
-    t('default_user_name');
+    currentUser.displayName ||
+    currentUser.email ||
+    '';
 
   const firstName = activeDisplayName.trim().split(' ')[0] || activeDisplayName;
   const fullName = activeDisplayName.toUpperCase();
@@ -208,13 +224,12 @@ export default function StudentDashboard({ onNavigateTab, onSelectActivity }) {
     userProfile?.nip ||
     t('not_set');
 
-  const userPhoto = userProfile?.photoURL || currentUser?.photoURL || null;
+  const userPhoto = userProfile?.photoURL || currentUser.photoURL || null;
 
   const activeInstitution =
-    userProfile?.institution ||
-    (currentUser ? 'Universitas Negeri Surabaya' : t('not_set', 'Belum diisi'));
+    userProfile?.institution || 'Universitas Negeri Surabaya';
 
-  const roleLabel = getRoleLabel(role);
+  const roleLabel = role ? getRoleLabel(role) : '';
 
   const handleOpenScanModal = async (subj) => {
     setScanModalSubject(subj);

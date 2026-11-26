@@ -6,6 +6,7 @@ import {
   HardDrive,
 } from 'lucide-react';
 import { useLanguage } from '../../context/useLanguage';
+import { useAuth } from '../../context/useAuth';
 import { fetchPublicClasses } from '../../services/lmsFirestoreService';
 import SafeImage from '../common/SafeImage';
 
@@ -16,6 +17,7 @@ export default function LandingPage({
   onSelectClass,
 }) {
   const { t, language } = useLanguage();
+  const { currentUser, userProfile } = useAuth();
   const [featuredClasses, setFeaturedClasses] = useState([]);
   const [loadingClasses, setLoadingClasses] = useState(true);
 
@@ -34,7 +36,21 @@ export default function LandingPage({
     };
   }, []);
 
-  const handleCatalogNav = onGoToCatalog || onGoToDashboard;
+  const handleCatalogNav = onGoToCatalog || onOpenAuth;
+  const handleProtectedDashboardClick = () => {
+    if (!currentUser) {
+      onOpenAuth?.();
+      return;
+    }
+    onGoToDashboard?.();
+  };
+  const handleProtectedClassClick = (cls) => {
+    if (!currentUser) {
+      onOpenAuth?.();
+      return;
+    }
+    onSelectClass?.(cls);
+  };
 
   return (
     <div className="space-y-16 pb-16">
@@ -60,19 +76,28 @@ export default function LandingPage({
           <div className="flex flex-wrap justify-center gap-4 pt-4">
             <button
               type="button"
-              onClick={onGoToDashboard}
+              onClick={handleProtectedDashboardClick}
               className="bg-[#f59e0b] hover:bg-[#d97706] text-black text-sm font-bold px-6 py-3.5 rounded-xl shadow-lg shadow-amber-500/20 transition flex items-center gap-2"
             >
               <span>{t('public_explore_dashboard')}</span>
               <ArrowRight className="w-4 h-4" />
             </button>
-            <button
-              type="button"
-              onClick={onOpenAuth}
-              className="bg-slate-800 hover:bg-slate-700 text-slate-100 border border-slate-700 text-sm font-semibold px-6 py-3.5 rounded-xl transition"
-            >
-              {t('public_login_btn')}
-            </button>
+            {currentUser ? (
+              <div className="inline-flex items-center gap-2 bg-slate-800/90 text-emerald-300 border border-emerald-500/30 text-sm font-semibold px-5 py-3.5 rounded-xl">
+                <span>
+                  {language === 'en' ? 'Signed in as' : 'Masuk sebagai'}{' '}
+                  {userProfile?.displayName || currentUser.displayName || currentUser.email}
+                </span>
+              </div>
+            ) : (
+              <button
+                type="button"
+                onClick={onOpenAuth}
+                className="bg-slate-800 hover:bg-slate-700 text-slate-100 border border-slate-700 text-sm font-semibold px-6 py-3.5 rounded-xl transition"
+              >
+                {t('public_login_btn')}
+              </button>
+            )}
           </div>
         </div>
       </section>
@@ -179,7 +204,7 @@ export default function LandingPage({
               <button
                 key={cls.id}
                 type="button"
-                onClick={() => onSelectClass(cls)}
+                onClick={() => handleProtectedClassClick(cls)}
                 className="text-left bg-white dark:bg-[#121822] border border-slate-200 dark:border-[#232f42] rounded-2xl overflow-hidden shadow-xs hover:shadow-md transition cursor-pointer flex flex-col justify-between group"
               >
                 <div className="relative h-40 w-full overflow-hidden">

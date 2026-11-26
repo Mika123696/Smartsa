@@ -77,7 +77,12 @@ function MainApp() {
   const { t, language } = useLanguage();
 
   const [explicitView, setExplicitView] = useState(() => parseViewFromHash());
-  const activeView = explicitView || (currentUser ? 'dashboard' : 'landing');
+  const rawRequestedView = explicitView;
+  const activeView = !currentUser
+    ? rawRequestedView && PUBLIC_VIEWS.includes(rawRequestedView)
+      ? rawRequestedView
+      : 'landing'
+    : rawRequestedView || 'dashboard';
   const isPublicView = PUBLIC_VIEWS.includes(activeView);
 
   const [classes, setClasses] = useState([]);
@@ -234,6 +239,16 @@ function MainApp() {
   const navigateTo = useCallback(
     (nextView, { replace = false, skipGuard = false } = {}) => {
       if (!ALL_VIEWS.includes(nextView)) return;
+
+      // Strict Auth Guard: block all LMS_VIEWS when unauthenticated
+      if (!currentUserRef.current && LMS_VIEWS.includes(nextView)) {
+        if (!PUBLIC_VIEWS.includes(activeViewRef.current)) {
+          commitNavigation('landing', { replace: true });
+        }
+        setAuthModalOpen(true);
+        return;
+      }
+
       if (nextView === activeViewRef.current) return;
 
       if (!skipGuard && isExamActiveRef.current && activeViewRef.current === 'detail') {
@@ -246,14 +261,25 @@ function MainApp() {
     [commitNavigation]
   );
 
-  // Sync auth state transitions (initial mount, sign-in redirect, sign-out reset)
+  // Sync auth state transitions (wait while loading, enforce Strict Auth Guard once resolved)
   useEffect(() => {
     if (authLoading) return;
     const currentUid = currentUser?.uid || null;
+    const requestedView = explicitView;
 
     if (prevUidRef.current === undefined) {
       prevUidRef.current = currentUid;
-      const initialView = explicitView || (currentUid ? 'dashboard' : 'landing');
+      if (!currentUid && requestedView && LMS_VIEWS.includes(requestedView)) {
+        if (typeof window !== 'undefined') {
+          window.history.replaceState({ view: 'landing' }, '', '#landing');
+        }
+        Promise.resolve().then(() => {
+          setExplicitView('landing');
+          setAuthModalOpen(true);
+        });
+        return;
+      }
+      const initialView = requestedView || (currentUid ? 'dashboard' : 'landing');
       if (typeof window !== 'undefined') {
         window.history.replaceState({ view: initialView }, '', `#${initialView}`);
       }
@@ -272,6 +298,7 @@ function MainApp() {
         setRequestedClassModal(null);
 
         if (currentUid !== null) {
+          setAuthModalOpen(false);
           if (hadPreviousUser) {
             setClasses([]);
             setJoinedClassIds(new Set());
@@ -286,20 +313,37 @@ function MainApp() {
           setJoinedClassIds(new Set());
           setMembershipsLoaded(false);
           setSelectedSubject(null);
-          if (!PUBLIC_VIEWS.includes(activeViewRef.current)) {
+          if (!PUBLIC_VIEWS.includes(activeViewRef.current) || (requestedView && LMS_VIEWS.includes(requestedView))) {
             commitNavigation('landing', { replace: true });
           }
         }
       });
       return;
     }
+
+    if (!currentUid && requestedView && LMS_VIEWS.includes(requestedView)) {
+      if (typeof window !== 'undefined') {
+        window.history.replaceState({ view: 'landing' }, '', '#landing');
+      }
+      Promise.resolve().then(() => {
+        setExplicitView('landing');
+        setAuthModalOpen(true);
+      });
+    }
   }, [authLoading, currentUser?.uid, explicitView, commitNavigation]);
 
-  // Browser back/forward popstate listener with active exam guard
+  // Browser back/forward & manual hash listener with Strict Auth Guard & active exam guard
   useEffect(() => {
     const handlePopState = () => {
       const targetView =
         parseViewFromHash() || (currentUserRef.current ? 'dashboard' : 'landing');
+
+      if (!currentUserRef.current && LMS_VIEWS.includes(targetView)) {
+        window.history.replaceState({ view: 'landing' }, '', '#landing');
+        setExplicitView('landing');
+        setAuthModalOpen(true);
+        return;
+      }
 
       if (
         isExamActiveRef.current &&
@@ -318,7 +362,11 @@ function MainApp() {
     };
 
     window.addEventListener('popstate', handlePopState);
-    return () => window.removeEventListener('popstate', handlePopState);
+    window.addEventListener('hashchange', handlePopState);
+    return () => {
+      window.removeEventListener('popstate', handlePopState);
+      window.removeEventListener('hashchange', handlePopState);
+    };
   }, []);
 
   // Warn before closing/reloading browser tab during an active exam
@@ -341,6 +389,10 @@ function MainApp() {
   };
 
   const handleSelectSubject = (subj) => {
+    if (!currentUserRef.current) {
+      setAuthModalOpen(true);
+      return;
+    }
     if (!subj?.id) return;
     const normalized = normalizeClassDoc(subj.id, subj);
     setSelectedSubject(normalized);
@@ -353,6 +405,10 @@ function MainApp() {
   };
 
   const handleSelectActivity = () => {
+    if (!currentUserRef.current) {
+      setAuthModalOpen(true);
+      return;
+    }
     if (!selectedSubject && classes.length > 0) {
       setSelectedSubject(classes[0]);
     }
@@ -360,6 +416,10 @@ function MainApp() {
   };
 
   const handleQuickAction = () => {
+    if (!currentUserRef.current) {
+      setAuthModalOpen(true);
+      return;
+    }
     if (role === ROLES.ADMIN) {
       navigateTo('dashboard');
       return;
@@ -395,6 +455,10 @@ function MainApp() {
   }, []);
 
   const handleOpenCreateClass = () => {
+    if (!currentUserRef.current) {
+      setAuthModalOpen(true);
+      return;
+    }
     setRequestedClassModal('create');
     navigateTo('classes-all');
   };
@@ -542,7 +606,7 @@ function MainApp() {
         </div>
       )}
 
-      {isPublicView ? (
+      {isPublicView || !currentUser ? (
         <div className="min-h-screen flex flex-col">
           <Navbar
             activeTab={activeView}
@@ -553,9 +617,15 @@ function MainApp() {
           <main className="flex-1">
             <Suspense fallback={<ViewFallback />}>
               {activeView === 'catalog' ? (
-                <PublicCatalog onSelectClass={handleSelectSubject} />
+                <PublicCatalog
+                  onSelectClass={handleSelectSubject}
+                  onOpenAuth={() => setAuthModalOpen(true)}
+                />
               ) : activeView === 'about' ? (
-                <AboutPage onGoToDashboard={() => navigateTo('dashboard')} />
+                <AboutPage
+                  onGoToDashboard={() => navigateTo('dashboard')}
+                  onOpenAuth={() => setAuthModalOpen(true)}
+                />
               ) : (
                 <LandingPage
                   onGoToDashboard={() => navigateTo('dashboard')}

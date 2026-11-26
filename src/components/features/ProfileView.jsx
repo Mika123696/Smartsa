@@ -14,7 +14,6 @@ import {
   User,
   GraduationCap,
   Building,
-  Sparkles,
   KeyRound,
   IdCard,
   Camera,
@@ -57,7 +56,6 @@ export default function ProfileView({ onOpenAuth }) {
     currentUser,
     role,
     logout,
-    isDemoMode,
     updateUserPhoto,
     updateUserProfileData,
   } = useAuth();
@@ -92,21 +90,38 @@ export default function ProfileView({ onOpenAuth }) {
     return () => window.removeEventListener('keydown', onKeyDown);
   }, [isPhotoModalOpen, isEditModalOpen]);
 
-  const neutralRoleFallback =
-    role === ROLES.ADMIN
-      ? 'Administrator'
-      : role === ROLES.LECTURER
-        ? 'Dosen Pengajar'
-        : 'Mahasiswa';
+  if (!currentUser) {
+    return (
+      <div className="bg-white dark:bg-[#121822] p-8 rounded-2xl border border-slate-200 dark:border-[#232f42] text-center space-y-3 shadow-xs">
+        <h2 className="text-base font-bold text-slate-900 dark:text-slate-100">
+          {language === 'en' ? 'Sign In to View Profile' : 'Masuk untuk Melihat Profil'}
+        </h2>
+        <p className="text-xs text-slate-500 dark:text-slate-400">
+          {language === 'en'
+            ? 'No active user session was found.'
+            : 'Belum ada sesi akun aktif yang terautentikasi.'}
+        </p>
+        {onOpenAuth && (
+          <button
+            type="button"
+            onClick={onOpenAuth}
+            className="bg-[#f59e0b] hover:bg-[#d97706] text-black text-xs font-bold px-4 py-2 rounded-lg transition"
+          >
+            {t('public_login_btn')}
+          </button>
+        )}
+      </div>
+    );
+  }
 
   const activeEmail =
     userProfile?.email ||
-    currentUser?.email ||
+    currentUser.email ||
     t('not_set', 'Belum diisi');
 
   const currentPhoto =
     userProfile?.photoURL ||
-    currentUser?.photoURL ||
+    currentUser.photoURL ||
     null;
 
   const activeNim =
@@ -118,12 +133,12 @@ export default function ProfileView({ onOpenAuth }) {
 
   const activeDisplayName =
     userProfile?.displayName ||
-    currentUser?.displayName ||
-    neutralRoleFallback;
+    currentUser.displayName ||
+    currentUser.email ||
+    '';
 
   const activeInstitution =
-    userProfile?.institution ||
-    (currentUser ? 'Universitas Negeri Surabaya' : t('not_set', 'Belum diisi'));
+    userProfile?.institution || 'Universitas Negeri Surabaya';
 
   const getIdLabel = () => {
     if (role === ROLES.LECTURER) return t('id_lecturer');
@@ -265,40 +280,15 @@ export default function ProfileView({ onOpenAuth }) {
             </h1>
           </div>
           <span
-            className={`text-[10px] font-mono font-bold px-2.5 py-1 rounded-sm border ${
-              isDemoMode
-                ? 'bg-amber-50 dark:bg-amber-950/40 text-amber-700 dark:text-[#f59e0b] border-amber-200 dark:border-[#f59e0b]/40'
-                : 'bg-emerald-50 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-400 border-emerald-200 dark:border-emerald-500/40'
-            }`}
+            className="text-[10px] font-mono font-bold px-2.5 py-1 rounded-sm border bg-emerald-50 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-400 border-emerald-200 dark:border-emerald-500/40"
           >
-            {isDemoMode ? t('demo_mode') : t('verified_account')}
+            {t('verified_account')}
           </span>
         </div>
         <p className="text-xs text-slate-500 dark:text-slate-400 mt-1 font-sans">
           {t('profile_subtitle')}
         </p>
       </div>
-
-      {/* Banner Rekomendasi Registrasi jika di Mode Demo */}
-      {isDemoMode && onOpenAuth && (
-        <div className="bg-white dark:bg-[#121822] p-4 rounded-xl border border-amber-300 dark:border-[#f59e0b]/40 text-xs font-mono space-y-2 relative overflow-hidden shadow-xs">
-          <div className="absolute top-0 right-0 w-24 h-24 bg-[#f59e0b]/5 rounded-bl-full pointer-events-none" />
-          <div className="flex items-center gap-2 text-amber-700 dark:text-[#f59e0b] font-bold">
-            <Sparkles className="w-4 h-4 shrink-0" />
-            <span>{t('demo_banner_title')}</span>
-          </div>
-          <p className="text-slate-600 dark:text-slate-300 text-[11px] leading-relaxed">
-            {t('demo_banner_desc')}
-          </p>
-          <button
-            type="button"
-            onClick={onOpenAuth}
-            className="w-full bg-[#f59e0b] hover:bg-[#d97706] text-black font-bold py-2 rounded-md text-xs transition uppercase tracking-wider shadow-xs"
-          >
-            {t('demo_banner_btn')}
-          </button>
-        </div>
-      )}
 
       {/* Profile Card Header dengan Tombol Ganti Foto */}
       <div className="bg-white dark:bg-[#121822] p-4 sm:p-5 rounded-xl border border-slate-200 dark:border-[#232f42] text-slate-900 dark:text-slate-100 relative shadow-xs">
@@ -635,9 +625,7 @@ export default function ProfileView({ onOpenAuth }) {
             className="w-full bg-slate-100 dark:bg-[#1c2432] hover:bg-slate-200 dark:hover:bg-[#253245] text-amber-700 dark:text-[#f59e0b] border border-amber-300 dark:border-[#f59e0b]/40 text-xs font-mono font-bold py-3 rounded-lg transition flex items-center justify-center gap-2 shadow-xs"
           >
             <User className="w-4 h-4" />
-            {isDemoMode
-              ? t('demo_banner_btn')
-              : language === 'en'
+            {language === 'en'
               ? 'SWITCH / LOG IN ANOTHER ACCOUNT'
               : 'GANTI / MASUK AKUN LAIN'}
           </button>

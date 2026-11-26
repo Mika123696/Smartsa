@@ -12,8 +12,12 @@ import { useLanguage } from '../../context/useLanguage';
 import { ROLES } from '../../constants/roles';
 
 export default function BottomNav({ activeTab, setActiveTab }) {
-  const { role } = useAuth();
+  const { role, currentUser } = useAuth();
   const { t, language } = useLanguage();
+
+  if (!currentUser) {
+    return null;
+  }
 
   const tabs =
     role === ROLES.ADMIN
