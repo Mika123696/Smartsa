@@ -13,12 +13,14 @@ import {
   onSnapshot,
   orderBy,
   query,
+  runTransaction,
   serverTimestamp,
   setDoc,
   updateDoc,
   where,
 } from 'firebase/firestore';
 import { auth, db } from '../firebase';
+import { uploadMediaFile } from './cloudinaryService';
 
 const COLOR_SCHEMES = {
   code: { bg: 'bg-blue-50/80', text: 'text-blue-600', border: 'border-blue-100' },
@@ -29,6 +31,53 @@ const COLOR_SCHEMES = {
   layers: { bg: 'bg-purple-50/80', text: 'text-purple-600', border: 'border-purple-100' },
 };
 
+/**
+ * Validasi ketat URL gambar eksternal agar hanya menerima `https://` valid atau string kosong `''`.
+ * Menolak skema berbahaya (`javascript:`, `data:`, `blob:`, `http://`, dsb.).
+ */
+export function normalizeHttpsImageUrl(rawUrl, label = 'URL gambar') {
+  if (rawUrl === undefined || rawUrl === null) return '';
+  if (typeof rawUrl !== 'string') {
+    throw new Error(`${label} harus berupa teks URL https:// atau kosong.`);
+  }
+  const trimmed = rawUrl.trim();
+  if (!trimmed) return '';
+  if (/\s|[<>]/.test(trimmed)) {
+    throw new Error(`${label} mengandung spasi atau karakter tidak valid. Hanya URL https:// yang diizinkan.`);
+  }
+  let parsed;
+  try {
+    parsed = new URL(trimmed);
+  } catch {
+    throw new Error(`${label} tidak valid. Gunakan URL gambar berawalan https://.`);
+  }
+  if (parsed.protocol !== 'https:' || !parsed.hostname) {
+    throw new Error(
+      `${label} ditolak demi keamanan. Hanya URL berawalan https:// yang diizinkan.`
+    );
+  }
+  return trimmed;
+}
+
+/**
+ * Mengunggah berkas gambar lewat Cloudinary (/api/upload-sign tipe `image`) dan memastikan
+ * hasil URL yang dikembalikan strictly menggunakan skema `https://` CDN.
+ */
+export async function uploadHttpsImageToCloudinary(file, label = 'Gambar') {
+  if (!file) {
+    throw new Error(`${label} belum dipilih.`);
+  }
+  const uploadResult = await uploadMediaFile(file, 'image');
+  if (!uploadResult?.isLive || uploadResult?.storageType !== 'cloudinary') {
+    throw new Error(
+      uploadResult?.note && uploadResult.note.includes('dibatasi')
+        ? uploadResult.note
+        : 'Unggah langsung ke Cloudinary CDN belum aktif di server (hanya URL https:// yang diizinkan untuk disimpan). Silakan tempel tautan gambar https:// secara langsung.'
+    );
+  }
+  return normalizeHttpsImageUrl(uploadResult.url, label);
+}
+
 export function normalizeClassDoc(id, data = {}) {
   const iconType = data.iconType || 'layers';
   const day = typeof data.day === 'string' ? data.day : '';
@@ -36,6 +85,14 @@ export function normalizeClassDoc(id, data = {}) {
   const title = data.title || data.name || 'Mata Kuliah Smartsa';
   const instructor = data.instructor || data.lecturer || 'Dosen Pengampu';
   const meetings = Array.isArray(data.meetings) ? data.meetings : [];
+  let coverImage = '';
+  if (typeof data.coverImage === 'string' && data.coverImage.trim()) {
+    try {
+      coverImage = normalizeHttpsImageUrl(data.coverImage, 'URL cover kelas');
+    } catch {
+      coverImage = '';
+    }
+  }
 
   return {
     id,
@@ -51,7 +108,7 @@ export function normalizeClassDoc(id, data = {}) {
     time,
     iconType,
     colorScheme: data.colorScheme || COLOR_SCHEMES[iconType] || COLOR_SCHEMES.layers,
-    coverImage: data.coverImage || '',
+    coverImage,
     enrolledCount: Number(data.enrolledCount || 0),
     maxStudents: Number(data.maxStudents || 50),
     materialsCount: Number(data.materialsCount || 0),
@@ -240,9 +297,12 @@ export async function createClassInFirestore({
   day = '',
   time = '',
   code = '',
+  coverImage = '',
 }) {
   const cleanName = String(name || '').trim();
   if (!cleanName) throw new Error('Nama kelas wajib diisi.');
+
+  const cleanCoverImage = normalizeHttpsImageUrl(coverImage, 'URL cover kelas');
 
   const cleanCode = String(code || '')
     .trim()
@@ -268,7 +328,7 @@ export async function createClassInFirestore({
     day: String(day || '').trim(),
     time: String(time || '').trim(),
     iconType: 'layers',
-    coverImage: '',
+    coverImage: cleanCoverImage,
     enrolledCount: 0,
     maxStudents: 50,
     materialsCount: 0,
@@ -566,6 +626,65 @@ export async function createAssignmentInFirestore({
   };
 }
 
+export async function updateAssignmentInFirestore(assignmentId, updates = {}) {
+  const user = auth?.currentUser;
+  if (!user || !db) {
+    throw new Error('Masuk sebagai Dosen/Admin untuk memperbarui tugas di Firestore.');
+  }
+  const cleanAssignmentId = String(assignmentId || '').trim();
+  if (!cleanAssignmentId) {
+    throw new Error('ID tugas tidak valid.');
+  }
+
+  const cleanTitle = String(updates.title || '').trim();
+  if (!cleanTitle) {
+    throw new Error('Judul tugas wajib diisi.');
+  }
+
+  const parsedMeetingNo = Number(updates.meetingNo || 1);
+  const safeMeetingNo = Math.min(32, Math.max(1, Number.isFinite(parsedMeetingNo) ? parsedMeetingNo : 1));
+  const rawDeadline = String(updates.deadline || '').trim();
+  const deadlineLabel = rawDeadline ? formatDeadlineLabel({ deadline: rawDeadline }) : 'Sesuai jadwal';
+  const cleanNote = String(updates.note || '').trim();
+
+  const patch = {
+    title: cleanTitle,
+    meetingNo: safeMeetingNo,
+    deadline: rawDeadline,
+    deadlineLabel,
+    note: cleanNote,
+    updatedBy: user.uid,
+    updatedAt: serverTimestamp(),
+  };
+
+  await updateDoc(doc(db, 'assignments', cleanAssignmentId), patch);
+
+  return {
+    id: cleanAssignmentId,
+    title: cleanTitle,
+    meetingNo: safeMeetingNo,
+    deadline: deadlineLabel,
+    deadlineLabel,
+    rawDeadline,
+    isOverdue: isDeadlineOverdue(rawDeadline),
+    note: cleanNote,
+  };
+}
+
+export async function deleteAssignmentInFirestore(assignmentId) {
+  const user = auth?.currentUser;
+  if (!user || !db) {
+    throw new Error('Masuk sebagai Dosen/Admin untuk menghapus tugas dari Firestore.');
+  }
+  const cleanAssignmentId = String(assignmentId || '').trim();
+  if (!cleanAssignmentId) {
+    throw new Error('ID tugas tidak valid.');
+  }
+
+  await deleteDoc(doc(db, 'assignments', cleanAssignmentId));
+  return { deleted: true, id: cleanAssignmentId };
+}
+
 export async function submitAssignmentToFirestore({
   assignmentId,
   classId = '',
@@ -812,6 +931,9 @@ export async function updateClassDetailsInFirestore(classId, updates = {}) {
   if (typeof updates.isPublic === 'boolean') {
     payload.isPublic = updates.isPublic;
   }
+  if ('coverImage' in updates) {
+    payload.coverImage = normalizeHttpsImageUrl(updates.coverImage, 'URL cover kelas');
+  }
 
   if (Object.keys(payload).length === 0) {
     return { classId, source: auth?.currentUser && db ? 'firestore' : 'demo' };
@@ -829,6 +951,8 @@ export async function updateClassDetailsInFirestore(classId, updates = {}) {
   return { classId, ...payload, source: 'firestore' };
 }
 
+export const updateClassInfoInFirestore = updateClassDetailsInFirestore;
+
 export async function fetchClassSubmissionsForGrading(classId) {
   if (!classId || !auth?.currentUser || !db) return [];
 
@@ -844,6 +968,7 @@ export async function fetchClassSubmissionsForGrading(classId) {
           submissionId: docSnap.id,
           assignmentId: d.assignmentId || '',
           classId: d.classId || classId,
+          meetingNo: d.meetingNo ? Number(d.meetingNo) : null,
           uid: d.uid || '',
           studentName: d.studentName || d.uid || 'Mahasiswa',
           assignment: d.assignmentTitle || d.assignmentId || 'Tugas Perkuliahan',
@@ -888,6 +1013,22 @@ export async function fetchClassExamAttempts(classId) {
   }
 }
 
+export async function fetchClassMembers(classId) {
+  if (!classId || !auth?.currentUser || !db) return [];
+
+  try {
+    const q = query(collection(db, 'class_members'), where('classId', '==', classId));
+    const snap = await getDocs(q);
+    return snap.docs.map((docSnap) => ({
+      id: docSnap.id,
+      ...docSnap.data(),
+    }));
+  } catch (err) {
+    console.warn('[lmsFirestoreService] Gagal memuat daftar anggota kelas:', err.message);
+    return [];
+  }
+}
+
 export async function fetchMeetingExam({ classId, meetingNo = 1, examType = 'pretest' } = {}) {
   const cleanClassId = String(classId || '').trim();
   const safeExamType = examType === 'posttest' ? 'posttest' : 'pretest';
@@ -908,10 +1049,19 @@ export async function fetchMeetingExam({ classId, meetingNo = 1, examType = 'pre
     }
     const data = snap.data();
     const questions = Array.isArray(data?.questions) ? data.questions : [];
+    const rawDuration = Number(data?.durationMinutes);
     return {
       exam: {
         id: snap.id,
         ...data,
+        status: ['published', 'draft', 'archived'].includes(data?.status)
+          ? data.status
+          : 'published',
+        durationMinutes:
+          Number.isInteger(rawDuration) && rawDuration >= 1 && rawDuration <= 180
+            ? rawDuration
+            : 15,
+        deadline: data?.deadline || null,
         questions,
       },
       isConfigured: questions.length > 0,
@@ -923,17 +1073,10 @@ export async function fetchMeetingExam({ classId, meetingNo = 1, examType = 'pre
   }
 }
 
-export async function saveMeetingExamByInstructor({
-  classId,
-  meetingNo = 1,
-  examType = 'pretest',
-  title = '',
-  questions = [],
-  answerKey = {},
-} = {}) {
+async function postGradeInstructorAction(bodyPayload, authErrorMessage, fallbackErrorMessage) {
   const user = auth?.currentUser;
   if (!user) {
-    throw new Error('Masuk sebagai Dosen/Admin untuk menyimpan soal dan kunci evaluasi ke server.');
+    throw new Error(authErrorMessage);
   }
 
   const token = await user.getIdToken();
@@ -943,15 +1086,7 @@ export async function saveMeetingExamByInstructor({
       'Content-Type': 'application/json',
       Authorization: `Bearer ${token}`,
     },
-    body: JSON.stringify({
-      action: 'save_exam',
-      classId,
-      meetingNo: Number(meetingNo),
-      examType: examType === 'posttest' ? 'posttest' : 'pretest',
-      title,
-      questions,
-      answerKey,
-    }),
+    body: JSON.stringify(bodyPayload),
   });
 
   const isJson = res.headers.get('content-type')?.includes('application/json');
@@ -960,9 +1095,87 @@ export async function saveMeetingExamByInstructor({
   }
   const data = await res.json();
   if (!res.ok) {
-    throw new Error(data.error || 'Gagal menyimpan soal dan kunci evaluasi ke server.');
+    throw new Error(data.error || fallbackErrorMessage);
   }
   return data;
+}
+
+export async function saveMeetingExamByInstructor({
+  classId,
+  meetingNo = 1,
+  examType = 'pretest',
+  title = '',
+  status = 'published',
+  durationMinutes = 15,
+  deadline = null,
+  questions = [],
+  answerKey = {},
+} = {}) {
+  const normalizedStatus = ['published', 'draft', 'archived'].includes(
+    String(status || '').trim().toLowerCase()
+  )
+    ? String(status).trim().toLowerCase()
+    : 'published';
+  const parsedDuration = Number(durationMinutes);
+  const normalizedDuration =
+    Number.isInteger(parsedDuration) && parsedDuration >= 1 && parsedDuration <= 180
+      ? parsedDuration
+      : 15;
+  const normalizedDeadline =
+    deadline !== undefined && deadline !== null && String(deadline).trim() !== ''
+      ? String(deadline).trim()
+      : null;
+
+  return postGradeInstructorAction(
+    {
+      action: 'save_exam',
+      classId,
+      meetingNo: Number(meetingNo),
+      examType: examType === 'posttest' ? 'posttest' : 'pretest',
+      title,
+      status: normalizedStatus,
+      durationMinutes: normalizedDuration,
+      deadline: normalizedDeadline,
+      questions,
+      answerKey,
+    },
+    'Masuk sebagai Dosen/Admin untuk menyimpan soal dan kunci evaluasi ke server.',
+    'Gagal menyimpan soal dan kunci evaluasi ke server.'
+  );
+}
+
+export async function archiveMeetingExamByInstructor({
+  classId,
+  meetingNo = 1,
+  examType = 'pretest',
+} = {}) {
+  return postGradeInstructorAction(
+    {
+      action: 'archive_exam',
+      classId,
+      meetingNo: Number(meetingNo),
+      examType: examType === 'posttest' ? 'posttest' : 'pretest',
+    },
+    'Masuk sebagai Dosen/Admin untuk mengarsipkan evaluasi.',
+    'Gagal mengarsipkan evaluasi di server.'
+  );
+}
+
+export async function deleteMeetingExamByInstructor({
+  classId,
+  meetingNo = 1,
+  examType = 'pretest',
+} = {}) {
+  return postGradeInstructorAction(
+    {
+      action: 'delete_exam',
+      classId,
+      meetingNo: Number(meetingNo),
+      examType: examType === 'posttest' ? 'posttest' : 'pretest',
+    },
+    'Masuk sebagai Dosen/Admin untuk menghapus evaluasi.',
+    'Gagal menghapus evaluasi dari server.'
+  );
 }
 
 export async function fetchInstructorAnswerKey({
@@ -1153,25 +1366,35 @@ export async function toggleVerifyDiscussionReply(discussion, replyId = null) {
 
 export async function toggleLikeDiscussion(discussion) {
   const user = auth?.currentUser;
-  if (!user || !db || !discussion?.id) return;
+  if (!user || !db || !discussion?.id) return null;
 
-  const currentLikedBy = Array.isArray(discussion.likedBy) ? discussion.likedBy : [];
-  const hasLiked = currentLikedBy.includes(user.uid);
-  const nextLikedBy = hasLiked
-    ? currentLikedBy.filter((uid) => uid !== user.uid)
-    : [...currentLikedBy, user.uid];
-  const nextLikes = Math.max(0, hasLiked ? Number(discussion.likes || 1) - 1 : Number(discussion.likes || 0) + 1);
+  const discRef = doc(db, 'discussions', discussion.id);
+  return runTransaction(db, async (tx) => {
+    const snap = await tx.get(discRef);
+    if (!snap.exists()) return null;
 
-  await updateDoc(doc(db, 'discussions', discussion.id), {
-    likes: nextLikes,
-    likedBy: nextLikedBy,
-    updatedAt: serverTimestamp(),
+    const data = snap.data() || {};
+    const currentLikedBy = Array.isArray(data.likedBy) ? data.likedBy : [];
+    const hasLiked = currentLikedBy.includes(user.uid);
+    const nextLikedBy = hasLiked
+      ? currentLikedBy.filter((uid) => uid !== user.uid)
+      : Array.from(new Set([...currentLikedBy, user.uid]));
+    const nextLikes = nextLikedBy.length;
+
+    tx.update(discRef, {
+      likes: nextLikes,
+      likedBy: nextLikedBy,
+      updatedAt: serverTimestamp(),
+    });
+
+    return { likes: nextLikes, likedBy: nextLikedBy };
   });
 }
 
 export async function addDiscussionReply(discussion, replyText, authorName) {
   const user = auth?.currentUser;
-  if (!user || !db || !discussion?.id) return;
+  const cleanText = String(replyText || '').trim();
+  if (!user || !db || !discussion?.id || !cleanText) return null;
 
   const now = new Date();
   const timeFormatted = `${now.getHours().toString().padStart(2, '0')}:${now
@@ -1180,27 +1403,128 @@ export async function addDiscussionReply(discussion, replyText, authorName) {
     .padStart(2, '0')} WIB`;
 
   const newReply = {
-    id: `rep_${Date.now()}`,
+    id: `rep_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
     authorUid: user.uid,
     author: authorName || user.displayName || 'Pengguna Smartsa',
     time: `Hari ini, ${timeFormatted}`,
-    content: String(replyText || '').trim(),
+    content: cleanText,
   };
 
-  await updateDoc(doc(db, 'discussions', discussion.id), {
-    replies: [...(discussion.replies || []), newReply],
-    updatedAt: serverTimestamp(),
+  const discRef = doc(db, 'discussions', discussion.id);
+  return runTransaction(db, async (tx) => {
+    const snap = await tx.get(discRef);
+    if (!snap.exists()) {
+      throw new Error('Topik diskusi tidak ditemukan.');
+    }
+    const existingReplies = Array.isArray(snap.data()?.replies) ? snap.data().replies : [];
+    tx.update(discRef, {
+      replies: [...existingReplies, newReply],
+      updatedAt: serverTimestamp(),
+    });
+    return newReply;
   });
 }
 
-export async function deleteDiscussionReply(discussion, replyIndex) {
+export async function updateDiscussionTopicContent(discussionId, nextContent) {
+  const user = auth?.currentUser;
+  if (!user || !db || !discussionId) {
+    throw new Error('Masuk dengan akun Firebase untuk mengubah topik diskusi.');
+  }
+  const cleanContent = String(nextContent || '').trim();
+  if (!cleanContent) {
+    throw new Error('Isi topik diskusi tidak boleh kosong.');
+  }
+
+  const discRef = doc(db, 'discussions', discussionId);
+  return runTransaction(db, async (tx) => {
+    const snap = await tx.get(discRef);
+    if (!snap.exists()) {
+      throw new Error('Topik diskusi tidak ditemukan.');
+    }
+    const data = snap.data() || {};
+    if (data.authorUid && data.authorUid !== user.uid) {
+      throw new Error('Anda hanya dapat mengedit topik diskusi milik Anda sendiri.');
+    }
+    tx.update(discRef, {
+      content: cleanContent,
+      editedAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+    });
+    return { id: discussionId, content: cleanContent };
+  });
+}
+
+export async function editDiscussionReply(discussionOrId, { replyId = null, replyIndex = null, content = '' } = {}) {
+  const user = auth?.currentUser;
+  const discussionId = typeof discussionOrId === 'string' ? discussionOrId : discussionOrId?.id;
+  if (!user || !db || !discussionId) {
+    throw new Error('Masuk dengan akun Firebase untuk mengedit balasan diskusi.');
+  }
+  const cleanContent = String(content || '').trim();
+  if (!cleanContent) {
+    throw new Error('Isi balasan tidak boleh kosong.');
+  }
+
+  const now = new Date();
+  const timeFormatted = `${now.getHours().toString().padStart(2, '0')}:${now
+    .getMinutes()
+    .toString()
+    .padStart(2, '0')} WIB`;
+
+  const discRef = doc(db, 'discussions', discussionId);
+  return runTransaction(db, async (tx) => {
+    const snap = await tx.get(discRef);
+    if (!snap.exists()) {
+      throw new Error('Topik diskusi tidak ditemukan.');
+    }
+    const existingReplies = Array.isArray(snap.data()?.replies) ? snap.data().replies : [];
+    const targetIdx = existingReplies.findIndex((r, idx) =>
+      replyId && r?.id ? r.id === replyId : idx === replyIndex
+    );
+    if (targetIdx < 0) {
+      throw new Error('Balasan yang akan diedit tidak ditemukan.');
+    }
+    const targetReply = existingReplies[targetIdx] || {};
+    if (targetReply.authorUid !== user.uid) {
+      throw new Error('Anda hanya dapat mengedit balasan atas nama akun Anda sendiri.');
+    }
+
+    const updatedReplies = existingReplies.map((r, idx) =>
+      idx === targetIdx ? { ...r, content: cleanContent, editedAt: `Diedit ${timeFormatted}` } : r
+    );
+    tx.update(discRef, {
+      replies: updatedReplies,
+      updatedAt: serverTimestamp(),
+    });
+    return updatedReplies[targetIdx];
+  });
+}
+
+export async function deleteDiscussionReply(discussion, replyIndexOrTarget) {
   const user = auth?.currentUser;
   if (!user || !db || !discussion?.id) return;
 
-  const nextReplies = (discussion.replies || []).filter((_, idx) => idx !== replyIndex);
-  await updateDoc(doc(db, 'discussions', discussion.id), {
-    replies: nextReplies,
-    updatedAt: serverTimestamp(),
+  const targetReplyId =
+    replyIndexOrTarget && typeof replyIndexOrTarget === 'object'
+      ? replyIndexOrTarget.replyId || null
+      : null;
+  const targetReplyIndex =
+    replyIndexOrTarget && typeof replyIndexOrTarget === 'object'
+      ? replyIndexOrTarget.replyIndex
+      : replyIndexOrTarget;
+
+  const discRef = doc(db, 'discussions', discussion.id);
+  await runTransaction(db, async (tx) => {
+    const snap = await tx.get(discRef);
+    if (!snap.exists()) return;
+    const existingReplies = Array.isArray(snap.data()?.replies) ? snap.data().replies : [];
+    const nextReplies = existingReplies.filter((r, idx) =>
+      targetReplyId && r?.id ? r.id !== targetReplyId : idx !== targetReplyIndex
+    );
+    tx.update(discRef, {
+      replies: nextReplies,
+      updatedAt: serverTimestamp(),
+    });
   });
 }
 

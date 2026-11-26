@@ -89,6 +89,7 @@ function MainApp() {
   const [joinedClassIds, setJoinedClassIds] = useState(() => new Set());
   const [membershipsLoaded, setMembershipsLoaded] = useState(false);
   const [selectedSubject, setSelectedSubject] = useState(null);
+  const [detailInitialTarget, setDetailInitialTarget] = useState(null);
   const [detailReturnView, setDetailReturnView] = useState('materi');
   const [requestedClassModal, setRequestedClassModal] = useState(null);
   const [authModalOpen, setAuthModalOpen] = useState(false);
@@ -395,6 +396,7 @@ function MainApp() {
     }
     if (!subj?.id) return;
     const normalized = normalizeClassDoc(subj.id, subj);
+    setDetailInitialTarget(null);
     setSelectedSubject(normalized);
     setClasses((prev) =>
       prev.some((c) => c.id === normalized.id)
@@ -404,14 +406,43 @@ function MainApp() {
     navigateTo('detail');
   };
 
-  const handleSelectActivity = () => {
+  const handleSelectActivity = (activity) => {
     if (!currentUserRef.current) {
       setAuthModalOpen(true);
       return;
     }
-    if (!selectedSubject && classes.length > 0) {
+    const targetClassId =
+      typeof activity === 'object' && activity !== null ? activity.classId || '' : '';
+    const targetMeetingNo =
+      typeof activity === 'object' && activity !== null && activity.meetingNo
+        ? Number(activity.meetingNo)
+        : null;
+    const targetExamType =
+      typeof activity === 'object' && activity !== null
+        ? activity.examType || null
+        : typeof activity === 'string'
+          ? activity
+          : null;
+
+    const matchedClass = targetClassId
+      ? classes.find((c) => c.id === targetClassId) || null
+      : null;
+
+    if (matchedClass) {
+      setSelectedSubject(matchedClass);
+    } else if (!selectedSubject && classes.length > 0) {
       setSelectedSubject(classes[0]);
     }
+
+    setDetailInitialTarget(
+      targetClassId || targetMeetingNo || targetExamType
+        ? {
+            classId: matchedClass?.id || targetClassId || '',
+            meetingNo: targetMeetingNo,
+            tab: targetExamType ? 'exam' : null,
+          }
+        : null
+    );
     navigateTo('detail');
   };
 
@@ -492,10 +523,16 @@ function MainApp() {
         );
       }
 
+      const matchesInitialTarget =
+        detailInitialTarget &&
+        (!detailInitialTarget.classId || detailInitialTarget.classId === activeClass.id);
+
       return (
         <ClassDetailView
           key={activeClass.id}
           classData={activeClass}
+          initialMeetingNo={matchesInitialTarget ? detailInitialTarget.meetingNo : null}
+          initialTab={matchesInitialTarget ? detailInitialTarget.tab : null}
           isMember={!currentUser || !membershipsLoaded ? undefined : joinedClassIds.has(activeClass.id)}
           onMembershipChanged={handleMembershipChanged}
           onClassUpdated={handleClassUpdated}

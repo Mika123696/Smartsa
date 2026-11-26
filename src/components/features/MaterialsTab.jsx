@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { useAuth } from '../../context/useAuth';
 import { useLanguage } from '../../context/useLanguage';
+import { ROLES } from '../../constants/roles';
 import {
   Code2,
   Database,
@@ -35,6 +36,7 @@ import { AccessibleDialog } from '../common/AccessibleDialog';
 export default function MaterialsTab({ onSelectSubject }) {
   const { currentUser, userProfile, role } = useAuth();
   const { t, language } = useLanguage();
+  const isEducatorOrAdmin = role === ROLES.LECTURER || role === ROLES.ADMIN;
 
   const [activeSubTab, setActiveSubTab] = useState('materi');
   const [classes, setClasses] = useState([]);
@@ -160,12 +162,33 @@ export default function MaterialsTab({ onSelectSubject }) {
   const handleSubmitAssignment = async (e) => {
     e.preventDefault();
     if (!selectedAssignment || isSubmitting) return;
+    if (typeof selectedAssignment.grade === 'number') {
+      setSubmitFeedback({
+        type: 'error',
+        text:
+          language === 'en'
+            ? 'This assignment has already been graded by the lecturer and is locked.'
+            : 'Tugas ini sudah dinilai oleh dosen dan dikunci.',
+      });
+      return;
+    }
 
     const cleanExternalUrl = externalUrlInput.trim();
     if (cleanExternalUrl && !isValidExternalUrl(cleanExternalUrl)) {
       setSubmitFeedback({
         type: 'error',
         text: 'Tautan URL eksternal tidak valid. Harus diawali https:// atau http://',
+      });
+      return;
+    }
+
+    if (!isEducatorOrAdmin && !cleanExternalUrl && !selectedAssignment.submittedFile?.url) {
+      setSubmitFeedback({
+        type: 'error',
+        text:
+          language === 'en'
+            ? 'Enter a valid external URL (Google Drive / GitHub / OneDrive / Docs) to submit.'
+            : 'Masukkan tautan URL eksternal yang valid (Google Drive / GitHub / OneDrive / Docs) terlebih dahulu!',
       });
       return;
     }
@@ -282,6 +305,18 @@ export default function MaterialsTab({ onSelectSubject }) {
   };
 
   const executeCancelSubmission = async (assignmentId) => {
+    const targetAsg = assignments.find((a) => a.id === assignmentId);
+    if (typeof targetAsg?.grade === 'number') {
+      setSubmitFeedback({
+        type: 'error',
+        text:
+          language === 'en'
+            ? 'Graded submissions cannot be withdrawn.'
+            : 'Pengumpulan yang sudah dinilai dosen tidak dapat dihapus atau dibatalkan.',
+      });
+      setCancelTargetId(null);
+      return;
+    }
     try {
       if (currentUser) {
         await cancelSubmissionInFirestore(assignmentId);
@@ -406,11 +441,22 @@ export default function MaterialsTab({ onSelectSubject }) {
           ) : (
             classes.map((subj) => {
               const Icon = getSubjectIcon(subj.iconType);
-              const totalMaterials = Math.max(0, Number(subj.materialsCount || subj.meetingsCount || 0));
-              const syncedCompleted = learningProgress.filter(
-                (p) => p.classId === subj.id && (p.materialCompleted || p.videoCompleted)
-              ).length;
-              const completed = currentUser ? syncedCompleted : Number(subj.completedCount || 0);
+              const totalMeetings =
+                Array.isArray(subj.meetings) && subj.meetings.length > 0
+                  ? subj.meetings.length
+                  : Math.max(0, Number(subj.meetingsCount || 0));
+              const completedMeetingSet = new Set();
+              learningProgress.forEach((p) => {
+                if (p.classId === subj.id && (p.materialCompleted || p.videoCompleted)) {
+                  completedMeetingSet.add(Number(p.meetingNo || 1));
+                }
+              });
+              const rawCompleted = currentUser
+                ? completedMeetingSet.size
+                : Number(subj.completedMeetings || subj.completedCount || 0);
+              const completed = totalMeetings > 0 ? Math.min(totalMeetings, rawCompleted) : 0;
+              const progressPct =
+                totalMeetings > 0 ? Math.min(100, Math.round((completed / totalMeetings) * 100)) : 0;
               return (
                 <button
                   key={subj.id}
@@ -442,15 +488,15 @@ export default function MaterialsTab({ onSelectSubject }) {
                         {subj.title}
                       </h3>
                       <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-0.5 font-sans">
-                        {totalMaterials} {language === 'en' ? 'materials' : 'materi modul'} •{' '}
-                        {completed} {language === 'en' ? 'completed' : 'selesai'}
+                        {totalMeetings} {language === 'en' ? 'meetings' : 'pertemuan'} •{' '}
+                        {completed} {language === 'en' ? 'completed' : 'selesai'} ({progressPct}%)
                       </p>
 
                       <div className="w-36 sm:w-48 bg-slate-100 dark:bg-[#1a2332] h-1.5 rounded-full overflow-hidden mt-2">
                         <div
                           className="bg-[#00897b] h-full rounded-full transition-all"
                           style={{
-                            width: `${totalMaterials > 0 ? Math.min(100, (completed / totalMaterials) * 100) : 0}%`,
+                            width: `${progressPct}%`,
                           }}
                         />
                       </div>
@@ -672,14 +718,16 @@ export default function MaterialsTab({ onSelectSubject }) {
                               <Eye className="w-3 h-3" />
                               {language === 'en' ? 'Task Details' : 'Detail Tugas'}
                             </button>
-                            <button
-                              type="button"
-                              onClick={() => setCancelTargetId(asg.id)}
-                              className="bg-rose-50 dark:bg-rose-950/40 hover:bg-rose-100 dark:hover:bg-rose-900/60 text-rose-700 dark:text-rose-300 text-[10px] font-bold px-2.5 py-1.5 rounded-sm border border-rose-200 dark:border-rose-500/40 transition flex items-center gap-1 uppercase"
-                            >
-                              <Trash2 className="w-3 h-3" />
-                              {t('task_reupload_btn')}
-                            </button>
+                            {typeof asg.grade !== 'number' && (
+                              <button
+                                type="button"
+                                onClick={() => setCancelTargetId(asg.id)}
+                                className="bg-rose-50 dark:bg-rose-950/40 hover:bg-rose-100 dark:hover:bg-rose-900/60 text-rose-700 dark:text-rose-300 text-[10px] font-bold px-2.5 py-1.5 rounded-sm border border-rose-200 dark:border-rose-500/40 transition flex items-center gap-1 uppercase"
+                              >
+                                <Trash2 className="w-3 h-3" />
+                                {t('task_reupload_btn')}
+                              </button>
+                            )}
                           </>
                         ) : (
                           <button
@@ -702,7 +750,9 @@ export default function MaterialsTab({ onSelectSubject }) {
       )}
 
       {/* TASK UPLOAD MODAL */}
-      {selectedAssignment && (
+      {selectedAssignment && (() => {
+        const isSelectedTaskGraded = typeof selectedAssignment.grade === 'number';
+        return (
         <div className="fixed inset-0 bg-black/75 backdrop-blur-xs flex items-center justify-center p-4 z-50 font-sans overflow-y-auto">
           <div
             role="dialog"
@@ -715,7 +765,11 @@ export default function MaterialsTab({ onSelectSubject }) {
             <div className="p-4 bg-slate-50 dark:bg-[#161c24] border-b border-slate-200 dark:border-slate-700 flex items-center justify-between">
               <div>
                 <span className="text-[10px] font-mono font-bold text-amber-600 dark:text-[#f59e0b] uppercase tracking-wider block">
-                  {t('task_modal_tag')}
+                  {isSelectedTaskGraded
+                    ? language === 'en'
+                      ? '// GRADED ASSIGNMENT DETAILS'
+                      : '// DETAIL TUGAS & HASIL PENILAIAN'
+                    : t('task_modal_tag')}
                 </span>
                 <h3
                   id="materials-task-modal-title"
@@ -771,54 +825,86 @@ export default function MaterialsTab({ onSelectSubject }) {
                 </div>
               </div>
 
-              <div>
-                <label className="block text-[11px] font-mono font-bold text-slate-700 dark:text-slate-300 mb-1.5 uppercase">
-                  UNGGAH BERKAS VIA CLOUDINARY ({selectedAssignment.allowedFormats})
-                </label>
-
-                <div className="border-2 border-dashed border-slate-300 dark:border-slate-700 hover:border-[#f59e0b] rounded-xl p-4 text-center bg-slate-50 dark:bg-[#0d121a] transition cursor-pointer relative group">
-                  <input
-                    type="file"
-                    accept={selectedAssignment.allowedFormats}
-                    onChange={handleFileChange}
-                    className="absolute inset-0 opacity-0 cursor-pointer w-full h-full"
-                  />
-                  <FileUp className="w-7 h-7 text-[#f59e0b] mx-auto mb-1.5 group-hover:scale-110 transition-transform" />
-                  <p className="text-xs font-bold text-slate-800 dark:text-slate-200">
-                    {selectedFile
-                      ? selectedFile.name
-                      : language === 'en'
-                      ? 'Click or drag files here'
-                      : 'Klik atau seret berkas ke sini'}
-                  </p>
-                  <p className="text-[10px] text-slate-500 dark:text-slate-400 mt-1 font-mono">
-                    {selectedFile
-                      ? `${(selectedFile.size / (1024 * 1024)).toFixed(2)} MB • Siap diunggah`
-                      : `Mendukung ${selectedAssignment.allowedFormats}`}
-                  </p>
+              {isSelectedTaskGraded && (
+                <div className="p-3 bg-indigo-50 dark:bg-indigo-950/40 rounded-lg border border-indigo-200 dark:border-indigo-500/40 text-xs font-mono space-y-1">
+                  <div className="flex items-center justify-between font-bold text-indigo-800 dark:text-indigo-200">
+                    <span>{language === 'en' ? 'GRADED SCORE (LOCKED)' : 'NILAI TUGAS (TERKUNCI)'}</span>
+                    <span>{selectedAssignment.grade} / 100</span>
+                  </div>
+                  {selectedAssignment.feedback && (
+                    <p className="text-[11px] text-indigo-700 dark:text-indigo-300">
+                      {language === 'en' ? 'Feedback:' : 'Catatan Dosen:'} {selectedAssignment.feedback}
+                    </p>
+                  )}
                 </div>
-              </div>
+              )}
+
+              {isEducatorOrAdmin && !isSelectedTaskGraded && (
+                <div>
+                  <label className="block text-[11px] font-mono font-bold text-slate-700 dark:text-slate-300 mb-1.5 uppercase">
+                    UNGGAH BERKAS VIA CLOUDINARY ({selectedAssignment.allowedFormats})
+                  </label>
+
+                  <div className="border-2 border-dashed border-slate-300 dark:border-slate-700 hover:border-[#f59e0b] rounded-xl p-4 text-center bg-slate-50 dark:bg-[#0d121a] transition cursor-pointer relative group">
+                    <input
+                      type="file"
+                      accept={selectedAssignment.allowedFormats}
+                      onChange={handleFileChange}
+                      className="absolute inset-0 opacity-0 cursor-pointer w-full h-full"
+                    />
+                    <FileUp className="w-7 h-7 text-[#f59e0b] mx-auto mb-1.5 group-hover:scale-110 transition-transform" />
+                    <p className="text-xs font-bold text-slate-800 dark:text-slate-200">
+                      {selectedFile
+                        ? selectedFile.name
+                        : language === 'en'
+                        ? 'Click or drag files here'
+                        : 'Klik atau seret berkas ke sini'}
+                    </p>
+                    <p className="text-[10px] text-slate-500 dark:text-slate-400 mt-1 font-mono">
+                      {selectedFile
+                        ? `${(selectedFile.size / (1024 * 1024)).toFixed(2)} MB • Siap diunggah`
+                        : `Mendukung ${selectedAssignment.allowedFormats}`}
+                    </p>
+                  </div>
+                </div>
+              )}
 
               <div>
                 <label className="block text-[11px] font-mono font-bold text-slate-700 dark:text-slate-300 mb-1 uppercase flex items-center gap-1">
                   <LinkIcon className="w-3 h-3 text-sky-600 dark:text-[#00e5ff]" />
-                  <span>TAUTAN URL EKSTERNAL (FALLBACK / GITHUB / GDRIVE)</span>
+                  <span>
+                    {language === 'en'
+                      ? 'EXTERNAL SUBMISSION URL (GOOGLE DRIVE / GITHUB / ONEDRIVE / DOCS)'
+                      : 'TAUTAN URL EKSTERNAL (GOOGLE DRIVE / GITHUB / ONEDRIVE / DOCS)'}
+                  </span>
                 </label>
                 <input
                   type="url"
+                  required={!isEducatorOrAdmin && !isSelectedTaskGraded}
+                  readOnly={isSelectedTaskGraded}
+                  disabled={isSelectedTaskGraded}
                   value={externalUrlInput}
                   onChange={(e) => setExternalUrlInput(e.target.value)}
                   placeholder="https://drive.google.com/... atau https://github.com/..."
-                  className="w-full p-2.5 bg-white dark:bg-[#070b12] border border-slate-300 dark:border-slate-700 rounded-md text-xs text-slate-900 dark:text-slate-100 placeholder-slate-400 dark:placeholder-slate-600 focus:outline-none focus:border-[#00e5ff] font-mono"
+                  className="w-full p-2.5 bg-white dark:bg-[#070b12] border border-slate-300 dark:border-slate-700 rounded-md text-xs text-slate-900 dark:text-slate-100 placeholder-slate-400 dark:placeholder-slate-600 focus:outline-none focus:border-[#00e5ff] font-mono disabled:opacity-70"
                 />
+                {!isEducatorOrAdmin && !isSelectedTaskGraded && (
+                  <p className="text-[10px] text-slate-500 dark:text-slate-400 mt-1">
+                    {language === 'en'
+                      ? 'Attach an accessible Google Drive, GitHub, OneDrive, or Docs link.'
+                      : 'Tempel tautan Google Drive, GitHub, OneDrive, atau Docs yang dapat diakses dosen.'}
+                  </p>
+                )}
               </div>
 
               <div>
                 <label className="block text-[11px] font-mono font-bold text-slate-700 dark:text-slate-300 mb-1 uppercase">
-                  {language === 'en' ? 'NOTES (OPTIONAL)' : 'CATATAN PENGERJAAN (OPSIONAL)'}
+                  {language === 'en' ? 'ANSWER NOTES (OPTIONAL)' : 'CATATAN JAWABAN (OPSIONAL)'}
                 </label>
                 <textarea
                   rows="2"
+                  readOnly={isSelectedTaskGraded}
+                  disabled={isSelectedTaskGraded}
                   value={notesInput}
                   onChange={(e) => setNotesInput(e.target.value)}
                   placeholder={
@@ -826,7 +912,7 @@ export default function MaterialsTab({ onSelectSubject }) {
                       ? 'Task summary or group notes...'
                       : 'Catatan kelompok atau ringkasan pengerjaan...'
                   }
-                  className="w-full p-2.5 bg-white dark:bg-[#070b12] border border-slate-300 dark:border-slate-700 rounded-md text-xs text-slate-900 dark:text-slate-100 placeholder-slate-400 dark:placeholder-slate-600 focus:outline-none focus:border-[#f59e0b]"
+                  className="w-full p-2.5 bg-white dark:bg-[#070b12] border border-slate-300 dark:border-slate-700 rounded-md text-xs text-slate-900 dark:text-slate-100 placeholder-slate-400 dark:placeholder-slate-600 focus:outline-none focus:border-[#f59e0b] disabled:opacity-70"
                 />
               </div>
 
@@ -840,28 +926,35 @@ export default function MaterialsTab({ onSelectSubject }) {
                   }}
                   className="px-3 py-1.5 text-xs text-slate-500 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white transition"
                 >
-                  {t('cancel')}
+                  {isSelectedTaskGraded ? (language === 'en' ? 'Close' : 'Tutup') : t('cancel')}
                 </button>
-                <button
-                  type="submit"
-                  disabled={
-                    isSubmitting ||
-                    (!selectedFile && !externalUrlInput.trim() && !selectedAssignment.submittedFile)
-                  }
-                  className="bg-[#f59e0b] hover:bg-[#d97706] text-black text-xs font-bold px-4 py-2 rounded-sm transition flex items-center gap-1.5 uppercase shadow-md disabled:opacity-40"
-                >
-                  <Upload className="w-3.5 h-3.5" />
-                  {isSubmitting
-                    ? language === 'en'
-                      ? 'Uploading...'
-                      : 'Mengirim...'
-                    : t('task_turn_in_btn')}
-                </button>
+                {!isSelectedTaskGraded && (
+                  <button
+                    type="submit"
+                    disabled={
+                      isSubmitting ||
+                      (!isEducatorOrAdmin
+                        ? !externalUrlInput.trim()
+                        : !selectedFile &&
+                          !externalUrlInput.trim() &&
+                          !selectedAssignment.submittedFile)
+                    }
+                    className="bg-[#f59e0b] hover:bg-[#d97706] text-black text-xs font-bold px-4 py-2 rounded-sm transition flex items-center gap-1.5 uppercase shadow-md disabled:opacity-40"
+                  >
+                    <Upload className="w-3.5 h-3.5" />
+                    {isSubmitting
+                      ? language === 'en'
+                        ? 'Submitting...'
+                        : 'Mengirim...'
+                      : t('task_turn_in_btn')}
+                  </button>
+                )}
               </div>
             </form>
           </div>
         </div>
-      )}
+        );
+      })()}
     </div>
   );
 }

@@ -93,8 +93,7 @@ const SEED_SUBJECTS = [
     category: 'Teknologi Informasi',
     description:
       'Konsep dasar OOP, Enkapsulasi, Inheritansi, Polimorfisme, dan Abstraksi dengan Java & Dart.',
-    coverImage:
-      'https://images.unsplash.com/photo-1517694712202-14dd9538aa97?auto=format&fit=crop&w=600&q=80',
+    coverImage: '',
   },
   {
     id: 'subj_bd',
@@ -107,8 +106,7 @@ const SEED_SUBJECTS = [
     category: 'Teknologi Informasi',
     description:
       'Perancangan ERD, Relational Schema, Normalisasi, SQL Lanjut, dan Pengantar NoSQL Firestore.',
-    coverImage:
-      'https://images.unsplash.com/photo-1544383835-bda2bc66a55d?auto=format&fit=crop&w=600&q=80',
+    coverImage: '',
   },
   {
     id: 'subj_pwmb',
@@ -121,8 +119,7 @@ const SEED_SUBJECTS = [
     category: 'Teknologi Informasi',
     description:
       'Pembuatan aplikasi responsif lintas platform menggunakan React, Tailwind CSS, dan Flutter.',
-    coverImage:
-      'https://images.unsplash.com/photo-1517694712202-14dd9538aa97?auto=format&fit=crop&w=600&q=80',
+    coverImage: '',
   },
   {
     id: 'subj_pda',
@@ -135,8 +132,7 @@ const SEED_SUBJECTS = [
     category: 'Ilmu Komputer',
     description:
       'Logika pemrograman terstruktur, algoritma sorting & searching, kompleksitas waktu Big-O.',
-    coverImage:
-      'https://images.unsplash.com/photo-1544383835-bda2bc66a55d?auto=format&fit=crop&w=600&q=80',
+    coverImage: '',
   },
   {
     id: 'subj_uiux',
@@ -149,8 +145,7 @@ const SEED_SUBJECTS = [
     category: 'Sistem Informasi',
     description:
       'Metodologi Design Thinking, Wireframing, Prototyping Figma, Desain Sistem, dan Usability Testing.',
-    coverImage:
-      'https://images.unsplash.com/photo-1517694712202-14dd9538aa97?auto=format&fit=crop&w=600&q=80',
+    coverImage: '',
   },
   {
     id: 'subj_ppl',
@@ -163,8 +158,7 @@ const SEED_SUBJECTS = [
     category: 'Teknologi Informasi',
     description:
       'Analisis kebutuhan sistem, UML Diagram (Use Case, Sequence, Activity), dan Software Architecture.',
-    coverImage:
-      'https://images.unsplash.com/photo-1544383835-bda2bc66a55d?auto=format&fit=crop&w=600&q=80',
+    coverImage: '',
   },
 ];
 
@@ -250,6 +244,49 @@ const SEED_ACCOUNTS = [
     nim: 'ADM-001',
     nidn: '',
     nip: 'ADM-001',
+  },
+];
+
+const DEFAULT_SEED_QUESTIONS = [
+  {
+    id: 'q1',
+    question: 'Apa tujuan utama pemisahan tanggung jawab (Separation of Concerns) dalam arsitektur aplikasi?',
+    options: [
+      'Menghilangkan kebutuhan validasi input',
+      'Memisahkan layer UI, logika bisnis, dan akses data agar mudah dirawat',
+      'Menyatukan seluruh kode ke satu file tunggal',
+      'Mengizinkan klien menyimpan kredensial admin',
+    ],
+  },
+  {
+    id: 'q2',
+    question: 'Mengapa evaluasi jawaban ujian harus dilakukan di endpoint backend terproteksi?',
+    options: [
+      'Agar kode CSS lebih ringan',
+      'Agar animasi tombol berjalan lebih cepat',
+      'Agar kunci jawaban tidak dapat dibaca atau dimodifikasi oleh browser pengguna',
+      'Agar token autentikasi tidak perlu dikirim ke server',
+    ],
+  },
+  {
+    id: 'q3',
+    question: 'Bagaimana mekanisme Cloud Firestore melindungi akses baca dokumen kelas dan submission mahasiswa?',
+    options: [
+      'Mengandalkan penyembunyian komponen React saja',
+      'Memvalidasi kepemilikan dosen dan status keanggotaan kelas di Firestore Security Rules',
+      'Mengirim seluruh database ke localStorage saat aplikasi dimuat',
+      'Menonaktifkan otentikasi pengguna',
+    ],
+  },
+  {
+    id: 'q4',
+    question: 'Apa manfaat utama mencatat progres belajar dan skor evaluasi per pertemuan secara terstruktur?',
+    options: [
+      'Membuka semua materi sekaligus tanpa syarat',
+      'Mengukur capaian belajar (Gain Δ) dari Pretest ke Post-test secara objektif',
+      'Menghapus kebutuhan peran dosen dan admin',
+      'Menghindari penggunaan basis data server',
+    ],
   },
 ];
 
@@ -383,11 +420,36 @@ async function main() {
       .set(
         {
           classId: subj.id,
+          meetings: {
+            1: DEFAULT_EXAM_KEY,
+          },
           ...DEFAULT_EXAM_KEY,
           updatedAt: FieldValue.serverTimestamp(),
         },
         { merge: true }
       );
+
+    for (const examType of ['pretest', 'posttest']) {
+      const examDocId = `${subj.id}_m1_${examType}`;
+      await db
+        .collection('exams')
+        .doc(examDocId)
+        .set(
+          {
+            examId: examDocId,
+            classId: subj.id,
+            meetingNo: 1,
+            examType,
+            title: `${examType === 'posttest' ? 'Post-test' : 'Pretest'} Pertemuan 1 — ${subj.title}`,
+            status: 'published',
+            durationMinutes: 15,
+            deadline: null,
+            questions: DEFAULT_SEED_QUESTIONS,
+            updatedAt: FieldValue.serverTimestamp(),
+          },
+          { merge: true }
+        );
+    }
   }
 
   for (const asg of SEED_ASSIGNMENTS) {

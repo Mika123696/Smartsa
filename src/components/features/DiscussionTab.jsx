@@ -6,8 +6,10 @@ import {
   fetchClassesForUser,
   subscribeDiscussions,
   createDiscussionTopic,
+  updateDiscussionTopicContent,
   toggleLikeDiscussion,
   addDiscussionReply,
+  editDiscussionReply,
   deleteDiscussionReply,
   deleteDiscussionTopic,
   toggleVerifyDiscussionReply,
@@ -20,6 +22,7 @@ import {
   Send,
   CornerDownRight,
   Trash2,
+  Edit3,
   Reply,
   AlertCircle,
   CheckCircle2,
@@ -47,6 +50,9 @@ export default function DiscussionTab({
   const [filterMeetingNo, setFilterMeetingNo] = useState('all');
   const [activeReplyId, setActiveReplyId] = useState(null);
   const [replyInputs, setReplyInputs] = useState({});
+  const [editingTopic, setEditingTopic] = useState(null);
+  const [editingReply, setEditingReply] = useState(null);
+  const [savingEdit, setSavingEdit] = useState(false);
   const [posting, setPosting] = useState(false);
   const [deleteConfirm, setDeleteConfirm] = useState(null);
   const classReqIdRef = useRef(0);
@@ -59,6 +65,8 @@ export default function DiscussionTab({
       setQuestionInput('');
       setReplyInputs({});
       setActiveReplyId(null);
+      setEditingTopic(null);
+      setEditingReply(null);
       setDeleteConfirm(null);
       setFilterMeetingNo('all');
       if (propMeetingNo) {
@@ -237,12 +245,17 @@ export default function DiscussionTab({
         setDeleteConfirm(null);
       }
     } else if (deleteConfirm.type === 'reply') {
-      const { disc, replyIndex } = deleteConfirm;
+      const { disc, replyId, replyIndex } = deleteConfirm;
       if (!currentUser) {
         setDiscussions((prev) =>
           prev.map((d) =>
             d.id === disc.id
-              ? { ...d, replies: (d.replies || []).filter((_, idx) => idx !== replyIndex) }
+              ? {
+                  ...d,
+                  replies: (d.replies || []).filter((r, idx) =>
+                    replyId && r?.id ? r.id !== replyId : idx !== replyIndex
+                  ),
+                }
               : d
           )
         );
@@ -250,12 +263,83 @@ export default function DiscussionTab({
         return;
       }
       try {
-        await deleteDiscussionReply(disc, replyIndex);
+        await deleteDiscussionReply(disc, { replyId, replyIndex });
       } catch (err) {
         setErrorMsg(err.message || 'Gagal menghapus balasan diskusi.');
       } finally {
         setDeleteConfirm(null);
       }
+    }
+  };
+
+  const handleSaveTopicEdit = async (e) => {
+    e.preventDefault();
+    if (!editingTopic || savingEdit) return;
+    const nextText = String(editingTopic.content || '').trim();
+    if (!nextText) return;
+    setErrorMsg(null);
+
+    if (!currentUser) {
+      setDiscussions((prev) =>
+        prev.map((d) => (d.id === editingTopic.id ? { ...d, content: nextText } : d))
+      );
+      setEditingTopic(null);
+      return;
+    }
+
+    setSavingEdit(true);
+    try {
+      await updateDiscussionTopicContent(editingTopic.id, nextText);
+      setEditingTopic(null);
+    } catch (err) {
+      setErrorMsg(err.message || 'Gagal memperbarui topik diskusi.');
+    } finally {
+      setSavingEdit(false);
+    }
+  };
+
+  const handleSaveReplyEdit = async (e) => {
+    e.preventDefault();
+    if (!editingReply || savingEdit) return;
+    const nextText = String(editingReply.content || '').trim();
+    if (!nextText) return;
+    setErrorMsg(null);
+
+    if (!currentUser) {
+      setDiscussions((prev) =>
+        prev.map((d) =>
+          d.id === editingReply.discId
+            ? {
+                ...d,
+                replies: (d.replies || []).map((r, idx) =>
+                  editingReply.replyId && r?.id
+                    ? r.id === editingReply.replyId
+                      ? { ...r, content: nextText }
+                      : r
+                    : idx === editingReply.replyIndex
+                      ? { ...r, content: nextText }
+                      : r
+                ),
+              }
+            : d
+        )
+      );
+      setEditingReply(null);
+      return;
+    }
+
+    setSavingEdit(true);
+    try {
+      await editDiscussionReply(editingReply.discId, {
+        replyId: editingReply.replyId,
+        replyIndex: editingReply.replyIndex,
+        content: nextText,
+      });
+      setEditingReply(null);
+    } catch (err) {
+      setErrorMsg(err.message || 'Gagal memperbarui balasan diskusi.');
+    } finally {
+      setSavingEdit(false);
     }
   };
 
@@ -504,9 +588,20 @@ export default function DiscussionTab({
             className="text-xs border border-slate-300 dark:border-slate-700 rounded-lg px-2.5 py-1.5 bg-white dark:bg-[#121822] text-slate-900 dark:text-slate-200 focus:outline-none focus:border-[#f59e0b]"
           >
             <option value="all">{language === 'en' ? 'All Meetings' : 'Semua Pertemuan'}</option>
-            {Array.from({ length: 16 }, (_, idx) => idx + 1).map((num) => (
-              <option key={num} value={String(num)}>
-                {language === 'en' ? 'Meeting' : 'Pertemuan'} {num < 10 ? `0${num}` : num}
+            {(availableMeetings.length > 0
+              ? availableMeetings.map((m) => ({
+                  order: Number(m.order || 1),
+                  label: `P${String(Number(m.order || 1)).padStart(2, '0')}: ${m.title || ''}`.trim(),
+                }))
+              : Array.from(new Set(scopedDiscussions.map((d) => Number(d.meetingNo || 1))))
+                  .sort((a, b) => a - b)
+                  .map((num) => ({
+                    order: num,
+                    label: `${language === 'en' ? 'Meeting' : 'Pertemuan'} ${String(num).padStart(2, '0')}`,
+                  }))
+            ).map((opt) => (
+              <option key={opt.order} value={String(opt.order)}>
+                {opt.label}
               </option>
             ))}
           </select>
@@ -537,6 +632,7 @@ export default function DiscussionTab({
           </div>
         ) : (
           visibleDiscussions.map((d) => {
+            const canEditTopic = !currentUser || d.authorUid === currentUser.uid;
             const canDeleteTopic = !currentUser || d.authorUid === currentUser.uid || isPrivileged;
             const hasLiked = Boolean(
               currentUser && Array.isArray(d.likedBy) && d.likedBy.includes(currentUser.uid)
@@ -589,6 +685,17 @@ export default function DiscussionTab({
                     <span className="text-[11px] text-slate-500 dark:text-slate-400 font-mono">
                       {d.time}
                     </span>
+                    {canEditTopic && (
+                      <button
+                        type="button"
+                        onClick={() => setEditingTopic({ id: d.id, content: d.content })}
+                        title={language === 'en' ? 'Edit topic' : 'Edit topik diskusi'}
+                        aria-label={language === 'en' ? 'Edit topic' : 'Edit topik diskusi'}
+                        className="p-1 text-slate-400 hover:text-amber-600 dark:hover:text-[#f59e0b] hover:bg-amber-50 dark:hover:bg-amber-950/40 rounded transition cursor-pointer"
+                      >
+                        <Edit3 className="w-3.5 h-3.5" />
+                      </button>
+                    )}
                     {canDeleteTopic && (
                       <button
                         type="button"
@@ -603,10 +710,41 @@ export default function DiscussionTab({
                   </div>
                 </div>
 
-                {/* Content */}
-                <p className="text-xs sm:text-sm text-slate-700 dark:text-slate-300 leading-relaxed pl-11">
-                  {d.content}
-                </p>
+                {/* Content or Edit Form */}
+                {editingTopic?.id === d.id ? (
+                  <form onSubmit={handleSaveTopicEdit} className="pl-11 space-y-2">
+                    <textarea
+                      rows="2"
+                      required
+                      aria-label={language === 'en' ? 'Edit topic content' : 'Ubah isi topik diskusi'}
+                      value={editingTopic.content}
+                      onChange={(e) =>
+                        setEditingTopic((prev) => ({ ...prev, content: e.target.value }))
+                      }
+                      className="w-full text-xs p-2.5 bg-slate-50 dark:bg-[#0a0f18] border border-amber-400 rounded-lg text-slate-900 dark:text-slate-100 focus:outline-none"
+                    />
+                    <div className="flex justify-end gap-2 font-mono">
+                      <button
+                        type="button"
+                        onClick={() => setEditingTopic(null)}
+                        className="px-3 py-1 text-xs text-slate-500 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white"
+                      >
+                        {language === 'en' ? 'Cancel' : 'Batal'}
+                      </button>
+                      <button
+                        type="submit"
+                        disabled={savingEdit || !editingTopic.content.trim()}
+                        className="bg-[#f59e0b] hover:bg-[#d97706] text-black text-xs font-bold px-3 py-1 rounded-md disabled:opacity-50"
+                      >
+                        {language === 'en' ? 'Save Topic' : 'Simpan Topik'}
+                      </button>
+                    </div>
+                  </form>
+                ) : (
+                  <p className="text-xs sm:text-sm text-slate-700 dark:text-slate-300 leading-relaxed pl-11">
+                    {d.content}
+                  </p>
+                )}
 
                 {/* Actions */}
                 <div className="pl-11 pt-1 flex flex-wrap items-center gap-4 text-xs text-slate-500 dark:text-slate-400 font-mono">
@@ -696,13 +834,17 @@ export default function DiscussionTab({
                 {d.replies && d.replies.length > 0 && (
                   <div className="ml-11 mt-3 pt-3 border-t border-slate-200 dark:border-[#1f2937] space-y-2.5">
                     {d.replies.map((r, rIdx) => {
+                      const canEditReply = !currentUser || r.authorUid === currentUser.uid;
                       const canDeleteReply =
-                        !currentUser ||
-                        r.authorUid === currentUser.uid ||
-                        d.authorUid === currentUser.uid ||
-                        isPrivileged;
+                        !currentUser || r.authorUid === currentUser.uid || isPrivileged;
                       const isThisReplyVerified =
                         Boolean(d.isVerifiedAnswer) && Boolean(r.id) && d.verifiedReplyId === r.id;
+                      const isEditingThisReply =
+                        editingReply?.discId === d.id &&
+                        (editingReply.replyId && r.id
+                          ? editingReply.replyId === r.id
+                          : editingReply.replyIndex === rIdx);
+
                       return (
                         <div
                           key={r.id || rIdx}
@@ -727,7 +869,7 @@ export default function DiscussionTab({
                             </div>
                             <div className="flex items-center gap-2">
                               <span className="text-[10px] text-slate-500 dark:text-slate-400 font-mono">
-                                {r.time}
+                                {r.time}{r.editedAt ? ` (${r.editedAt})` : ''}
                               </span>
                               {isPrivileged && (
                                 <button
@@ -748,11 +890,34 @@ export default function DiscussionTab({
                                     : 'Verifikasi Jawaban'}
                                 </button>
                               )}
+                              {canEditReply && (
+                                <button
+                                  type="button"
+                                  onClick={() =>
+                                    setEditingReply({
+                                      discId: d.id,
+                                      replyId: r.id || null,
+                                      replyIndex: rIdx,
+                                      content: r.content,
+                                    })
+                                  }
+                                  title={language === 'en' ? 'Edit reply' : 'Edit balasan ini'}
+                                  aria-label={language === 'en' ? 'Edit reply' : 'Edit balasan ini'}
+                                  className="text-slate-400 hover:text-amber-600 dark:hover:text-[#f59e0b] transition cursor-pointer p-0.5"
+                                >
+                                  <Edit3 className="w-3 h-3" />
+                                </button>
+                              )}
                               {canDeleteReply && (
                                 <button
                                   type="button"
                                   onClick={() =>
-                                    setDeleteConfirm({ type: 'reply', disc: d, replyIndex: rIdx })
+                                    setDeleteConfirm({
+                                      type: 'reply',
+                                      disc: d,
+                                      replyId: r.id || null,
+                                      replyIndex: rIdx,
+                                    })
                                   }
                                   title={language === 'en' ? 'Delete reply' : 'Hapus balasan ini'}
                                   aria-label={language === 'en' ? 'Delete reply' : 'Hapus balasan ini'}
@@ -763,9 +928,42 @@ export default function DiscussionTab({
                               )}
                             </div>
                           </div>
-                          <p className="text-xs text-slate-700 dark:text-slate-300 leading-relaxed pl-4">
-                            {r.content}
-                          </p>
+                          {isEditingThisReply ? (
+                            <form onSubmit={handleSaveReplyEdit} className="pl-4 pt-1 space-y-1.5">
+                              <textarea
+                                rows="2"
+                                required
+                                aria-label={
+                                  language === 'en' ? 'Edit reply content' : 'Ubah isi balasan diskusi'
+                                }
+                                value={editingReply.content}
+                                onChange={(e) =>
+                                  setEditingReply((prev) => ({ ...prev, content: e.target.value }))
+                                }
+                                className="w-full text-xs p-2 bg-white dark:bg-[#0a0f18] border border-amber-400 rounded-lg text-slate-900 dark:text-slate-100 focus:outline-none"
+                              />
+                              <div className="flex justify-end gap-2 font-mono">
+                                <button
+                                  type="button"
+                                  onClick={() => setEditingReply(null)}
+                                  className="px-2.5 py-0.5 text-[11px] text-slate-500 dark:text-slate-400"
+                                >
+                                  {language === 'en' ? 'Cancel' : 'Batal'}
+                                </button>
+                                <button
+                                  type="submit"
+                                  disabled={savingEdit || !editingReply.content.trim()}
+                                  className="bg-[#f59e0b] hover:bg-[#d97706] text-black text-[11px] font-bold px-2.5 py-0.5 rounded disabled:opacity-50"
+                                >
+                                  {language === 'en' ? 'Save Reply' : 'Simpan Balasan'}
+                                </button>
+                              </div>
+                            </form>
+                          ) : (
+                            <p className="text-xs text-slate-700 dark:text-slate-300 leading-relaxed pl-4">
+                              {r.content}
+                            </p>
+                          )}
                         </div>
                       );
                     })}

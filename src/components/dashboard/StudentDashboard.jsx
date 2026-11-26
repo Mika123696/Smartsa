@@ -742,7 +742,11 @@ export default function StudentDashboard({ onNavigateTab, onSelectActivity }) {
                           type="button"
                           onClick={() => {
                             setIsUjianModalOpen(false);
-                            onSelectActivity?.(att.examType || 'pretest');
+                            onSelectActivity?.({
+                              classId: att.classId,
+                              meetingNo: Number(att.meetingNo || 1),
+                              examType: att.examType || 'pretest',
+                            });
                           }}
                           className="px-2.5 py-1.5 rounded-lg bg-[#f59e0b] hover:bg-[#d97706] text-black font-mono text-[10px] font-bold shrink-0 cursor-pointer transition shadow-xs"
                         >

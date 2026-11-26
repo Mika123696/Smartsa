@@ -7,8 +7,10 @@ import {
   fetchJoinedMemberships,
   createClassInFirestore,
   joinClassWithToken,
+  normalizeHttpsImageUrl,
 } from '../../services/lmsFirestoreService';
 import SafeImage from '../common/SafeImage';
+import CoverImageField from '../common/CoverImageField';
 import {
   Search,
   Plus,
@@ -43,6 +45,8 @@ export default function ClassesView({
   const [newClassTime, setNewClassTime] = useState('');
   const [newClassCode, setNewClassCode] = useState('');
   const [newClassDesc, setNewClassDesc] = useState('');
+  const [newClassCoverImage, setNewClassCoverImage] = useState('');
+  const [createError, setCreateError] = useState('');
   const [feedback, setFeedback] = useState(null);
   const [bannerFeedback, setBannerFeedback] = useState(null);
   const [joining, setJoining] = useState(false);
@@ -84,8 +88,6 @@ export default function ClassesView({
       setJoinedIds(new Set(memberships.map((m) => m.classId)));
       setFeedback(null);
       setBannerFeedback(null);
-      setIsJoinModalOpen(false);
-      setIsCreateModalOpen(false);
       setSearchTerm('');
     } finally {
       if (mountedRef.current && reqId === loadReqIdRef.current) {
@@ -208,8 +210,13 @@ export default function ClassesView({
     if (!newClassName.trim() || creating) return;
 
     setCreating(true);
+    setCreateError('');
     setBannerFeedback(null);
     try {
+      const cleanCoverImage = normalizeHttpsImageUrl(
+        newClassCoverImage,
+        language === 'en' ? 'Class cover URL' : 'URL cover kelas'
+      );
       const newClassObj = await createClassInFirestore({
         name: newClassName.trim(),
         category: newClassCategory,
@@ -217,6 +224,7 @@ export default function ClassesView({
         day: newClassDay,
         time: newClassTime.trim(),
         code: newClassCode.trim(),
+        coverImage: cleanCoverImage,
         instructorName: userProfile?.displayName || currentUser?.displayName || 'Pendidik Terdaftar',
       });
       setClasses((prev) => [newClassObj, ...prev]);
@@ -227,6 +235,8 @@ export default function ClassesView({
       setNewClassDay('');
       setNewClassTime('');
       setNewClassCode('');
+      setNewClassCoverImage('');
+      setCreateError('');
       setBannerFeedback({
         type: 'success',
         text:
@@ -235,11 +245,13 @@ export default function ClassesView({
             : `Kelas "${newClassObj.name}" berhasil diterbitkan! Kode kelas: ${newClassObj.code}`,
       });
     } catch (err) {
+      const errMsg =
+        err.message ||
+        (language === 'en' ? 'Failed to publish new class to Firestore.' : 'Gagal menerbitkan kelas baru ke Firestore.');
+      setCreateError(errMsg);
       setBannerFeedback({
         type: 'error',
-        text:
-          err.message ||
-          (language === 'en' ? 'Failed to publish new class to Firestore.' : 'Gagal menerbitkan kelas baru ke Firestore.'),
+        text: errMsg,
       });
     } finally {
       setCreating(false);
@@ -547,9 +559,9 @@ export default function ClassesView({
             role="dialog"
             aria-modal="true"
             aria-labelledby="create-class-modal-title"
-            className="bg-white dark:bg-[#121822] w-full max-w-lg rounded-2xl shadow-2xl border border-slate-200 dark:border-[#232f42] overflow-hidden text-slate-900 dark:text-slate-100"
+            className="bg-white dark:bg-[#121822] w-full max-w-lg max-h-[90vh] overflow-y-auto rounded-2xl shadow-2xl border border-slate-200 dark:border-[#232f42] text-slate-900 dark:text-slate-100"
           >
-            <div className="bg-indigo-900 dark:bg-[#161d2a] text-white p-5 flex items-center justify-between border-b border-indigo-800 dark:border-[#232f42]">
+            <div className="bg-indigo-900 dark:bg-[#161d2a] text-white p-5 flex items-center justify-between border-b border-indigo-800 dark:border-[#232f42] sticky top-0 z-10">
               <div className="flex items-center gap-2">
                 <Plus className="w-5 h-5 text-indigo-300" />
                 <h3 id="create-class-modal-title" className="text-base font-bold">
@@ -559,7 +571,10 @@ export default function ClassesView({
               <button
                 type="button"
                 aria-label={t('dialog_cancel')}
-                onClick={() => setIsCreateModalOpen(false)}
+                onClick={() => {
+                  setCreateError('');
+                  setIsCreateModalOpen(false);
+                }}
                 className="text-slate-300 hover:text-white"
               >
                 <X className="w-5 h-5" />
@@ -646,6 +661,18 @@ export default function ClassesView({
                 </div>
               </div>
 
+              <CoverImageField
+                value={newClassCoverImage}
+                onChange={(val) => {
+                  setCreateError('');
+                  setNewClassCoverImage(val);
+                }}
+                disabled={creating}
+                language={language}
+                fallbackLabel={newClassCode || newClassName || 'SMARTSA'}
+                previewAlt={newClassName || 'Preview Cover Kelas'}
+              />
+
               <div>
                 <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1">
                   {language === 'en' ? 'Syllabus Description (Optional)' : 'Deskripsi Silabus (Opsional)'}
@@ -663,10 +690,23 @@ export default function ClassesView({
                 ></textarea>
               </div>
 
+              {createError && (
+                <div
+                  role="alert"
+                  className="p-2.5 rounded-lg text-xs bg-rose-50 dark:bg-rose-950/40 text-rose-700 dark:text-rose-300 border border-rose-200 dark:border-rose-500/40 flex items-center gap-2"
+                >
+                  <AlertCircle className="w-4 h-4 shrink-0" />
+                  <span>{createError}</span>
+                </div>
+              )}
+
               <div className="flex justify-end gap-2 pt-2">
                 <button
                   type="button"
-                  onClick={() => setIsCreateModalOpen(false)}
+                  onClick={() => {
+                    setCreateError('');
+                    setIsCreateModalOpen(false);
+                  }}
                   className="px-4 py-2 text-xs font-semibold text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 rounded-lg transition"
                 >
                   {t('dialog_cancel')}

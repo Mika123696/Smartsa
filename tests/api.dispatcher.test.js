@@ -177,6 +177,16 @@ describe('Backend API Dispatcher (api/index.js)', () => {
     const mockSetAttempt = vi.fn(async () => {});
 
     mockCollection.mockImplementation((name) => {
+      if (name === 'class_members') {
+        return {
+          doc: vi.fn(() => ({
+            get: vi.fn(async () => ({
+              exists: true,
+              data: () => ({ classId: 'subj_pbo', uid: 'student_03', status: 'approved' }),
+            })),
+          })),
+        };
+      }
       if (name === 'exam_keys') {
         return {
           doc: vi.fn(() => ({
@@ -192,6 +202,7 @@ describe('Backend API Dispatcher (api/index.js)', () => {
       if (name === 'exam_attempts') {
         return {
           doc: vi.fn(() => ({
+            get: vi.fn(async () => ({ exists: false })),
             set: mockSetAttempt,
           })),
         };
@@ -243,6 +254,16 @@ describe('Backend API Dispatcher (api/index.js)', () => {
     const mockSetAttempt = vi.fn(async () => {});
 
     mockCollection.mockImplementation((name) => {
+      if (name === 'class_members') {
+        return {
+          doc: vi.fn(() => ({
+            get: vi.fn(async () => ({
+              exists: true,
+              data: () => ({ classId: 'subj_pbo', uid: 'student_03', status: 'approved' }),
+            })),
+          })),
+        };
+      }
       if (name === 'exam_keys') {
         return {
           doc: vi.fn(() => ({
@@ -259,7 +280,10 @@ describe('Backend API Dispatcher (api/index.js)', () => {
         return {
           doc: vi.fn((docId) => {
             mockDocIds.push(docId);
-            return { set: mockSetAttempt };
+            return {
+              get: vi.fn(async () => ({ exists: false })),
+              set: mockSetAttempt,
+            };
           }),
         };
       }
@@ -429,6 +453,16 @@ describe('Backend API Dispatcher (api/index.js)', () => {
     // 2. Institutional @smartsa.edu lecturer caller must receive 200 + answerKey
     mockVerifyIdToken.mockResolvedValueOnce({ uid: 'lec_01', email: 'dosen@smartsa.edu' });
     mockCollection.mockImplementation((name) => {
+      if (name === 'classes') {
+        return {
+          doc: vi.fn(() => ({
+            get: vi.fn(async () => ({
+              exists: true,
+              data: () => ({ id: 'subj_pbo', lecturerId: 'lec_01' }),
+            })),
+          })),
+        };
+      }
       if (name === 'exam_keys') {
         return {
           doc: vi.fn(() => ({
@@ -653,6 +687,26 @@ describe('Backend API Dispatcher (api/index.js)', () => {
 
   it('returns 404 EXAM_NOT_CONFIGURED on start/submit when exam_keys for class/meeting are missing', async () => {
     mockCollection.mockImplementation((name) => {
+      if (name === 'classes') {
+        return {
+          doc: vi.fn(() => ({
+            get: vi.fn(async () => ({
+              exists: true,
+              data: () => ({ id: 'cls_empty_99', lecturerId: 'lec_01' }),
+            })),
+          })),
+        };
+      }
+      if (name === 'class_members') {
+        return {
+          doc: vi.fn(() => ({
+            get: vi.fn(async () => ({
+              exists: true,
+              data: () => ({ classId: 'cls_empty_99', uid: 'student_05', status: 'approved' }),
+            })),
+          })),
+        };
+      }
       if (name === 'exam_keys') {
         return {
           doc: vi.fn(() => ({
@@ -1711,6 +1765,16 @@ describe('Backend API Dispatcher (api/index.js)', () => {
           })),
         };
       }
+      if (name === 'class_members') {
+        return {
+          doc: vi.fn(() => ({
+            get: vi.fn(async () => ({
+              exists: true,
+              data: () => ({ classId: 'cls_grade_sec', uid: 'mhs_1', status: 'approved' }),
+            })),
+          })),
+        };
+      }
       if (name === 'exams') {
         return {
           doc: vi.fn(() => ({
@@ -1892,5 +1956,673 @@ describe('Backend API Dispatcher (api/index.js)', () => {
     );
     expect(lateAttemptRes.statusCode).toBe(403);
     expect(lateAttemptRes.json().code).toBe('EXAM_DEADLINE_EXCEEDED');
+  });
+
+  it('enforces class ownership on POST /api/grade instructor_keys (403 FORBIDDEN_CLASS_ACCESS, 404 CLASS_NOT_FOUND)', async () => {
+    const rolesByUid = {
+      lec_owner: 'lecturer',
+      lec_other: 'lecturer',
+      adm_owner: 'admin',
+    };
+
+    mockCollection.mockImplementation((name) => {
+      if (name === 'users') {
+        return {
+          doc: vi.fn((uid) => ({
+            get: vi.fn(async () => ({
+              exists: true,
+              data: () => ({ role: rolesByUid[uid] || 'student' }),
+            })),
+          })),
+        };
+      }
+      if (name === 'classes') {
+        return {
+          doc: vi.fn((classId) => ({
+            get: vi.fn(async () =>
+              classId === 'cls_own'
+                ? { exists: true, data: () => ({ id: 'cls_own', lecturerId: 'lec_owner' }) }
+                : { exists: false }
+            ),
+          })),
+        };
+      }
+      if (name === 'exam_keys') {
+        return {
+          doc: vi.fn(() => ({
+            get: vi.fn(async () => ({
+              exists: true,
+              data: () => ({ pretest: { q1: 2, q2: 0 } }),
+            })),
+          })),
+        };
+      }
+      return {};
+    });
+
+    // 1. Different lecturer cannot inspect another lecturer's answer keys
+    mockVerifyIdToken.mockResolvedValueOnce({ uid: 'lec_other', email: 'other@smartsa.edu' });
+    const otherLecturerRes = createMockRes();
+    await handler(
+      {
+        method: 'POST',
+        url: '/api/grade',
+        headers: { authorization: 'Bearer valid-token' },
+        body: {
+          action: 'instructor_keys',
+          classId: 'cls_own',
+          meetingNo: 1,
+          examType: 'pretest',
+        },
+      },
+      otherLecturerRes
+    );
+    expect(otherLecturerRes.statusCode).toBe(403);
+    expect(otherLecturerRes.json().code).toBe('FORBIDDEN_CLASS_ACCESS');
+
+    // 2. Missing class returns 404 CLASS_NOT_FOUND
+    mockVerifyIdToken.mockResolvedValueOnce({ uid: 'lec_owner', email: 'owner@smartsa.edu' });
+    const missingClassRes = createMockRes();
+    await handler(
+      {
+        method: 'POST',
+        url: '/api/grade',
+        headers: { authorization: 'Bearer valid-token' },
+        body: {
+          action: 'instructor_keys',
+          classId: 'cls_missing',
+          meetingNo: 1,
+          examType: 'pretest',
+        },
+      },
+      missingClassRes
+    );
+    expect(missingClassRes.statusCode).toBe(404);
+    expect(missingClassRes.json().code).toBe('CLASS_NOT_FOUND');
+
+    // 3. Class owner receives 200 + answerKey
+    mockVerifyIdToken.mockResolvedValueOnce({ uid: 'lec_owner', email: 'owner@smartsa.edu' });
+    const ownerRes = createMockRes();
+    await handler(
+      {
+        method: 'POST',
+        url: '/api/grade',
+        headers: { authorization: 'Bearer valid-token' },
+        body: {
+          action: 'instructor_keys',
+          classId: 'cls_own',
+          meetingNo: 1,
+          examType: 'pretest',
+        },
+      },
+      ownerRes
+    );
+    expect(ownerRes.statusCode).toBe(200);
+    expect(ownerRes.json().answerKey).toEqual({ q1: 2, q2: 0 });
+
+    // 4. Admin can inspect keys regardless of lecturerId
+    mockVerifyIdToken.mockResolvedValueOnce({ uid: 'adm_owner', role: 'admin' });
+    const adminRes = createMockRes();
+    await handler(
+      {
+        method: 'POST',
+        url: '/api/grade',
+        headers: { authorization: 'Bearer valid-token' },
+        body: {
+          action: 'instructor_keys',
+          classId: 'cls_own',
+          meetingNo: 1,
+          examType: 'pretest',
+        },
+      },
+      adminRes
+    );
+    expect(adminRes.statusCode).toBe(200);
+    expect(adminRes.json().answerKey).toEqual({ q1: 2, q2: 0 });
+  });
+
+  it('enforces approved class_members status on POST /api/grade start and submit (403 NOT_CLASS_MEMBER)', async () => {
+    const membersByDocId = {
+      cls_mem_uid_pending: { exists: true, data: () => ({ classId: 'cls_mem', uid: 'uid_pending', status: 'pending' }) },
+      cls_mem_uid_approved: { exists: true, data: () => ({ classId: 'cls_mem', uid: 'uid_approved', status: 'approved' }) },
+      cls_mem_uid_active: { exists: true, data: () => ({ classId: 'cls_mem', uid: 'uid_active', status: 'active' }) },
+      cls_mem_uid_legacy: { exists: true, data: () => ({ classId: 'cls_mem', uid: 'uid_legacy' }) },
+    };
+    const mockSetAttempt = vi.fn(async () => {});
+
+    mockCollection.mockImplementation((name) => {
+      if (name === 'users') {
+        return {
+          doc: vi.fn((uid) => ({
+            get: vi.fn(async () => ({
+              exists: true,
+              data: () => ({ role: uid === 'adm_bypass' ? 'admin' : 'student' }),
+            })),
+          })),
+        };
+      }
+      if (name === 'classes') {
+        return {
+          doc: vi.fn(() => ({
+            get: vi.fn(async () => ({
+              exists: true,
+              data: () => ({ id: 'cls_mem', lecturerId: 'lec_01' }),
+            })),
+          })),
+        };
+      }
+      if (name === 'class_members') {
+        return {
+          doc: vi.fn((docId) => ({
+            get: vi.fn(async () => membersByDocId[docId] || { exists: false }),
+          })),
+        };
+      }
+      if (name === 'exams') {
+        return {
+          doc: vi.fn(() => ({
+            get: vi.fn(async () => ({ exists: true, data: () => ({ status: 'published' }) })),
+          })),
+        };
+      }
+      if (name === 'exam_keys') {
+        return {
+          doc: vi.fn(() => ({
+            get: vi.fn(async () => ({ exists: true, data: () => ({ pretest: { q1: 1, q2: 2 } }) })),
+          })),
+        };
+      }
+      if (name === 'exam_attempts') {
+        return {
+          doc: vi.fn(() => ({
+            get: vi.fn(async () => ({ exists: false })),
+            set: mockSetAttempt,
+          })),
+        };
+      }
+      return {};
+    });
+
+    // 1. Non-member rejected on start & submit
+    for (const action of ['start', 'submit']) {
+      mockVerifyIdToken.mockResolvedValueOnce({ uid: 'uid_nonmember', role: 'student' });
+      const res = createMockRes();
+      await handler(
+        {
+          method: 'POST',
+          url: '/api/grade',
+          headers: { authorization: 'Bearer valid-token' },
+          body: {
+            action,
+            classId: 'cls_mem',
+            meetingNo: 1,
+            examType: 'pretest',
+            answers: { q1: 1, q2: 2 },
+          },
+        },
+        res
+      );
+      expect(res.statusCode).toBe(403);
+      expect(res.json().code).toBe('NOT_CLASS_MEMBER');
+    }
+
+    // 2. Pending member rejected on start & submit
+    for (const action of ['start', 'submit']) {
+      mockVerifyIdToken.mockResolvedValueOnce({ uid: 'uid_pending', role: 'student' });
+      const res = createMockRes();
+      await handler(
+        {
+          method: 'POST',
+          url: '/api/grade',
+          headers: { authorization: 'Bearer valid-token' },
+          body: {
+            action,
+            classId: 'cls_mem',
+            meetingNo: 1,
+            examType: 'pretest',
+            answers: { q1: 1, q2: 2 },
+          },
+        },
+        res
+      );
+      expect(res.statusCode).toBe(403);
+      expect(res.json().code).toBe('NOT_CLASS_MEMBER');
+    }
+
+    // 3. Approved, active, legacy (missing status), and admin callers are permitted
+    for (const caller of [
+      { uid: 'uid_approved', role: 'student' },
+      { uid: 'uid_active', role: 'student' },
+      { uid: 'uid_legacy', role: 'student' },
+      { uid: 'adm_bypass', role: 'admin' },
+    ]) {
+      mockVerifyIdToken.mockResolvedValueOnce(caller);
+      const res = createMockRes();
+      await handler(
+        {
+          method: 'POST',
+          url: '/api/grade',
+          headers: { authorization: 'Bearer valid-token' },
+          body: {
+            action: 'start',
+            classId: 'cls_mem',
+            meetingNo: 1,
+            examType: 'pretest',
+          },
+        },
+        res
+      );
+      expect(res.statusCode).toBe(200);
+      expect(res.json().status).toBe('in_progress');
+    }
+  });
+
+  it('enforces strict idempotency on POST /api/grade start and submit without overwriting submitted attempts or resetting active timers', async () => {
+    const existingStartedAt = Date.now() - 120_000;
+    const existingExpiresAt = Date.now() + 1_680_000;
+    let attemptDocMock = {
+      status: 'in_progress',
+      startedAt: existingStartedAt,
+      examExpiresAt: existingExpiresAt,
+      meetingNo: 1,
+      examType: 'pretest',
+    };
+    const mockSetAttempt = vi.fn(async () => {});
+
+    mockCollection.mockImplementation((name) => {
+      if (name === 'users') {
+        return {
+          doc: vi.fn(() => ({
+            get: vi.fn(async () => ({ exists: true, data: () => ({ role: 'student' }) })),
+          })),
+        };
+      }
+      if (name === 'classes') {
+        return {
+          doc: vi.fn(() => ({
+            get: vi.fn(async () => ({
+              exists: true,
+              data: () => ({ id: 'cls_idem', lecturerId: 'lec_01' }),
+            })),
+          })),
+        };
+      }
+      if (name === 'class_members') {
+        return {
+          doc: vi.fn(() => ({
+            get: vi.fn(async () => ({
+              exists: true,
+              data: () => ({ classId: 'cls_idem', uid: 'mhs_idem', status: 'approved' }),
+            })),
+          })),
+        };
+      }
+      if (name === 'exams') {
+        return {
+          doc: vi.fn(() => ({
+            get: vi.fn(async () => ({
+              exists: true,
+              data: () => ({ status: 'published', durationMinutes: 30 }),
+            })),
+          })),
+        };
+      }
+      if (name === 'exam_keys') {
+        return {
+          doc: vi.fn(() => ({
+            get: vi.fn(async () => ({
+              exists: true,
+              data: () => ({ pretest: { q1: 1, q2: 1 } }),
+            })),
+          })),
+        };
+      }
+      if (name === 'exam_attempts') {
+        return {
+          doc: vi.fn(() => ({
+            get: vi.fn(async () => ({ exists: true, data: () => attemptDocMock })),
+            set: mockSetAttempt,
+          })),
+        };
+      }
+      return {};
+    });
+
+    // 1. Existing active in_progress attempt preserves startedAt & examExpiresAt
+    mockVerifyIdToken.mockResolvedValueOnce({ uid: 'mhs_idem', role: 'student' });
+    const resumeRes = createMockRes();
+    await handler(
+      {
+        method: 'POST',
+        url: '/api/grade',
+        headers: { authorization: 'Bearer valid-token' },
+        body: {
+          action: 'start',
+          classId: 'cls_idem',
+          meetingNo: 1,
+          examType: 'pretest',
+        },
+      },
+      resumeRes
+    );
+    expect(resumeRes.statusCode).toBe(200);
+    expect(resumeRes.json().startedAt).toBe(existingStartedAt);
+    expect(resumeRes.json().examExpiresAt).toBe(existingExpiresAt);
+    if (mockSetAttempt.mock.calls.length > 0) {
+      expect(mockSetAttempt.mock.calls[0][0].startedAt).toBe(existingStartedAt);
+      expect(mockSetAttempt.mock.calls[0][0].examExpiresAt).toBe(existingExpiresAt);
+    }
+
+    // 2. Submitted attempt blocks second start with 409 EXAM_ALREADY_SUBMITTED
+    attemptDocMock = {
+      status: 'submitted',
+      score: 85,
+      correctCount: 17,
+      totalQuestions: 20,
+      submittedAt: existingStartedAt + 60_000,
+    };
+    mockSetAttempt.mockClear();
+
+    mockVerifyIdToken.mockResolvedValueOnce({ uid: 'mhs_idem', role: 'student' });
+    const restartRes = createMockRes();
+    await handler(
+      {
+        method: 'POST',
+        url: '/api/grade',
+        headers: { authorization: 'Bearer valid-token' },
+        body: {
+          action: 'start',
+          classId: 'cls_idem',
+          meetingNo: 1,
+          examType: 'pretest',
+        },
+      },
+      restartRes
+    );
+    expect(restartRes.statusCode).toBe(409);
+    expect(restartRes.json().code).toBe('EXAM_ALREADY_SUBMITTED');
+    expect(restartRes.json().score).toBe(85);
+    expect(mockSetAttempt).not.toHaveBeenCalled();
+
+    // 3. Duplicate submit returns 200 idempotently with saved score and never overwrites
+    mockVerifyIdToken.mockResolvedValueOnce({ uid: 'mhs_idem', role: 'student' });
+    const dupSubmitRes = createMockRes();
+    await handler(
+      {
+        method: 'POST',
+        url: '/api/grade',
+        headers: { authorization: 'Bearer valid-token' },
+        body: {
+          action: 'submit',
+          classId: 'cls_idem',
+          meetingNo: 1,
+          examType: 'pretest',
+          answers: { q1: 0, q2: 0 },
+        },
+      },
+      dupSubmitRes
+    );
+    expect(dupSubmitRes.statusCode).toBe(200);
+    expect(dupSubmitRes.json().idempotent).toBe(true);
+    expect(dupSubmitRes.json().score).toBe(85);
+    expect(mockSetAttempt).not.toHaveBeenCalled();
+  });
+
+  it('persists studentName and studentEmail in exam_attempts during POST /api/grade start and submit', async () => {
+    const writtenAttempts = [];
+
+    mockCollection.mockImplementation((name) => {
+      if (name === 'users') {
+        return {
+          doc: vi.fn(() => ({
+            get: vi.fn(async () => ({
+              exists: true,
+              data: () => ({
+                role: 'student',
+                displayName: 'Nadia Kusuma',
+                email: 'nadia@univ.ac.id',
+              }),
+            })),
+          })),
+        };
+      }
+      if (name === 'classes') {
+        return {
+          doc: vi.fn(() => ({
+            get: vi.fn(async () => ({
+              exists: true,
+              data: () => ({ id: 'cls_ident', lecturerId: 'lec_01' }),
+            })),
+          })),
+        };
+      }
+      if (name === 'class_members') {
+        return {
+          doc: vi.fn(() => ({
+            get: vi.fn(async () => ({
+              exists: true,
+              data: () => ({ classId: 'cls_ident', uid: 'uid_nadia', status: 'approved' }),
+            })),
+          })),
+        };
+      }
+      if (name === 'exams') {
+        return {
+          doc: vi.fn(() => ({
+            get: vi.fn(async () => ({
+              exists: true,
+              data: () => ({ status: 'published', durationMinutes: 20 }),
+            })),
+          })),
+        };
+      }
+      if (name === 'exam_keys') {
+        return {
+          doc: vi.fn(() => ({
+            get: vi.fn(async () => ({
+              exists: true,
+              data: () => ({ meetings: { 2: { posttest: { q1: 1, q2: 0 } } } }),
+            })),
+          })),
+        };
+      }
+      if (name === 'exam_attempts') {
+        return {
+          doc: vi.fn(() => ({
+            get: vi.fn(async () => ({ exists: false })),
+            set: vi.fn(async (data) => {
+              writtenAttempts.push(data);
+            }),
+          })),
+        };
+      }
+      return {};
+    });
+
+    // 1. start stores studentName and studentEmail from profile/token
+    mockVerifyIdToken.mockResolvedValueOnce({
+      uid: 'uid_nadia',
+      email: 'nadia@univ.ac.id',
+      name: 'Nadia Token',
+    });
+    const startRes = createMockRes();
+    await handler(
+      {
+        method: 'POST',
+        url: '/api/grade',
+        headers: { authorization: 'Bearer valid-token' },
+        body: { action: 'start', classId: 'cls_ident', meetingNo: 2, examType: 'posttest' },
+      },
+      startRes
+    );
+    expect(startRes.statusCode).toBe(200);
+    expect(startRes.json()).toMatchObject({
+      studentName: 'Nadia Kusuma',
+      studentEmail: 'nadia@univ.ac.id',
+    });
+    expect(writtenAttempts[0]).toMatchObject({
+      uid: 'uid_nadia',
+      studentName: 'Nadia Kusuma',
+      studentEmail: 'nadia@univ.ac.id',
+      status: 'in_progress',
+    });
+
+    // 2. submit preserves/stores studentName and studentEmail on submitted attempt
+    mockVerifyIdToken.mockResolvedValueOnce({
+      uid: 'uid_nadia',
+      email: 'nadia@univ.ac.id',
+      name: 'Nadia Token',
+    });
+    const submitRes = createMockRes();
+    await handler(
+      {
+        method: 'POST',
+        url: '/api/grade',
+        headers: { authorization: 'Bearer valid-token' },
+        body: {
+          action: 'submit',
+          classId: 'cls_ident',
+          meetingNo: 2,
+          examType: 'posttest',
+          answers: { q1: 1, q2: 0 },
+        },
+      },
+      submitRes
+    );
+    expect(submitRes.statusCode).toBe(200);
+    expect(submitRes.json()).toMatchObject({
+      score: 100,
+      studentName: 'Nadia Kusuma',
+      studentEmail: 'nadia@univ.ac.id',
+    });
+    expect(writtenAttempts[1]).toMatchObject({
+      uid: 'uid_nadia',
+      studentName: 'Nadia Kusuma',
+      studentEmail: 'nadia@univ.ac.id',
+      status: 'submitted',
+    });
+  });
+
+  it('enforces class ownership for archive_exam and delete_exam actions on POST /api/grade', async () => {
+    const examSetMock = vi.fn(async () => {});
+    const txSetMock = vi.fn();
+    const txDeleteMock = vi.fn();
+    let examExists = true;
+
+    mockCollection.mockImplementation((name) => {
+      if (name === 'users') {
+        return {
+          doc: vi.fn((uid) => ({
+            get: vi.fn(async () => ({
+              exists: true,
+              data: () => ({ role: uid === 'lec_other' ? 'lecturer' : 'lecturer' }),
+            })),
+          })),
+        };
+      }
+      if (name === 'classes') {
+        return {
+          doc: vi.fn(() => ({
+            get: vi.fn(async () => ({
+              exists: true,
+              data: () => ({ id: 'cls_arc', lecturerId: 'lec_owner' }),
+            })),
+          })),
+        };
+      }
+      if (name === 'exams') {
+        return {
+          doc: vi.fn((docId) => ({
+            id: docId,
+            get: vi.fn(async () => ({ exists: examExists, data: () => ({ status: 'published' }) })),
+            set: examSetMock,
+          })),
+        };
+      }
+      if (name === 'exam_keys') {
+        return {
+          doc: vi.fn((docId) => ({ id: docId })),
+        };
+      }
+      return {};
+    });
+
+    // 1. Non-owner lecturer cannot archive or delete
+    for (const action of ['archive_exam', 'delete_exam']) {
+      mockVerifyIdToken.mockResolvedValueOnce({ uid: 'lec_other', email: 'other@smartsa.edu' });
+      const forbiddenRes = createMockRes();
+      await handler(
+        {
+          method: 'POST',
+          url: '/api/grade',
+          headers: { authorization: 'Bearer valid-token' },
+          body: { action, classId: 'cls_arc', meetingNo: 1, examType: 'pretest' },
+        },
+        forbiddenRes
+      );
+      expect(forbiddenRes.statusCode).toBe(403);
+      expect(forbiddenRes.json().code).toBe('FORBIDDEN_CLASS_OWNER');
+    }
+
+    // 2. Owner lecturer archives exam
+    mockVerifyIdToken.mockResolvedValueOnce({ uid: 'lec_owner', email: 'owner@smartsa.edu' });
+    const archiveRes = createMockRes();
+    await handler(
+      {
+        method: 'POST',
+        url: '/api/grade',
+        headers: { authorization: 'Bearer valid-token' },
+        body: { action: 'archive_exam', classId: 'cls_arc', meetingNo: 1, examType: 'pretest' },
+      },
+      archiveRes
+    );
+    expect(archiveRes.statusCode).toBe(200);
+    expect(archiveRes.json()).toMatchObject({ archived: true, status: 'archived' });
+    expect(examSetMock).toHaveBeenCalledWith(
+      expect.objectContaining({ status: 'archived' }),
+      { merge: true }
+    );
+
+    // 3. Owner lecturer deletes exam and cleans meeting answerKey from exam_keys atomically
+    mockRunTransaction.mockImplementationOnce(async (callback) =>
+      callback({
+        get: vi.fn(async () => ({
+          exists: true,
+          data: () => ({
+            classId: 'cls_arc',
+            meetings: {
+              1: { pretest: { q1: 0 }, posttest: { q1: 1 } },
+            },
+          }),
+        })),
+        set: txSetMock,
+        delete: txDeleteMock,
+      })
+    );
+    mockVerifyIdToken.mockResolvedValueOnce({ uid: 'lec_owner', email: 'owner@smartsa.edu' });
+    const deleteRes = createMockRes();
+    await handler(
+      {
+        method: 'POST',
+        url: '/api/grade',
+        headers: { authorization: 'Bearer valid-token' },
+        body: { action: 'delete_exam', classId: 'cls_arc', meetingNo: 1, examType: 'pretest' },
+      },
+      deleteRes
+    );
+    expect(deleteRes.statusCode).toBe(200);
+    expect(deleteRes.json()).toMatchObject({
+      deleted: true,
+      examId: 'cls_arc_m1_pretest',
+    });
+    expect(txDeleteMock).toHaveBeenCalledWith(expect.objectContaining({ id: 'cls_arc_m1_pretest' }));
+    expect(txSetMock).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'cls_arc' }),
+      expect.objectContaining({
+        meetings: {
+          1: { posttest: { q1: 1 } },
+        },
+      })
+    );
   });
 });

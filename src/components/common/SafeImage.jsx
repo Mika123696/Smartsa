@@ -1,6 +1,24 @@
 import { useState } from 'react';
 import { BookOpen, Image as ImageIcon } from 'lucide-react';
 
+const SAFE_RASTER_DATA_IMAGE_RE =
+  /^data:image\/(?:png|jpeg|jpg|webp|gif);base64,[A-Za-z0-9+/=]+$/i;
+
+function isSafeRenderableImageSrc(src, variant) {
+  if (typeof src !== 'string') return false;
+  const trimmed = src.trim();
+  if (!trimmed || /\s|[<>]/.test(trimmed)) return false;
+  if (variant === 'avatar' && SAFE_RASTER_DATA_IMAGE_RE.test(trimmed)) {
+    return true;
+  }
+  try {
+    const parsed = new URL(trimmed);
+    return parsed.protocol === 'https:' && Boolean(parsed.hostname);
+  } catch {
+    return false;
+  }
+}
+
 function getInitials(text) {
   if (!text || typeof text !== 'string') return 'SM';
   const parts = text.trim().split(/\s+/).filter(Boolean);
@@ -18,7 +36,8 @@ export default function SafeImage({
   fallbackClassName = '',
 }) {
   const [failedSrc, setFailedSrc] = useState(null);
-  const showFallback = !src || failedSrc === src;
+  const safeSrc = isSafeRenderableImageSrc(src, variant) ? src.trim() : '';
+  const showFallback = !safeSrc || failedSrc === safeSrc;
 
   if (showFallback) {
     const initials = getInitials(fallbackLabel || alt);

@@ -173,7 +173,12 @@ service cloud.firestore {
           && submissionId == (resource.data.assignmentId + '_' + request.auth.uid)
           && !request.resource.data.diff(resource.data).affectedKeys().hasAny(['grade', 'score', 'feedback', 'gradedBy', 'uid', 'assignmentId', 'classId'])
         );
-      allow delete: if isAdmin() || (isSignedIn() && resource.data.uid == request.auth.uid);
+      allow delete: if isAdmin() || (
+        isSignedIn()
+        && resource.data.uid == request.auth.uid
+        && !('grade' in resource.data && resource.data.grade != null)
+        && !('score' in resource.data && resource.data.score != null)
+      );
     }
 
     // 7. exam_attempts/{classId}_m{meetingNo}_{examType}_{uid} (dikelola server-side via /api/grade Admin SDK)
@@ -214,6 +219,54 @@ service cloud.firestore {
     }
 
     // 9. discussions/{discussionId}
+    function isValidMemberLikeUpdate(oldData, newData) {
+      let oldLiked = oldData.get('likedBy', []);
+      let newLiked = newData.likedBy;
+      return newLiked is list
+        && newData.likes is int
+        && newData.likes == newLiked.size()
+        && newLiked.removeAll(oldLiked).hasOnly([request.auth.uid])
+        && oldLiked.removeAll(newLiked).hasOnly([request.auth.uid]);
+    }
+
+    function isValidMemberReplyAdd(oldReplies, newReplies) {
+      return newReplies is list
+        && newReplies.size() == oldReplies.size() + 1
+        && newReplies.size() > 0
+        && oldReplies + [newReplies[oldReplies.size()]] == newReplies
+        && newReplies[oldReplies.size()] is map
+        && newReplies[oldReplies.size()].get('authorUid', '') == request.auth.uid
+        && newReplies[oldReplies.size()].get('content', '') is string
+        && newReplies[oldReplies.size()].get('content', '').size() > 0;
+    }
+
+    function isValidMemberReplyEdit(oldReplies, newReplies) {
+      let removed = oldReplies.removeAll(newReplies);
+      let added = newReplies.removeAll(oldReplies);
+      return newReplies is list
+        && newReplies.size() == oldReplies.size()
+        && removed.size() == 1
+        && added.size() == 1
+        && removed[0] is map
+        && added[0] is map
+        && removed[0].get('authorUid', '') == request.auth.uid
+        && added[0].get('authorUid', '') == request.auth.uid
+        && added[0].get('id', '') == removed[0].get('id', '')
+        && added[0].get('content', '') is string
+        && added[0].get('content', '').size() > 0;
+    }
+
+    function isValidMemberReplyDelete(oldReplies, newReplies) {
+      let removed = oldReplies.removeAll(newReplies);
+      let added = newReplies.removeAll(oldReplies);
+      return newReplies is list
+        && newReplies.size() + 1 == oldReplies.size()
+        && removed.size() == 1
+        && added.size() == 0
+        && removed[0] is map
+        && removed[0].get('authorUid', '') == request.auth.uid;
+    }
+
     match /discussions/{discussionId} {
       allow read: if isAdmin() || (
         isSignedIn()
@@ -237,16 +290,36 @@ service cloud.firestore {
         && (
           isAdmin()
           || isClassLecturer(resource.data.classId)
-          || isClassMember(resource.data.classId, request.auth.uid)
-        )
-        && (
-          isAdmin()
-          || isClassLecturer(resource.data.classId)
           || (
-            !request.resource.data.diff(resource.data).affectedKeys().hasAny(['isVerifiedAnswer', 'verifiedBy', 'verifiedReplyId', 'classId'])
+            isClassMember(resource.data.classId, request.auth.uid)
+            && !request.resource.data.diff(resource.data).affectedKeys().hasAny([
+              'isVerifiedAnswer',
+              'verifiedBy',
+              'verifiedReplyId',
+              'classId',
+              'authorUid',
+              'meetingNo',
+              'createdAt'
+            ])
             && (
-              resource.data.authorUid == request.auth.uid
-              || request.resource.data.diff(resource.data).affectedKeys().hasOnly(['likes', 'likedBy', 'replies', 'updatedAt'])
+              (
+                resource.data.authorUid == request.auth.uid
+                && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['content', 'editedAt', 'updatedAt'])
+                && request.resource.data.content is string
+                && request.resource.data.content.size() > 0
+              )
+              || (
+                request.resource.data.diff(resource.data).affectedKeys().hasOnly(['likes', 'likedBy', 'updatedAt'])
+                && isValidMemberLikeUpdate(resource.data, request.resource.data)
+              )
+              || (
+                request.resource.data.diff(resource.data).affectedKeys().hasOnly(['replies', 'updatedAt'])
+                && (
+                  isValidMemberReplyAdd(resource.data.get('replies', []), request.resource.data.replies)
+                  || isValidMemberReplyEdit(resource.data.get('replies', []), request.resource.data.replies)
+                  || isValidMemberReplyDelete(resource.data.get('replies', []), request.resource.data.replies)
+                )
+              )
             )
           )
         );

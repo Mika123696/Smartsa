@@ -248,4 +248,39 @@ describe('Static Security & Firestore Rules Audit', () => {
     expect(dispatcherCode).toContain("pathname === '/api/ai'");
     expect(dispatcherCode).toContain('async function handleAi(');
   });
+
+  it('prevents students from deleting graded submissions in firestore.rules', () => {
+    const rulesCode = readFileSync(join(ROOT_DIR, 'firestore.rules'), 'utf8');
+    const submissionsMatch = rulesCode.match(/match \/submissions\/\{submissionId\}\s*\{([\s\S]*?)\n\s{4}\}/);
+    expect(submissionsMatch).not.toBeNull();
+    const submissionsBlock = submissionsMatch[1];
+
+    expect(submissionsBlock).toMatch(/allow delete:/);
+    expect(submissionsBlock).toContain('isAdmin()');
+    expect(submissionsBlock).toContain("!('grade' in resource.data && resource.data.grade != null)");
+    expect(submissionsBlock).toContain("!('score' in resource.data && resource.data.score != null)");
+  });
+
+  it('hardens discussions update rules for per-uid likes and replies and keeps seed-firestore clean without Unsplash URLs', () => {
+    const rulesCode = readFileSync(join(ROOT_DIR, 'firestore.rules'), 'utf8');
+    expect(rulesCode).toContain('function isValidMemberLikeUpdate(');
+    expect(rulesCode).toContain('function isValidMemberReplyAdd(');
+    expect(rulesCode).toContain('function isValidMemberReplyEdit(');
+    expect(rulesCode).toContain('function isValidMemberReplyDelete(');
+
+    const discussionsMatch = rulesCode.match(/match \/discussions\/\{discussionId\}\s*\{([\s\S]*?)\n\s{4}\}/);
+    expect(discussionsMatch).not.toBeNull();
+    const discussionsBlock = discussionsMatch[1];
+
+    expect(discussionsBlock).toContain('isClassMember(resource.data.classId, request.auth.uid)');
+    expect(discussionsBlock).toContain('isClassLecturer(resource.data.classId)');
+    expect(discussionsBlock).toContain('isValidMemberReplyAdd(');
+    expect(discussionsBlock).toContain('isValidMemberReplyEdit(');
+    expect(discussionsBlock).toContain('isValidMemberReplyDelete(');
+
+    const seedCode = readFileSync(join(ROOT_DIR, 'scripts', 'seed-firestore.mjs'), 'utf8');
+    expect(seedCode).not.toMatch(/unsplash\.com/i);
+    expect(seedCode).toContain(".collection('exams')");
+    expect(seedCode).toContain(".collection('exam_keys')");
+  });
 });

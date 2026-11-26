@@ -122,6 +122,23 @@ export default function TeacherDashboard({ onSelectClass, onNavigateView, onOpen
   }, [selectedSubmission]);
 
   const selectedAttClass = classes.find((c) => c.id === attClassId) || null;
+  const attClassMeetings = Array.isArray(selectedAttClass?.meetings) ? selectedAttClass.meetings : [];
+  const effectiveAttMeetingNo =
+    attClassMeetings.length > 0
+      ? attClassMeetings.some((m) => Number(m.order) === Number(attMeetingNo))
+        ? Number(attMeetingNo)
+        : Number(attClassMeetings[0].order)
+      : Number(attMeetingNo || 1);
+
+  const selectedTaskClass = classes.find((c) => c.id === taskClassId) || null;
+  const taskClassMeetings = Array.isArray(selectedTaskClass?.meetings) ? selectedTaskClass.meetings : [];
+  const effectiveTaskMeetingNo =
+    taskClassMeetings.length > 0
+      ? taskClassMeetings.some((m) => Number(m.order) === Number(taskMeetingNo))
+        ? Number(taskMeetingNo)
+        : Number(taskClassMeetings[0].order)
+      : Number(taskMeetingNo || 1);
+
   const activeAttSession = selectedAttClass?.activeAttendanceSession || null;
   const isSessionActive = Boolean(
     activeAttSession?.isOpen && (!activeAttSession.expiresAt || activeAttSession.expiresAt > renderNowMs)
@@ -129,7 +146,7 @@ export default function TeacherDashboard({ onSelectClass, onNavigateView, onOpen
 
   const handleOpenAttendanceSession = async (e) => {
     e.preventDefault();
-    if (!selectedAttClass || attLoading) return;
+    if (!selectedAttClass || attLoading || attClassMeetings.length === 0) return;
     setAttLoading(true);
     setStatusBanner(null);
 
@@ -137,7 +154,7 @@ export default function TeacherDashboard({ onSelectClass, onNavigateView, onOpen
       const session = await openAttendanceSession({
         classId: selectedAttClass.id,
         classCode: selectedAttClass.code,
-        meetingNo: attMeetingNo,
+        meetingNo: effectiveAttMeetingNo,
         durationMinutes: attDuration,
         customCode: attCustomCode,
       });
@@ -234,7 +251,7 @@ export default function TeacherDashboard({ onSelectClass, onNavigateView, onOpen
 
   const handleCreateAssignment = async (e) => {
     e.preventDefault();
-    if (!taskClassId || !taskTitle.trim() || creatingTask) return;
+    if (!taskClassId || !taskTitle.trim() || creatingTask || taskClassMeetings.length === 0) return;
     setCreatingTask(true);
     setStatusBanner(null);
 
@@ -242,7 +259,7 @@ export default function TeacherDashboard({ onSelectClass, onNavigateView, onOpen
       const targetClass = classes.find((c) => c.id === taskClassId);
       const created = await createAssignmentInFirestore({
         classId: taskClassId,
-        meetingNo: Number(taskMeetingNo || 1),
+        meetingNo: effectiveTaskMeetingNo,
         title: taskTitle.trim(),
         subject: targetClass?.name || 'Mata Kuliah Smartsa',
         subjectCode: targetClass?.code || 'CLS',
@@ -288,8 +305,8 @@ export default function TeacherDashboard({ onSelectClass, onNavigateView, onOpen
           </h2>
           <p className="text-slate-300 text-xs sm:text-sm mt-1 leading-relaxed">
             {language === 'en'
-              ? 'Manage lecture courses, open timed attendance sessions (Meetings 1–16), evaluate student submissions in Firestore, and utilize AI Teaching Assistant.'
-              : 'Kelola kelas perkuliahan, buka sesi presensi dinamis pertemuan 1–16, nilai tugas mahasiswa di Cloud Firestore, serta gunakan Teaching Assistant AI.'}
+              ? 'Manage lecture courses, open timed attendance sessions per class meeting, evaluate student submissions in Firestore, and utilize AI Teaching Assistant.'
+              : 'Kelola kelas perkuliahan, buka sesi presensi dinamis sesuai pertemuan kelas, nilai tugas mahasiswa di Cloud Firestore, serta gunakan Teaching Assistant AI.'}
           </p>
           <div className="flex flex-wrap gap-3 mt-4">
             <button
@@ -437,18 +454,31 @@ export default function TeacherDashboard({ onSelectClass, onNavigateView, onOpen
               <div className="grid grid-cols-2 gap-2">
                 <div>
                   <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1">
-                    {language === 'en' ? 'Meeting (1–16)' : 'Pertemuan (1–16)'}
+                    {language === 'en' ? 'Meeting' : 'Pertemuan'}
                   </label>
                   <select
-                    value={attMeetingNo}
+                    aria-label={language === 'en' ? 'Select attendance meeting' : 'Pilih pertemuan sesi presensi'}
+                    value={attClassMeetings.length > 0 ? effectiveAttMeetingNo : ''}
                     onChange={(e) => setAttMeetingNo(Number(e.target.value))}
-                    className="w-full px-3 py-2 text-xs border border-slate-300 dark:border-slate-700 rounded-lg bg-white dark:bg-[#0b0f17] text-slate-900 dark:text-slate-100 focus:outline-none focus:border-indigo-500"
+                    disabled={attClassMeetings.length === 0}
+                    className="w-full px-3 py-2 text-xs border border-slate-300 dark:border-slate-700 rounded-lg bg-white dark:bg-[#0b0f17] text-slate-900 dark:text-slate-100 focus:outline-none focus:border-indigo-500 disabled:opacity-50"
                   >
-                    {Array.from({ length: 16 }, (_, idx) => idx + 1).map((num) => (
-                      <option key={num} value={num}>
-                        {language === 'en' ? 'Meeting' : 'Pertemuan'} {num < 10 ? `0${num}` : num}
+                    {attClassMeetings.length === 0 ? (
+                      <option value="">
+                        {language === 'en'
+                          ? 'No meetings configured yet'
+                          : 'Belum ada pertemuan di kelas ini'}
                       </option>
-                    ))}
+                    ) : (
+                      attClassMeetings.map((m) => {
+                        const orderNo = Number(m.order || 1);
+                        return (
+                          <option key={m.id || orderNo} value={orderNo}>
+                            P{orderNo < 10 ? `0${orderNo}` : orderNo}: {m.title}
+                          </option>
+                        );
+                      })
+                    )}
                   </select>
                 </div>
 
@@ -480,7 +510,7 @@ export default function TeacherDashboard({ onSelectClass, onNavigateView, onOpen
                 <input
                   type="text"
                   maxLength={24}
-                  placeholder={`Contoh: ${selectedAttClass?.code || 'CLS101'}-M0${attMeetingNo}-8821`}
+                  placeholder={`Contoh: ${selectedAttClass?.code || 'CLS101'}-M0${effectiveAttMeetingNo}-8821`}
                   value={attCustomCode}
                   onChange={(e) => setAttCustomCode(e.target.value.toUpperCase())}
                   className="w-full px-3 py-2 text-xs font-mono border border-slate-300 dark:border-slate-700 bg-white dark:bg-[#0b0f17] rounded-lg text-slate-900 dark:text-slate-100 focus:outline-none focus:border-indigo-500"
@@ -488,7 +518,7 @@ export default function TeacherDashboard({ onSelectClass, onNavigateView, onOpen
               </div>
               <button
                 type="submit"
-                disabled={attLoading || !selectedAttClass}
+                disabled={attLoading || !selectedAttClass || attClassMeetings.length === 0}
                 className="bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold px-4 py-2.5 rounded-lg transition disabled:opacity-50 shrink-0"
               >
                 {attLoading
@@ -571,18 +601,31 @@ export default function TeacherDashboard({ onSelectClass, onNavigateView, onOpen
 
               <div>
                 <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1">
-                  {language === 'en' ? 'Meeting (1–16)' : 'Pertemuan (1–16)'}
+                  {language === 'en' ? 'Meeting' : 'Pertemuan'}
                 </label>
                 <select
-                  value={taskMeetingNo}
+                  aria-label={language === 'en' ? 'Select assignment meeting' : 'Pilih pertemuan tugas'}
+                  value={taskClassMeetings.length > 0 ? effectiveTaskMeetingNo : ''}
                   onChange={(e) => setTaskMeetingNo(Number(e.target.value))}
-                  className="w-full px-3 py-2 text-xs border border-slate-300 dark:border-slate-700 rounded-lg bg-white dark:bg-[#0b0f17] text-slate-900 dark:text-slate-100"
+                  disabled={taskClassMeetings.length === 0}
+                  className="w-full px-3 py-2 text-xs border border-slate-300 dark:border-slate-700 rounded-lg bg-white dark:bg-[#0b0f17] text-slate-900 dark:text-slate-100 disabled:opacity-50"
                 >
-                  {Array.from({ length: 16 }, (_, idx) => idx + 1).map((num) => (
-                    <option key={num} value={num}>
-                      Pertemuan {num < 10 ? `0${num}` : num}
+                  {taskClassMeetings.length === 0 ? (
+                    <option value="">
+                      {language === 'en'
+                        ? 'No meetings configured yet'
+                        : 'Belum ada pertemuan di kelas ini'}
                     </option>
-                  ))}
+                  ) : (
+                    taskClassMeetings.map((m) => {
+                      const orderNo = Number(m.order || 1);
+                      return (
+                        <option key={m.id || orderNo} value={orderNo}>
+                          P{orderNo < 10 ? `0${orderNo}` : orderNo}: {m.title}
+                        </option>
+                      );
+                    })
+                  )}
                 </select>
               </div>
 
@@ -627,7 +670,7 @@ export default function TeacherDashboard({ onSelectClass, onNavigateView, onOpen
               </div>
               <button
                 type="submit"
-                disabled={creatingTask || !taskTitle.trim()}
+                disabled={creatingTask || !taskTitle.trim() || taskClassMeetings.length === 0}
                 className="bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold px-4 py-2.5 rounded-lg transition disabled:opacity-50"
               >
                 {creatingTask

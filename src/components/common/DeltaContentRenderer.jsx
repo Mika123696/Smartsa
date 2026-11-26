@@ -4,12 +4,22 @@
  */
 
 import SafeImage from './SafeImage';
+import { normalizeHttpsImageUrl } from '../../services/lmsFirestoreService';
 
 function isSafeHttpUrl(url) {
   if (typeof url !== 'string') return false;
   try {
     const parsed = new URL(url.trim());
     return parsed.protocol === 'https:' || parsed.protocol === 'http:';
+  } catch {
+    return false;
+  }
+}
+
+function isSafeHttpsImageUrl(url) {
+  if (typeof url !== 'string' || !url.trim()) return false;
+  try {
+    return Boolean(normalizeHttpsImageUrl(url, 'URL gambar materi'));
   } catch {
     return false;
   }
@@ -70,7 +80,7 @@ function parseDeltaOpsToLines(delta) {
     if (!op || op.insert === undefined || op.insert === null) continue;
 
     if (typeof op.insert === 'object') {
-      if (op.insert.image && isSafeHttpUrl(op.insert.image)) {
+      if (op.insert.image && isSafeHttpsImageUrl(op.insert.image)) {
         if (currentRuns.length > 0) {
           lines.push({ runs: currentRuns, blockAttrs: {} });
           currentRuns = [];

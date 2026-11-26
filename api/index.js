@@ -886,7 +886,114 @@ async function handleBootstrap(body, decodedToken) {
   };
 }
 
+async function verifyClassInstructorOwnership(
+  db,
+  {
+    safeClassId,
+    decodedToken,
+    callerRole,
+    forbiddenCode = 'FORBIDDEN_CLASS_OWNER',
+    forbiddenMessage = 'AKSES DITOLAK: Hanya dosen pengampu kelas ini atau admin yang dapat mengelola kelas ini.',
+  }
+) {
+  const classSnap = await db.collection('classes').doc(safeClassId).get();
+  if (!classSnap?.exists) {
+    return {
+      ok: false,
+      response: {
+        status: 404,
+        payload: { error: 'Kelas tidak ditemukan di Firestore.', code: 'CLASS_NOT_FOUND' },
+      },
+    };
+  }
+
+  if (callerRole !== 'admin' && classSnap.data()?.lecturerId !== decodedToken.uid) {
+    return {
+      ok: false,
+      response: {
+        status: 403,
+        payload: {
+          error: forbiddenMessage,
+          code: forbiddenCode,
+        },
+      },
+    };
+  }
+
+  return { ok: true, classSnap };
+}
+
+async function verifyApprovedClassMember(db, { safeClassId, uid, callerRole }) {
+  if (callerRole === 'admin') {
+    return { ok: true, memberData: null };
+  }
+
+  const memberSnap = await db.collection('class_members').doc(`${safeClassId}_${uid}`).get();
+  const memberData = memberSnap?.exists ? memberSnap.data() || {} : null;
+  const memberStatus = memberData?.status;
+  const isApprovedStatus =
+    memberStatus === undefined ||
+    memberStatus === null ||
+    memberStatus === '' ||
+    memberStatus === 'approved' ||
+    memberStatus === 'active';
+
+  if (!memberSnap?.exists || !isApprovedStatus) {
+    return {
+      ok: false,
+      response: {
+        status: 403,
+        payload: {
+          error: memberSnap?.exists
+            ? 'Keanggotaan kelas Anda masih menunggu persetujuan dosen/admin.'
+            : 'AKSES DITOLAK: Anda bukan anggota aktif di kelas ini.',
+          code: 'NOT_CLASS_MEMBER',
+        },
+      },
+    };
+  }
+
+  return { ok: true, memberData };
+}
+
+async function resolveCallerStudentIdentity(db, decodedToken, existingAttempt = null) {
+  let userData = null;
+  try {
+    const usersCol = db.collection('users');
+    if (usersCol && typeof usersCol.doc === 'function') {
+      const userDoc = await usersCol.doc(decodedToken.uid).get();
+      if (userDoc?.exists) {
+        userData = userDoc.data() || {};
+      }
+    }
+  } catch (err) {
+    console.warn('[api/grade] resolveCallerStudentIdentity warning:', err.message);
+  }
+
+  const studentName = String(
+    userData?.displayName ||
+      userData?.name ||
+      decodedToken?.name ||
+      decodedToken?.displayName ||
+      existingAttempt?.studentName ||
+      ''
+  ).trim();
+  const studentEmail = String(
+    userData?.email || decodedToken?.email || existingAttempt?.studentEmail || ''
+  ).trim();
+
+  return { studentName, studentEmail };
+}
+
 async function handleGrade(body, decodedToken) {
+  const uid = String(decodedToken?.uid || '').trim();
+  if (!uid) {
+    return {
+      status: 401,
+      payload: { error: 'Token pengguna tidak memiliki UID yang valid.', code: 'UNAUTHORIZED' },
+    };
+  }
+
   const {
     classId = '',
     meetingNo = 1,
@@ -923,7 +1030,7 @@ async function handleGrade(body, decodedToken) {
 
   const safeMeetingNo = parsedMeetingNo;
   const db = getFirestore();
-  const attemptId = `${safeClassId}_m${safeMeetingNo}_${safeExamType}_${decodedToken.uid}`;
+  const attemptId = `${safeClassId}_m${safeMeetingNo}_${safeExamType}_${uid}`;
   const examDocId = `${safeClassId}_m${safeMeetingNo}_${safeExamType}`;
 
   if (action === 'save_exam') {
@@ -938,23 +1045,16 @@ async function handleGrade(body, decodedToken) {
       };
     }
 
-    const classRef = db.collection('classes').doc(safeClassId);
-    const classSnap = await classRef.get();
-    if (!classSnap.exists) {
-      return {
-        status: 404,
-        payload: { error: 'Kelas tidak ditemukan di Firestore.', code: 'CLASS_NOT_FOUND' },
-      };
-    }
-
-    if (callerRole !== 'admin' && classSnap.data()?.lecturerId !== decodedToken.uid) {
-      return {
-        status: 403,
-        payload: {
-          error: 'AKSES DITOLAK: Hanya dosen pengampu kelas ini atau admin yang dapat mengelola soal evaluasi.',
-          code: 'FORBIDDEN_CLASS_OWNER',
-        },
-      };
+    const ownership = await verifyClassInstructorOwnership(db, {
+      safeClassId,
+      decodedToken,
+      callerRole,
+      forbiddenCode: 'FORBIDDEN_CLASS_OWNER',
+      forbiddenMessage:
+        'AKSES DITOLAK: Hanya dosen pengampu kelas ini atau admin yang dapat mengelola soal evaluasi.',
+    });
+    if (!ownership.ok) {
+      return ownership.response;
     }
 
     const normalizedStatus =
@@ -1081,6 +1181,139 @@ async function handleGrade(body, decodedToken) {
     };
   }
 
+  if (action === 'archive_exam') {
+    const callerRole = await resolveCallerRole(db, decodedToken);
+    if (callerRole !== 'lecturer' && callerRole !== 'admin') {
+      return {
+        status: 403,
+        payload: {
+          error: 'AKSES DITOLAK: Hanya dosen atau admin yang dapat mengarsipkan evaluasi.',
+          code: 'FORBIDDEN_ROLE',
+        },
+      };
+    }
+
+    const ownership = await verifyClassInstructorOwnership(db, {
+      safeClassId,
+      decodedToken,
+      callerRole,
+      forbiddenCode: 'FORBIDDEN_CLASS_OWNER',
+      forbiddenMessage:
+        'AKSES DITOLAK: Hanya dosen pengampu kelas ini atau admin yang dapat mengarsipkan evaluasi.',
+    });
+    if (!ownership.ok) {
+      return ownership.response;
+    }
+
+    const examRef = db.collection('exams').doc(examDocId);
+    const examSnap = await examRef.get();
+    if (!examSnap?.exists) {
+      return {
+        status: 404,
+        payload: {
+          error: 'Evaluasi untuk pertemuan ini belum dikonfigurasi.',
+          code: 'EXAM_NOT_CONFIGURED',
+        },
+      };
+    }
+
+    await examRef.set(
+      {
+        status: 'archived',
+        updatedBy: decodedToken.uid,
+        updatedAt: FieldValue.serverTimestamp(),
+      },
+      { merge: true }
+    );
+
+    return {
+      status: 200,
+      payload: {
+        archived: true,
+        examId: examDocId,
+        classId: safeClassId,
+        meetingNo: safeMeetingNo,
+        examType: safeExamType,
+        status: 'archived',
+      },
+    };
+  }
+
+  if (action === 'delete_exam') {
+    const callerRole = await resolveCallerRole(db, decodedToken);
+    if (callerRole !== 'lecturer' && callerRole !== 'admin') {
+      return {
+        status: 403,
+        payload: {
+          error: 'AKSES DITOLAK: Hanya dosen atau admin yang dapat menghapus evaluasi.',
+          code: 'FORBIDDEN_ROLE',
+        },
+      };
+    }
+
+    const ownership = await verifyClassInstructorOwnership(db, {
+      safeClassId,
+      decodedToken,
+      callerRole,
+      forbiddenCode: 'FORBIDDEN_CLASS_OWNER',
+      forbiddenMessage:
+        'AKSES DITOLAK: Hanya dosen pengampu kelas ini atau admin yang dapat menghapus evaluasi.',
+    });
+    if (!ownership.ok) {
+      return ownership.response;
+    }
+
+    const examRef = db.collection('exams').doc(examDocId);
+    const keyRef = db.collection('exam_keys').doc(safeClassId);
+    const meetingKeyStr = String(safeMeetingNo);
+
+    await db.runTransaction(async (tx) => {
+      const keySnap = await tx.get(keyRef);
+      if (keySnap?.exists) {
+        const existingData = keySnap.data() || {};
+        const existingMeetings =
+          existingData.meetings && typeof existingData.meetings === 'object'
+            ? { ...existingData.meetings }
+            : {};
+        const currentMeetingBucket =
+          existingMeetings[meetingKeyStr] && typeof existingMeetings[meetingKeyStr] === 'object'
+            ? { ...existingMeetings[meetingKeyStr] }
+            : {};
+        delete currentMeetingBucket[safeExamType];
+        if (Object.keys(currentMeetingBucket).length === 0) {
+          delete existingMeetings[meetingKeyStr];
+        } else {
+          existingMeetings[meetingKeyStr] = currentMeetingBucket;
+        }
+        const { meetings: _removedMeetings, ...restKeyData } = existingData;
+        tx.set(keyRef, {
+          ...restKeyData,
+          classId: safeClassId,
+          meetings: existingMeetings,
+          updatedBy: decodedToken.uid,
+          updatedAt: FieldValue.serverTimestamp(),
+        });
+      }
+
+      if (typeof tx.delete === 'function') {
+        tx.delete(examRef);
+      } else {
+        tx.set(examRef, { status: 'archived', questions: [], deleted: true }, { merge: true });
+      }
+    });
+
+    return {
+      status: 200,
+      payload: {
+        deleted: true,
+        examId: examDocId,
+        classId: safeClassId,
+        meetingNo: safeMeetingNo,
+        examType: safeExamType,
+      },
+    };
+  }
+
   if (action === 'instructor_keys') {
     const callerRole = await resolveCallerRole(db, decodedToken);
     if (callerRole !== 'lecturer' && callerRole !== 'admin') {
@@ -1091,6 +1324,18 @@ async function handleGrade(body, decodedToken) {
           code: 'FORBIDDEN_ROLE',
         },
       };
+    }
+
+    const ownership = await verifyClassInstructorOwnership(db, {
+      safeClassId,
+      decodedToken,
+      callerRole,
+      forbiddenCode: 'FORBIDDEN_CLASS_ACCESS',
+      forbiddenMessage:
+        'AKSES DITOLAK: Hanya dosen pengampu kelas ini atau admin yang dapat mengakses kunci evaluasi.',
+    });
+    if (!ownership.ok) {
+      return ownership.response;
     }
 
     let answerKey = null;
@@ -1113,6 +1358,16 @@ async function handleGrade(body, decodedToken) {
         isConfigured: Boolean(answerKey),
       },
     };
+  }
+
+  const callerRole = await resolveCallerRole(db, decodedToken);
+  const membershipCheck = await verifyApprovedClassMember(db, {
+    safeClassId,
+    uid,
+    callerRole,
+  });
+  if (!membershipCheck.ok) {
+    return membershipCheck.response;
   }
 
   let examData = null;
@@ -1164,30 +1419,156 @@ async function handleGrade(body, decodedToken) {
     };
   }
 
+  let attemptData = null;
+  const attemptsCol = db.collection('exam_attempts');
+  const attemptRef =
+    attemptsCol && typeof attemptsCol.doc === 'function' ? attemptsCol.doc(attemptId) : null;
+  if (attemptRef && typeof attemptRef.get === 'function') {
+    const attemptSnap = await attemptRef.get();
+    if (attemptSnap?.exists) {
+      attemptData = attemptSnap.data() || {};
+    }
+  }
+
+  if (attemptData?.status === 'submitted') {
+    const savedTotal = Number.isFinite(Number(attemptData.totalQuestions))
+      ? Number(attemptData.totalQuestions)
+      : Object.keys(answerKey).length;
+    const savedScore = Number.isFinite(Number(attemptData.score)) ? Number(attemptData.score) : 0;
+    const savedCorrect = Number.isFinite(Number(attemptData.correctCount))
+      ? Number(attemptData.correctCount)
+      : 0;
+    const savedPassed =
+      typeof attemptData.passed === 'boolean' ? attemptData.passed : savedScore >= 75;
+    const savedResultSummary = {
+      score: savedScore,
+      correctCount: savedCorrect,
+      totalQuestions: savedTotal,
+      passed: savedPassed,
+    };
+
+    if (action === 'start') {
+      return {
+        status: 409,
+        payload: {
+          error: 'Anda sudah menyelesaikan dan mengumpulkan evaluasi ini.',
+          code: 'EXAM_ALREADY_SUBMITTED',
+          attemptId,
+          classId: safeClassId,
+          meetingNo: safeMeetingNo,
+          examType: safeExamType,
+          status: 'submitted',
+          examActive: false,
+          ...savedResultSummary,
+          result: savedResultSummary,
+        },
+      };
+    }
+
+    return {
+      status: 200,
+      payload: {
+        idempotent: true,
+        attemptId,
+        classId: safeClassId,
+        meetingNo: safeMeetingNo,
+        examType: safeExamType,
+        status: 'submitted',
+        examActive: false,
+        ...savedResultSummary,
+        message: 'Hasil evaluasi sudah dinilai sebelumnya dan tidak ditimpa ulang.',
+      },
+    };
+  }
+
+  const examDeadlineMs = parseTimestampMillis(examData?.deadline ?? examData?.expiresAt);
+  const { studentName, studentEmail } = await resolveCallerStudentIdentity(
+    db,
+    decodedToken,
+    attemptData
+  );
+
   if (action === 'start') {
     const durationMinutes =
       Number.isFinite(Number(examData?.durationMinutes)) && Number(examData?.durationMinutes) > 0
         ? Number(examData.durationMinutes)
         : 15;
     const durationMs = durationMinutes * 60 * 1000;
-    await db
-      .collection('exam_attempts')
-      .doc(attemptId)
-      .set(
-        {
+
+    if (attemptData?.status === 'in_progress') {
+      const existingExpiresAtMs = parseTimestampMillis(
+        attemptData?.examExpiresAt ?? attemptData?.expiresAt
+      );
+      const startCutoffCandidates = [examDeadlineMs, existingExpiresAtMs].filter(
+        (ts) => ts !== null
+      );
+      if (startCutoffCandidates.length > 0 && Date.now() > Math.min(...startCutoffCandidates)) {
+        return {
+          status: 403,
+          payload: {
+            error: 'Batas waktu sesi evaluasi Anda telah terlewati.',
+            code: 'EXAM_DEADLINE_EXCEEDED',
+          },
+        };
+      }
+
+      const preservedExpiresAt =
+        existingExpiresAtMs ??
+        (examDeadlineMs !== null
+          ? Math.min(examDeadlineMs, Date.now() + durationMs)
+          : Date.now() + durationMs);
+
+      return {
+        status: 200,
+        payload: {
+          resumed: true,
           attemptId,
           classId: safeClassId,
           meetingNo: safeMeetingNo,
-          uid: decodedToken.uid,
           examType: safeExamType,
+          studentName,
+          studentEmail,
           status: 'in_progress',
           examActive: true,
-          examStartedAt: FieldValue.serverTimestamp(),
-          examExpiresAt: Date.now() + durationMs,
-          updatedAt: FieldValue.serverTimestamp(),
+          startedAt: attemptData?.startedAt ?? attemptData?.examStartedAt ?? null,
+          examExpiresAt: preservedExpiresAt,
         },
-        { merge: true }
-      );
+      };
+    }
+
+    if (examDeadlineMs !== null && Date.now() > examDeadlineMs) {
+      return {
+        status: 403,
+        payload: {
+          error: 'Batas waktu pengumpulan evaluasi telah terlewati.',
+          code: 'EXAM_DEADLINE_EXCEEDED',
+        },
+      };
+    }
+
+    const rawExpiresAt = Date.now() + durationMs;
+    const nextExpiresAt =
+      examDeadlineMs !== null ? Math.min(rawExpiresAt, examDeadlineMs) : rawExpiresAt;
+
+    const targetAttemptRef = attemptRef || db.collection('exam_attempts').doc(attemptId);
+    await targetAttemptRef.set(
+      {
+        attemptId,
+        classId: safeClassId,
+        meetingNo: safeMeetingNo,
+        uid,
+        studentName,
+        studentEmail,
+        examType: safeExamType,
+        status: 'in_progress',
+        examActive: true,
+        startedAt: FieldValue.serverTimestamp(),
+        examStartedAt: FieldValue.serverTimestamp(),
+        examExpiresAt: nextExpiresAt,
+        updatedAt: FieldValue.serverTimestamp(),
+      },
+      { merge: true }
+    );
 
     return {
       status: 200,
@@ -1196,24 +1577,17 @@ async function handleGrade(body, decodedToken) {
         classId: safeClassId,
         meetingNo: safeMeetingNo,
         examType: safeExamType,
+        studentName,
+        studentEmail,
         status: 'in_progress',
         examActive: true,
+        examExpiresAt: nextExpiresAt,
       },
     };
   }
 
-  let attemptData = null;
-  const attemptsCol = db.collection('exam_attempts');
-  const attemptRef = attemptsCol && typeof attemptsCol.doc === 'function' ? attemptsCol.doc(attemptId) : null;
-  if (attemptRef && typeof attemptRef.get === 'function') {
-    const attemptSnap = await attemptRef.get();
-    if (attemptSnap?.exists) {
-      attemptData = attemptSnap.data() || {};
-    }
-  }
-
   const cutoffCandidates = [
-    parseTimestampMillis(examData?.deadline ?? examData?.expiresAt),
+    examDeadlineMs,
     parseTimestampMillis(
       attemptData?.examExpiresAt ?? attemptData?.expiresAt ?? attemptData?.deadline
     ),
@@ -1247,24 +1621,26 @@ async function handleGrade(body, decodedToken) {
 
   const targetAttemptRef = attemptRef || db.collection('exam_attempts').doc(attemptId);
   await targetAttemptRef.set(
-      {
-        attemptId,
-        classId: safeClassId,
-        meetingNo: safeMeetingNo,
-        uid: decodedToken.uid,
-        examType: safeExamType,
-        status: 'submitted',
-        examActive: false,
-        examExpiresAt: null,
-        score,
-        correctCount,
-        totalQuestions,
-        passed,
-        submittedAt: FieldValue.serverTimestamp(),
-        updatedAt: FieldValue.serverTimestamp(),
-      },
-      { merge: true }
-    );
+    {
+      attemptId,
+      classId: safeClassId,
+      meetingNo: safeMeetingNo,
+      uid,
+      studentName,
+      studentEmail,
+      examType: safeExamType,
+      status: 'submitted',
+      examActive: false,
+      examExpiresAt: null,
+      score,
+      correctCount,
+      totalQuestions,
+      passed,
+      submittedAt: FieldValue.serverTimestamp(),
+      updatedAt: FieldValue.serverTimestamp(),
+    },
+    { merge: true }
+  );
 
   return {
     status: 200,
@@ -1273,6 +1649,8 @@ async function handleGrade(body, decodedToken) {
       classId: safeClassId,
       meetingNo: safeMeetingNo,
       examType: safeExamType,
+      studentName,
+      studentEmail,
       status: 'submitted',
       examActive: false,
       score,

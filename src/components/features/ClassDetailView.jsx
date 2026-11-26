@@ -5,23 +5,34 @@ import { ROLES } from '../../constants/roles';
 import { auth } from '../../firebase';
 import { setLocalExamSession } from '../../services/aiService';
 import {
+  archiveMeetingExamByInstructor,
   fetchAssignmentsWithUserSubmissions,
   fetchClassExamAttempts,
+  fetchClassMembers,
   fetchClassSubmissionsForGrading,
   fetchInstructorAnswerKey,
   fetchLearningProgressByClass,
   fetchMeetingExam,
   fetchUserClassExamAttempts,
   createAssignmentInFirestore,
+  updateAssignmentInFirestore,
+  deleteAssignmentInFirestore,
+  deleteMeetingExamByInstructor,
   gradeSubmissionInFirestore,
   joinClassWithToken,
   saveMeetingExamByInstructor,
   submitAssignmentToFirestore,
   cancelSubmissionInFirestore,
+  normalizeHttpsImageUrl,
+  uploadHttpsImageToCloudinary,
   updateClassDetailsInFirestore,
   updateClassMeetingsInFirestore,
   upsertLearningProgress,
 } from '../../services/lmsFirestoreService';
+import {
+  deltaToEditableText,
+  plainTextToDelta,
+} from '../../services/deltaSerialization';
 import {
   closeAttendanceSession,
   fetchMeetingAttendees,
@@ -30,6 +41,8 @@ import {
 } from '../../services/attendanceService';
 import { uploadMediaFile, isValidExternalUrl } from '../../services/cloudinaryService';
 import DeltaContentRenderer from '../common/DeltaContentRenderer';
+import CoverImageField from '../common/CoverImageField';
+import SafeImage from '../common/SafeImage';
 import { AccessibleDialog } from '../common/AccessibleDialog';
 import DiscussionTab from './DiscussionTab';
 import {
@@ -50,6 +63,7 @@ import {
   FileUp,
   X,
   Trash2,
+  Eye,
   Link as LinkIcon,
   ExternalLink,
   QrCode,
@@ -63,61 +77,86 @@ import {
   MessageSquare,
   Plus,
   TrendingUp,
+  Image as ImageIcon,
 } from 'lucide-react';
 
-function deltaToEditableText(delta) {
-  if (!delta || !Array.isArray(delta.ops)) return '';
-  const chunks = [];
-  let lineBuffer = '';
-  for (const op of delta.ops) {
-    if (typeof op?.insert !== 'string') continue;
-    if (op.insert === '\n') {
-      const cleanLine = lineBuffer.trim();
-      if (cleanLine) {
-        if (op.attributes?.header) {
-          chunks.push(`# ${cleanLine}`);
-        } else if (op.attributes?.list === 'bullet') {
-          chunks.push(`- ${cleanLine}`);
-        } else {
-          chunks.push(cleanLine);
-        }
-      }
-      lineBuffer = '';
-    } else {
-      lineBuffer += op.insert;
-    }
+const DEFAULT_EXAM_DURATION_MINUTES = 15;
+
+function parseExamTimestampMs(rawValue) {
+  if (!rawValue) return null;
+  if (typeof rawValue?.toMillis === 'function') {
+    const ms = rawValue.toMillis();
+    return Number.isFinite(ms) && ms > 0 ? ms : null;
   }
-  if (lineBuffer.trim()) {
-    chunks.push(lineBuffer.trim());
+  if (typeof rawValue === 'number') {
+    return Number.isFinite(rawValue) && rawValue > 0 ? rawValue : null;
   }
-  return chunks.join('\n');
+  const parsed = Date.parse(String(rawValue));
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
 }
 
-function plainTextToDelta(rawText) {
-  const lines = String(rawText || '')
-    .split(/\r?\n/)
-    .map((line) => line.trimEnd());
-  const nonEmpty = lines.some((l) => l.trim().length > 0);
-  if (!nonEmpty) return null;
+function toDateTimeLocalInputValue(rawValue) {
+  const ms = parseExamTimestampMs(rawValue);
+  if (!ms) return '';
+  const dt = new Date(ms);
+  const pad = (n) => String(n).padStart(2, '0');
+  return `${dt.getFullYear()}-${pad(dt.getMonth() + 1)}-${pad(dt.getDate())}T${pad(dt.getHours())}:${pad(dt.getMinutes())}`;
+}
 
-  const ops = [];
-  for (const line of lines) {
-    const trimmed = line.trim();
-    if (!trimmed) {
-      ops.push({ insert: '\n' });
-      continue;
-    }
-    if (trimmed.startsWith('# ')) {
-      ops.push({ insert: trimmed.slice(2).trim(), attributes: { bold: true } });
-      ops.push({ insert: '\n', attributes: { header: 2 } });
-    } else if (trimmed.startsWith('- ') || trimmed.startsWith('* ')) {
-      ops.push({ insert: trimmed.slice(2).trim() });
-      ops.push({ insert: '\n', attributes: { list: 'bullet' } });
-    } else {
-      ops.push({ insert: `${trimmed}\n` });
-    }
+function getExamDraftStorageKey(classId, meetingNo, examType, uid) {
+  const cleanClassId = String(classId || '').trim();
+  const cleanUid = String(uid || '').trim();
+  if (!cleanClassId || !cleanUid) return '';
+  const safeType = examType === 'posttest' ? 'posttest' : 'pretest';
+  return `smartsa_exam_draft_${cleanClassId}_m${Number(meetingNo || 1)}_${safeType}_${cleanUid}`;
+}
+
+function readExamDraftAnswers(storageKey) {
+  if (!storageKey || typeof localStorage === 'undefined') return {};
+  try {
+    const raw = localStorage.getItem(storageKey);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+  } catch {
+    return {};
   }
-  return ops.length > 0 ? { ops } : null;
+}
+
+function writeExamDraftAnswers(storageKey, answers) {
+  if (!storageKey || typeof localStorage === 'undefined') return;
+  try {
+    localStorage.setItem(storageKey, JSON.stringify(answers || {}));
+  } catch {
+    // ignore storage quota errors
+  }
+}
+
+function clearExamDraftAnswers(storageKey) {
+  if (!storageKey || typeof localStorage === 'undefined') return;
+  try {
+    localStorage.removeItem(storageKey);
+  } catch {
+    // ignore storage errors
+  }
+}
+
+function resolveAttemptStudentDisplay(attempt, memberByUid) {
+  const uid = String(attempt?.uid || '').trim();
+  const member = uid && memberByUid ? memberByUid.get(uid) || null : null;
+  const rawAttemptName = String(attempt?.studentName || '').trim();
+  const validAttemptName = rawAttemptName && rawAttemptName !== 'Mahasiswa' ? rawAttemptName : '';
+  const memberName = String(
+    member?.studentName || member?.displayName || member?.name || ''
+  ).trim();
+  const validMemberName = memberName && memberName !== 'Mahasiswa' ? memberName : '';
+  const email = String(attempt?.studentEmail || member?.email || '').trim();
+  const displayName = validAttemptName || validMemberName || email || uid || attempt?.id || 'Mahasiswa';
+  return {
+    uid: uid || attempt?.id || '',
+    displayName,
+    email,
+  };
 }
 
 function createEmptyExamQuestion(nextIndex = 1) {
@@ -138,15 +177,23 @@ function resolveSafeVideoSource(rawUrl) {
     const parsed = new URL(rawUrl.trim());
     if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') return null;
 
-    if (parsed.hostname.includes('youtube.com')) {
+    if (parsed.hostname === 'youtube.com' || parsed.hostname.endsWith('.youtube.com')) {
       const vid = parsed.searchParams.get('v');
       if (vid) return { kind: 'iframe', src: `https://www.youtube.com/embed/${vid}` };
       if (parsed.pathname.startsWith('/embed/')) {
         return { kind: 'iframe', src: `https://www.youtube.com${parsed.pathname}` };
       }
+      const shortsMatch = parsed.pathname.match(/^\/shorts\/([^/?#]+)/);
+      if (shortsMatch?.[1]) {
+        return { kind: 'iframe', src: `https://www.youtube.com/embed/${shortsMatch[1]}` };
+      }
+      const liveMatch = parsed.pathname.match(/^\/live\/([^/?#]+)/);
+      if (liveMatch?.[1]) {
+        return { kind: 'iframe', src: `https://www.youtube.com/embed/${liveMatch[1]}` };
+      }
     }
     if (parsed.hostname === 'youtu.be') {
-      const vid = parsed.pathname.replace('/', '').trim();
+      const vid = parsed.pathname.split('/').filter(Boolean)[0];
       if (vid) return { kind: 'iframe', src: `https://www.youtube.com/embed/${vid}` };
     }
     if (parsed.hostname.includes('vimeo.com')) {
@@ -174,6 +221,8 @@ function getSafePdfUrl(rawUrl) {
 
 export default function ClassDetailView({
   classData,
+  initialMeetingNo = null,
+  initialTab = null,
   isMember,
   onMembershipChanged,
   onClassUpdated,
@@ -187,11 +236,20 @@ export default function ClassDetailView({
   const isEducatorOrAdmin = role === ROLES.LECTURER || role === ROLES.ADMIN;
   const isPreviewMode = Boolean(currentUser && role === ROLES.STUDENT && isMember === false);
 
-  const [activeTab, setActiveTab] = useState('meetings');
-  const [meetingsList, setMeetingsList] = useState(() => getClassMeetingsList(classData));
-  const [selectedMeeting, setSelectedMeeting] = useState(
-    () => getClassMeetingsList(classData)[0] || null
+  const [activeTab, setActiveTab] = useState(() =>
+    initialTab && ['meetings', 'exam', 'tasks', 'discussion'].includes(initialTab)
+      ? initialTab
+      : 'meetings'
   );
+  const [meetingsList, setMeetingsList] = useState(() => getClassMeetingsList(classData));
+  const [selectedMeeting, setSelectedMeeting] = useState(() => {
+    const list = getClassMeetingsList(classData);
+    if (initialMeetingNo) {
+      const matched = list.find((m) => Number(m.order || 1) === Number(initialMeetingNo));
+      if (matched) return matched;
+    }
+    return list[0] || null;
+  });
 
   // Syllabus Preview Join State
   const [joiningClass, setJoiningClass] = useState(false);
@@ -203,6 +261,7 @@ export default function ClassDetailView({
   const [editClassDesc, setEditClassDesc] = useState('');
   const [editClassDay, setEditClassDay] = useState('');
   const [editClassTime, setEditClassTime] = useState('');
+  const [editClassCoverImage, setEditClassCoverImage] = useState('');
   const [savingClassInfo, setSavingClassInfo] = useState(false);
   const [classInfoFeedback, setClassInfoFeedback] = useState(null);
 
@@ -234,18 +293,26 @@ export default function ClassDetailView({
   const [feedbackInputs, setFeedbackInputs] = useState({});
   const [gradingId, setGradingId] = useState(null);
   const [gradingNotice, setGradingNotice] = useState(null);
+  const [gradingMeetingFilter, setGradingMeetingFilter] = useState('all');
+  const [gradingAssignmentFilter, setGradingAssignmentFilter] = useState('all');
 
-  // Instructor Task Creation State
+  // Instructor Task Creation, Edit & Delete State
   const [newTaskMeetingNo, setNewTaskMeetingNo] = useState(1);
   const [newTaskTitle, setNewTaskTitle] = useState('');
   const [newTaskDeadline, setNewTaskDeadline] = useState('2026-12-15T23:59');
   const [newTaskNote, setNewTaskNote] = useState('');
   const [creatingTask, setCreatingTask] = useState(false);
   const [createTaskNotice, setCreateTaskNotice] = useState(null);
+  const [editingAssignment, setEditingAssignment] = useState(null);
+  const [savingAssignmentEdit, setSavingAssignmentEdit] = useState(false);
+  const [deleteAssignmentTarget, setDeleteAssignmentTarget] = useState(null);
+  const [deletingAssignment, setDeletingAssignment] = useState(false);
 
   // Instructor Per-Meeting Material, Video & PDF CRUD State
   const [materialEditOpen, setMaterialEditOpen] = useState(false);
   const [materialTextInput, setMaterialTextInput] = useState('');
+  const [materialImageUrlInput, setMaterialImageUrlInput] = useState('');
+  const [uploadingMaterialImage, setUploadingMaterialImage] = useState(false);
   const [savingMaterial, setSavingMaterial] = useState(false);
   const [materialFeedback, setMaterialFeedback] = useState(null);
 
@@ -263,13 +330,22 @@ export default function ClassDetailView({
   const [instructorKeyMap, setInstructorKeyMap] = useState(null);
   const [instructorKeySource, setInstructorKeySource] = useState('');
   const [classExamAttempts, setClassExamAttempts] = useState([]);
+  const [classMembersList, setClassMembersList] = useState([]);
   const [evalAnalyticsLoading, setEvalAnalyticsLoading] = useState(false);
   const [evalAnalyticsError, setEvalAnalyticsError] = useState('');
   const [showExamEditor, setShowExamEditor] = useState(false);
   const [examDraftTitle, setExamDraftTitle] = useState('');
+  const [examDraftStatus, setExamDraftStatus] = useState('published');
+  const [examDraftDurationMinutes, setExamDraftDurationMinutes] = useState(
+    DEFAULT_EXAM_DURATION_MINUTES
+  );
+  const [examDraftDeadline, setExamDraftDeadline] = useState('');
   const [examDraftQuestions, setExamDraftQuestions] = useState([]);
   const [examDraftAnswerKey, setExamDraftAnswerKey] = useState({});
   const [savingExam, setSavingExam] = useState(false);
+  const [archivingExam, setArchivingExam] = useState(false);
+  const [deletingExam, setDeletingExam] = useState(false);
+  const [confirmDeleteExam, setConfirmDeleteExam] = useState(false);
   const [examSaveFeedback, setExamSaveFeedback] = useState(null);
 
   // Dynamic Per-Meeting Exam Bank & Attempt State
@@ -281,7 +357,7 @@ export default function ClassDetailView({
   const [userExamAttempts, setUserExamAttempts] = useState([]);
   const [examActive, setExamActive] = useState(false);
   const [examType, setExamType] = useState('pretest');
-  const [examTimer, setExamTimer] = useState(900);
+  const [examTimer, setExamTimer] = useState(DEFAULT_EXAM_DURATION_MINUTES * 60);
   const [selectedAnswers, setSelectedAnswers] = useState({});
   const [examFinished, setExamFinished] = useState(false);
   const [examScore, setExamScore] = useState(null);
@@ -292,6 +368,7 @@ export default function ClassDetailView({
   const examEndTimeRef = useRef(null);
   const selectedAnswersRef = useRef({});
   const examTypeRef = useRef('pretest');
+  const recoveredAttemptIdRef = useRef('');
   const classIdRef = useRef(classData?.id || '');
   const meetingNoRef = useRef(1);
   const mountedRef = useRef(true);
@@ -334,7 +411,11 @@ export default function ClassDetailView({
     const nextMeetings = getClassMeetingsList(classData);
     setMeetingsList(nextMeetings);
     if (switchedClass) {
-      setActiveTab('meetings');
+      setActiveTab(
+        initialTab && ['meetings', 'exam', 'tasks', 'discussion'].includes(initialTab)
+          ? initialTab
+          : 'meetings'
+      );
       setProgressFeedback(null);
       setExamActive(false);
       setExamFinished(false);
@@ -342,6 +423,16 @@ export default function ClassDetailView({
       setExamError(null);
       setExamNote('');
       setSelectedAnswers({});
+      recoveredAttemptIdRef.current = '';
+      setClassMembersList([]);
+      setConfirmDeleteExam(false);
+      setExamDraftStatus('published');
+      setExamDraftDurationMinutes(DEFAULT_EXAM_DURATION_MINUTES);
+      setExamDraftDeadline('');
+      setGradingMeetingFilter('all');
+      setGradingAssignmentFilter('all');
+      setEditingAssignment(null);
+      setDeleteAssignmentTarget(null);
       setTaskFeedback(null);
       setCreateTaskNotice(null);
       setAttFeedback(null);
@@ -351,16 +442,35 @@ export default function ClassDetailView({
       setMaterialFeedback(null);
       setVideoFeedback(null);
       setPdfFeedback(null);
-      setSelectedMeeting(nextMeetings[0] || null);
+      const initialMatched = initialMeetingNo
+        ? nextMeetings.find((m) => Number(m.order || 1) === Number(initialMeetingNo))
+        : null;
+      setSelectedMeeting(initialMatched || nextMeetings[0] || null);
       return;
     }
     setSelectedMeeting((prev) => {
+      if (initialMeetingNo) {
+        const matched = nextMeetings.find((m) => Number(m.order || 1) === Number(initialMeetingNo));
+        if (matched) return matched;
+      }
       if (prev && nextMeetings.some((m) => m.id === prev.id)) {
         return nextMeetings.find((m) => m.id === prev.id) || nextMeetings[0] || null;
       }
       return nextMeetings[0] || null;
     });
-  }, [classData]);
+  }, [classData, initialMeetingNo, initialTab]);
+
+  useEffect(() => {
+    if (initialTab && ['meetings', 'exam', 'tasks', 'discussion'].includes(initialTab)) {
+      setActiveTab(initialTab);
+    }
+    if (initialMeetingNo && meetingsList.length > 0) {
+      const matched = meetingsList.find((m) => Number(m.order || 1) === Number(initialMeetingNo));
+      if (matched) {
+        setSelectedMeeting(matched);
+      }
+    }
+  }, [initialTab, initialMeetingNo, meetingsList]);
 
   useEffect(() => {
     const isActiveSession = examActive && !examFinished;
@@ -381,7 +491,7 @@ export default function ClassDetailView({
     const loadClassExtras = async () => {
       setTasksLoading(true);
       try {
-        if (currentUser && targetClassId) {
+        if (currentUser && targetClassId && !isPreviewMode) {
           const [taskRes, attempts, progressList] = await Promise.all([
             fetchAssignmentsWithUserSubmissions({ classId: targetClassId }),
             fetchUserClassExamAttempts(targetClassId, currentUser.uid),
@@ -417,7 +527,7 @@ export default function ClassDetailView({
     };
 
     void loadClassExtras();
-  }, [classData?.id, classData?.name, currentUser]);
+  }, [classData?.id, classData?.name, currentUser, isPreviewMode]);
 
   const loadInstructorAttendance = useCallback(
     async (meetingFilter = attendeesFilterMeeting) => {
@@ -450,14 +560,20 @@ export default function ClassDetailView({
     const targetClassId = classData.id;
     setGradingLoading(true);
     try {
-      const subs = await fetchClassSubmissionsForGrading(targetClassId);
+      const [subs, members, taskRes] = await Promise.all([
+        fetchClassSubmissionsForGrading(targetClassId),
+        fetchClassMembers(targetClassId),
+        fetchAssignmentsWithUserSubmissions({ classId: targetClassId }),
+      ]);
       if (!mountedRef.current || reqId !== gradingReqIdRef.current || classIdRef.current !== targetClassId) {
         return;
       }
-      setClassSubmissions(subs);
+      setClassSubmissions(subs || []);
+      setClassMembersList(members || []);
+      setTaskSubmissions(taskRes?.assignments || []);
       const initialGrades = {};
       const initialFeedbacks = {};
-      subs.forEach((s) => {
+      (subs || []).forEach((s) => {
         initialGrades[s.id] = typeof s.grade === 'number' ? String(s.grade) : '';
         initialFeedbacks[s.id] = s.feedback || '';
       });
@@ -507,15 +623,16 @@ export default function ClassDetailView({
   }, []);
 
   useEffect(() => {
-    if (!classData?.id || meetingsList.length === 0) {
+    if (!classData?.id || meetingsList.length === 0 || isPreviewMode) {
       setMeetingExams({ pretest: null, posttest: null });
       return;
     }
     void loadMeetingExams(classData.id, currentMeetingNo);
-  }, [classData?.id, currentMeetingNo, currentUser, meetingsList.length, loadMeetingExams]);
+  }, [classData?.id, currentMeetingNo, currentUser, meetingsList.length, isPreviewMode, loadMeetingExams]);
 
   useEffect(() => {
     setMaterialTextInput(deltaToEditableText(selectedMeeting?.deltaContent));
+    setMaterialImageUrlInput('');
     setMaterialEditOpen(false);
     setMaterialFeedback(null);
     setVideoUrlInput(selectedMeeting?.videoUrl ?? '');
@@ -532,7 +649,7 @@ export default function ClassDetailView({
       setEvalAnalyticsLoading(true);
       setEvalAnalyticsError('');
       try {
-        const [keyRes, examRes, attempts] = await Promise.all([
+        const [keyRes, examRes, attempts, members] = await Promise.all([
           fetchInstructorAnswerKey({
             classId: targetClassId,
             meetingNo: targetMeetingNo,
@@ -544,6 +661,7 @@ export default function ClassDetailView({
             examType: targetExamType,
           }),
           fetchClassExamAttempts(targetClassId),
+          fetchClassMembers(targetClassId),
         ]);
         if (!mountedRef.current || reqId !== evalReqIdRef.current || classIdRef.current !== targetClassId) {
           return;
@@ -557,6 +675,13 @@ export default function ClassDetailView({
           [targetExamType]: loadedExam,
         }));
         setClassExamAttempts(attempts || []);
+        setClassMembersList(members || []);
+
+        setExamDraftStatus(loadedExam?.status || 'published');
+        setExamDraftDurationMinutes(
+          Number(loadedExam?.durationMinutes) || DEFAULT_EXAM_DURATION_MINUTES
+        );
+        setExamDraftDeadline(toDateTimeLocalInputValue(loadedExam?.deadline));
 
         const existingQuestions = Array.isArray(loadedExam?.questions) ? loadedExam.questions : [];
         if (existingQuestions.length > 0) {
@@ -794,6 +919,10 @@ export default function ClassDetailView({
           examType: typeToGrade,
           active: false,
         });
+        const activeUid = auth.currentUser?.uid || currentUser?.uid || '';
+        clearExamDraftAnswers(
+          getExamDraftStorageKey(targetClassId, targetMeetingNo, typeToGrade, activeUid)
+        );
         setExamScore(data.score);
         upsertLocalAttempt({
           ...data,
@@ -826,7 +955,11 @@ export default function ClassDetailView({
     if (!examActive || examFinished) return;
 
     if (!examEndTimeRef.current) {
-      examEndTimeRef.current = Date.now() + 900 * 1000;
+      const fallbackMinutes =
+        Number(activeStudentExam?.durationMinutes) > 0
+          ? Number(activeStudentExam.durationMinutes)
+          : DEFAULT_EXAM_DURATION_MINUTES;
+      examEndTimeRef.current = Date.now() + fallbackMinutes * 60 * 1000;
     }
 
     const interval = setInterval(() => {
@@ -852,6 +985,96 @@ export default function ClassDetailView({
     return () => window.removeEventListener('beforeunload', handleBeforeUnload);
   }, [examActive, examFinished]);
 
+  useEffect(() => {
+    if (isEducatorOrAdmin || isPreviewMode || examActive || examFinished || !classData?.id) {
+      return;
+    }
+    const activeUid = currentUser?.uid || auth?.currentUser?.uid || '';
+    if (!activeUid || !Array.isArray(userExamAttempts) || userExamAttempts.length === 0) {
+      return;
+    }
+
+    const activeAttempt = userExamAttempts.find((attempt) => {
+      const isInProgress =
+        attempt?.status === 'in_progress' ||
+        (attempt?.examActive === true && attempt?.status !== 'submitted');
+      if (!isInProgress) return false;
+      const expiresAtMs = parseExamTimestampMs(attempt?.examExpiresAt ?? attempt?.expiresAt);
+      return expiresAtMs !== null && expiresAtMs > Date.now();
+    });
+    if (!activeAttempt) return;
+
+    const targetMeetingNo = Number(activeAttempt.meetingNo || 1);
+    const targetType = activeAttempt.examType === 'posttest' ? 'posttest' : 'pretest';
+    const resolvedAttemptId =
+      activeAttempt.id ||
+      activeAttempt.attemptId ||
+      `${classData.id}_m${targetMeetingNo}_${targetType}_${activeUid}`;
+
+    if (recoveredAttemptIdRef.current === resolvedAttemptId) return;
+
+    if (targetMeetingNo !== currentMeetingNo) {
+      const targetMeeting = meetingsList.find(
+        (m) => Number(m.order || 1) === targetMeetingNo
+      );
+      if (targetMeeting) {
+        setSelectedMeeting(targetMeeting);
+      }
+      return;
+    }
+
+    const targetExam = meetingExams[targetType];
+    if (!targetExam || !Array.isArray(targetExam.questions) || targetExam.questions.length === 0) {
+      return;
+    }
+    if (String(targetExam.status || 'published').trim().toLowerCase() !== 'published') {
+      return;
+    }
+
+    const expiresAtMs = parseExamTimestampMs(
+      activeAttempt.examExpiresAt ?? activeAttempt.expiresAt
+    );
+    if (!expiresAtMs || expiresAtMs <= Date.now()) return;
+
+    const remainingSecs = Math.max(1, Math.ceil((expiresAtMs - Date.now()) / 1000));
+    const draftKey = getExamDraftStorageKey(classData.id, targetMeetingNo, targetType, activeUid);
+    const restoredAnswers = readExamDraftAnswers(draftKey);
+
+    recoveredAttemptIdRef.current = resolvedAttemptId;
+    meetingNoRef.current = targetMeetingNo;
+    examEndTimeRef.current = expiresAtMs;
+    selectedAnswersRef.current = restoredAnswers;
+    examTypeRef.current = targetType;
+
+    setExamType(targetType);
+    setExamTimer(remainingSecs);
+    setSelectedAnswers(restoredAnswers);
+    setExamFinished(false);
+    setExamScore(null);
+    setExamError(null);
+    setExamActive(true);
+    setActiveTab('exam');
+
+    setLocalExamSession({
+      classId: classData.id,
+      meetingNo: targetMeetingNo,
+      examType: targetType,
+      active: true,
+      durationMs: remainingSecs * 1000,
+    });
+  }, [
+    isEducatorOrAdmin,
+    isPreviewMode,
+    examActive,
+    examFinished,
+    classData?.id,
+    currentUser?.uid,
+    userExamAttempts,
+    currentMeetingNo,
+    meetingsList,
+    meetingExams,
+  ]);
+
   const handleStartExam = async (type) => {
     const cycle = getMeetingCycleStatus(currentMeetingNo);
     const targetExam = meetingExams[type];
@@ -864,11 +1087,37 @@ export default function ClassDetailView({
       return;
     }
 
+    const targetExamStatus = String(targetExam.status || 'published').trim().toLowerCase();
+    if (targetExamStatus === 'draft') {
+      setExamError(
+        language === 'en'
+          ? 'This assessment is still in draft mode and has not been published by the lecturer.'
+          : 'Evaluasi ini masih berstatus draft dan belum dipublikasikan oleh dosen.'
+      );
+      return;
+    }
+    if (targetExamStatus === 'archived') {
+      setExamError(
+        language === 'en'
+          ? 'This assessment has been archived and is closed for submissions.'
+          : 'Evaluasi ini telah diarsipkan dan tidak lagi menerima pengerjaan.'
+      );
+      return;
+    }
+
     if (type === 'pretest' && cycle.pretestDone) {
       setExamError(
         language === 'en'
           ? 'Pretest for this meeting is already completed and locked as your diagnostic baseline.'
           : 'Pretest pertemuan ini sudah selesai dan dikunci sebagai skor baseline.'
+      );
+      return;
+    }
+    if (type === 'posttest' && cycle.posttestDone) {
+      setExamError(
+        language === 'en'
+          ? 'Post-test for this meeting is already completed and locked.'
+          : 'Post-test pertemuan ini sudah selesai dikumpulkan dan dikunci.'
       );
       return;
     }
@@ -894,6 +1143,7 @@ export default function ClassDetailView({
     setExamError(null);
     setExamNote('');
 
+    let startData = null;
     try {
       const token = await auth.currentUser.getIdToken();
       const res = await fetch('/api/grade', {
@@ -910,11 +1160,6 @@ export default function ClassDetailView({
         }),
       });
       const isJson = res.headers.get('content-type')?.includes('application/json');
-      if (isJson && !res.ok) {
-        const errData = await res.json().catch(() => ({}));
-        setExamError(errData.error || 'Gagal memulai sesi evaluasi di server.');
-        return;
-      }
       if (!isJson) {
         setExamError(
           language === 'en'
@@ -923,22 +1168,49 @@ export default function ClassDetailView({
         );
         return;
       }
+      startData = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        if (res.status === 409 && startData?.code === 'EXAM_ALREADY_SUBMITTED') {
+          upsertLocalAttempt({
+            ...startData,
+            meetingNo: startData.meetingNo || targetMeetingNo,
+            examType: startData.examType || type,
+          });
+        }
+        setExamError(startData?.error || 'Gagal memulai sesi evaluasi di server.');
+        return;
+      }
     } catch (err) {
       setExamError(err.message || 'Gagal memulai sesi evaluasi di server.');
       return;
     }
 
+    const fallbackMinutes =
+      Number(targetExam?.durationMinutes) > 0
+        ? Number(targetExam.durationMinutes)
+        : DEFAULT_EXAM_DURATION_MINUTES;
+    const serverExpiresAtMs = parseExamTimestampMs(startData?.examExpiresAt ?? startData?.expiresAt);
+    const nowMs = Date.now();
+    const resolvedEndTimeMs =
+      serverExpiresAtMs !== null ? serverExpiresAtMs : nowMs + fallbackMinutes * 60 * 1000;
+    const resolvedRemainingSeconds = Math.max(0, Math.ceil((resolvedEndTimeMs - nowMs) / 1000));
+    const activeUid = auth.currentUser?.uid || currentUser?.uid || '';
+    const draftKey = getExamDraftStorageKey(targetClassId, targetMeetingNo, type, activeUid);
+    const restoredDraftAnswers = startData?.resumed ? readExamDraftAnswers(draftKey) : {};
+
+    recoveredAttemptIdRef.current =
+      startData?.attemptId || `${targetClassId}_m${targetMeetingNo}_${type}_${activeUid}`;
     meetingNoRef.current = targetMeetingNo;
-    examEndTimeRef.current = Date.now() + 900 * 1000;
-    selectedAnswersRef.current = {};
+    examEndTimeRef.current = resolvedEndTimeMs;
+    selectedAnswersRef.current = restoredDraftAnswers;
     examTypeRef.current = type;
 
     setExamType(type);
     setExamActive(true);
-    setExamTimer(900);
+    setExamTimer(resolvedRemainingSeconds);
     setExamFinished(false);
     setExamScore(null);
-    setSelectedAnswers({});
+    setSelectedAnswers(restoredDraftAnswers);
     setActiveTab('exam');
 
     setLocalExamSession({
@@ -946,7 +1218,7 @@ export default function ClassDetailView({
       meetingNo: targetMeetingNo,
       examType: type,
       active: true,
-      durationMs: 900 * 1000,
+      durationMs: Math.max(1000, resolvedRemainingSeconds * 1000),
     });
   };
 
@@ -954,6 +1226,16 @@ export default function ClassDetailView({
     setSelectedAnswers((prev) => {
       const next = { ...prev, [qId]: optionIdx };
       selectedAnswersRef.current = next;
+      const activeUid = auth?.currentUser?.uid || currentUser?.uid || '';
+      const draftKey = getExamDraftStorageKey(
+        classIdRef.current,
+        meetingNoRef.current,
+        examTypeRef.current,
+        activeUid
+      );
+      if (draftKey) {
+        writeExamDraftAnswers(draftKey, next);
+      }
       return next;
     });
   };
@@ -991,6 +1273,85 @@ export default function ClassDetailView({
     return result;
   };
 
+  const appendMaterialSnippet = (snippet, separator = '\n') => {
+    setMaterialTextInput((prev) => {
+      const trimmedPrev = String(prev || '').trimEnd();
+      return trimmedPrev ? `${trimmedPrev}${separator}${snippet}` : snippet;
+    });
+  };
+
+  const handleInsertMaterialImageUrl = () => {
+    if (!isEducatorOrAdmin || savingMaterial || uploadingMaterialImage) return;
+    const trimmed = materialImageUrlInput.trim();
+    if (!trimmed) {
+      setMaterialFeedback({
+        type: 'error',
+        text:
+          language === 'en'
+            ? 'Enter an https:// image URL before inserting.'
+            : 'Masukkan URL gambar berawalan https:// sebelum menyisipkan.',
+      });
+      return;
+    }
+    try {
+      const cleanUrl = normalizeHttpsImageUrl(
+        trimmed,
+        language === 'en' ? 'Material image URL' : 'URL gambar materi'
+      );
+      appendMaterialSnippet(`![Ilustrasi modul](${cleanUrl})`);
+      setMaterialImageUrlInput('');
+      setMaterialFeedback({
+        type: 'success',
+        text:
+          language === 'en'
+            ? 'Image inserted into editor. Click Save Material to publish.'
+            : 'Gambar disisipkan ke editor materi. Klik Simpan Materi untuk menyimpan.',
+      });
+    } catch (err) {
+      setMaterialFeedback({
+        type: 'error',
+        text: err.message,
+      });
+    }
+  };
+
+  const handleUploadMaterialImage = async (e) => {
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    if (!file || !isEducatorOrAdmin || savingMaterial || uploadingMaterialImage) return;
+
+    setUploadingMaterialImage(true);
+    setMaterialFeedback(null);
+    try {
+      const uploadedUrl = await uploadHttpsImageToCloudinary(
+        file,
+        language === 'en' ? 'Material image' : 'Gambar materi'
+      );
+      const cleanAlt =
+        String(file.name || '')
+          .replace(/\.[^.]+$/, '')
+          .replace(/[[()\r\n\]]/g, '')
+          .trim() || 'Ilustrasi modul';
+      appendMaterialSnippet(`![${cleanAlt}](${uploadedUrl})`);
+      setMaterialFeedback({
+        type: 'success',
+        text:
+          language === 'en'
+            ? 'Image uploaded to Cloudinary CDN and inserted into editor. Click Save Material to publish.'
+            : 'Gambar berhasil diunggah ke Cloudinary CDN dan disisipkan ke editor. Klik Simpan Materi untuk menyimpan.',
+      });
+    } catch (err) {
+      setMaterialFeedback({
+        type: 'error',
+        text:
+          err.message ||
+          (language === 'en' ? 'Failed to upload material image.' : 'Gagal mengunggah gambar materi.'),
+      });
+    } finally {
+      setUploadingMaterialImage(false);
+    }
+  };
+
   const handleSaveMeetingDelta = async (e) => {
     e.preventDefault();
     if (!isEducatorOrAdmin || !selectedMeeting || savingMaterial || !classData?.id) return;
@@ -1011,6 +1372,7 @@ export default function ClassDetailView({
     try {
       await saveMeetingContentPatch(selectedMeeting, { deltaContent: nextDelta });
       setMaterialEditOpen(false);
+      setMaterialImageUrlInput('');
       setMaterialFeedback({
         type: 'success',
         text:
@@ -1035,6 +1397,7 @@ export default function ClassDetailView({
     try {
       await saveMeetingContentPatch(selectedMeeting, { deltaContent: null });
       setMaterialTextInput('');
+      setMaterialImageUrlInput('');
       setMaterialEditOpen(false);
       setMaterialFeedback({
         type: 'success',
@@ -1282,6 +1645,40 @@ export default function ClassDetailView({
     );
   };
 
+  const handleAddDraftOption = (qId) => {
+    setExamDraftQuestions((prev) =>
+      prev.map((q) => {
+        if (q.id !== qId) return q;
+        const currentOpts = Array.isArray(q.options) ? q.options : ['', ''];
+        if (currentOpts.length >= 6) return q;
+        return { ...q, options: [...currentOpts, ''] };
+      })
+    );
+  };
+
+  const handleRemoveDraftOption = (qId, optIdx) => {
+    const targetQuestion = examDraftQuestions.find((q) => q.id === qId);
+    const currentLen = Array.isArray(targetQuestion?.options) ? targetQuestion.options.length : 0;
+    if (currentLen <= 2) return;
+    const nextLen = currentLen - 1;
+
+    setExamDraftQuestions((prev) =>
+      prev.map((q) =>
+        q.id === qId && Array.isArray(q.options) && q.options.length > 2
+          ? { ...q, options: q.options.filter((_, idx) => idx !== optIdx) }
+          : q
+      )
+    );
+    setExamDraftAnswerKey((prev) => {
+      const prevIdx = Number(prev?.[qId] ?? 0);
+      const shiftedIdx = prevIdx === optIdx ? 0 : prevIdx > optIdx ? prevIdx - 1 : prevIdx;
+      return {
+        ...prev,
+        [qId]: Math.max(0, Math.min(nextLen - 1, shiftedIdx)),
+      };
+    });
+  };
+
   const handleUpdateDraftAnswerKey = (qId, optionIdx) => {
     setExamDraftAnswerKey((prev) => ({
       ...prev,
@@ -1292,6 +1689,41 @@ export default function ClassDetailView({
   const handleSaveMeetingExam = async (e) => {
     e.preventDefault();
     if (!isEducatorOrAdmin || savingExam || !classData?.id || !selectedMeeting) return;
+
+    const cleanStatus = ['published', 'draft', 'archived'].includes(
+      String(examDraftStatus || '').trim().toLowerCase()
+    )
+      ? String(examDraftStatus).trim().toLowerCase()
+      : 'published';
+
+    const parsedDuration = Number(examDraftDurationMinutes);
+    if (!Number.isInteger(parsedDuration) || parsedDuration < 1 || parsedDuration > 180) {
+      setExamSaveFeedback({
+        type: 'error',
+        text:
+          language === 'en'
+            ? 'Duration must be a whole number between 1 and 180 minutes.'
+            : 'Durasi ujian harus berupa bilangan bulat antara 1 hingga 180 menit.',
+      });
+      return;
+    }
+
+    let deadlineIso = null;
+    const rawDeadline = String(examDraftDeadline || '').trim();
+    if (rawDeadline) {
+      const parsedDeadlineMs = Date.parse(rawDeadline);
+      if (Number.isNaN(parsedDeadlineMs)) {
+        setExamSaveFeedback({
+          type: 'error',
+          text:
+            language === 'en'
+              ? 'Deadline date/time format is invalid.'
+              : 'Format batas waktu (deadline) evaluasi tidak valid.',
+        });
+        return;
+      }
+      deadlineIso = new Date(parsedDeadlineMs).toISOString();
+    }
 
     const cleanQuestions = examDraftQuestions.map((q) => ({
       id: String(q.id || '').trim(),
@@ -1309,13 +1741,13 @@ export default function ClassDetailView({
 
     for (let i = 0; i < cleanQuestions.length; i += 1) {
       const q = cleanQuestions[i];
-      if (!q.question || q.options.length < 2 || q.options.some((opt) => !opt)) {
+      if (!q.question || q.options.length < 2 || q.options.length > 6 || q.options.some((opt) => !opt)) {
         setExamSaveFeedback({
           type: 'error',
           text:
             language === 'en'
-              ? `Question ${i + 1} requires question text and all non-empty options.`
-              : `Soal ${i + 1} wajib memiliki teks pertanyaan dan seluruh opsi terisi.`,
+              ? `Question ${i + 1} requires question text and 2 to 6 non-empty options.`
+              : `Soal ${i + 1} wajib memiliki teks pertanyaan dan 2–6 opsi terisi.`,
         });
         return;
       }
@@ -1345,6 +1777,9 @@ export default function ClassDetailView({
         meetingNo: currentMeetingNo,
         examType: evalKeyType,
         title: examDraftTitle.trim(),
+        status: cleanStatus,
+        durationMinutes: parsedDuration,
+        deadline: deadlineIso,
         questions: cleanQuestions,
         answerKey: cleanAnswerKey,
       });
@@ -1367,15 +1802,95 @@ export default function ClassDetailView({
     }
   };
 
+  const handleArchiveMeetingExam = async () => {
+    if (!isEducatorOrAdmin || archivingExam || !classData?.id || !selectedMeeting) return;
+    setArchivingExam(true);
+    setExamSaveFeedback(null);
+    try {
+      await archiveMeetingExamByInstructor({
+        classId: classData.id,
+        meetingNo: currentMeetingNo,
+        examType: evalKeyType,
+      });
+      setExamDraftStatus('archived');
+      await loadInstructorEvalAnalytics(evalKeyType, currentMeetingNo);
+      setExamSaveFeedback({
+        type: 'success',
+        text:
+          language === 'en'
+            ? `${evalKeyType.toUpperCase()} for Meeting ${currentMeetingNo} archived.`
+            : `Evaluasi ${evalKeyType.toUpperCase()} Pertemuan ${currentMeetingNo} berhasil diarsipkan.`,
+      });
+    } catch (err) {
+      setExamSaveFeedback({
+        type: 'error',
+        text: err.message || 'Gagal mengarsipkan evaluasi.',
+      });
+    } finally {
+      setArchivingExam(false);
+    }
+  };
+
+  const executeDeleteMeetingExam = async () => {
+    if (!isEducatorOrAdmin || deletingExam || !classData?.id || !selectedMeeting) return;
+    setDeletingExam(true);
+    setExamSaveFeedback(null);
+    try {
+      await deleteMeetingExamByInstructor({
+        classId: classData.id,
+        meetingNo: currentMeetingNo,
+        examType: evalKeyType,
+      });
+      setConfirmDeleteExam(false);
+      setShowExamEditor(false);
+      await loadInstructorEvalAnalytics(evalKeyType, currentMeetingNo);
+      setExamSaveFeedback({
+        type: 'success',
+        text:
+          language === 'en'
+            ? `${evalKeyType.toUpperCase()} for Meeting ${currentMeetingNo} deleted from server.`
+            : `Evaluasi ${evalKeyType.toUpperCase()} Pertemuan ${currentMeetingNo} berhasil dihapus.`,
+      });
+    } catch (err) {
+      setExamSaveFeedback({
+        type: 'error',
+        text: err.message || 'Gagal menghapus evaluasi.',
+      });
+    } finally {
+      setDeletingExam(false);
+    }
+  };
+
   const handleTaskFileSubmit = async (e) => {
     e.preventDefault();
     if (!activeTaskModal || isUploading) return;
+    if (typeof activeTaskModal.grade === 'number') {
+      setTaskFeedback({
+        type: 'error',
+        text:
+          language === 'en'
+            ? 'This assignment has already been graded by the lecturer and is locked.'
+            : 'Tugas ini sudah dinilai oleh dosen dan dikunci.',
+      });
+      return;
+    }
 
     const cleanExternalUrl = externalUrlInput.trim();
     if (cleanExternalUrl && !isValidExternalUrl(cleanExternalUrl)) {
       setTaskFeedback({
         type: 'error',
         text: 'Tautan URL eksternal tidak valid. Harus diawali https:// atau http://',
+      });
+      return;
+    }
+
+    if (!isEducatorOrAdmin && !cleanExternalUrl && !activeTaskModal.submittedFile?.url) {
+      setTaskFeedback({
+        type: 'error',
+        text:
+          language === 'en'
+            ? 'Enter a valid external URL (Google Drive / GitHub / OneDrive / Docs) for your submission.'
+            : 'Masukkan tautan URL eksternal yang valid (Google Drive / GitHub / OneDrive / Docs) untuk pengumpulan tugas.',
       });
       return;
     }
@@ -1492,6 +2007,18 @@ export default function ClassDetailView({
   };
 
   const executeCancelTask = async (taskId) => {
+    const targetTask = taskSubmissions.find((tItem) => tItem.id === taskId);
+    if (typeof targetTask?.grade === 'number') {
+      setTaskFeedback({
+        type: 'error',
+        text:
+          language === 'en'
+            ? 'Graded submissions cannot be withdrawn.'
+            : 'Pengumpulan yang sudah dinilai dosen tidak dapat dihapus atau ditarik kembali.',
+      });
+      setWithdrawConfirmTaskId(null);
+      return;
+    }
     try {
       if (currentUser) {
         await cancelSubmissionInFirestore(taskId);
@@ -1571,6 +2098,94 @@ export default function ClassDetailView({
     }
   };
 
+  const handleOpenEditAssignment = (task) => {
+    if (!task) return;
+    setEditingAssignment({
+      id: task.id,
+      title: task.title || '',
+      meetingNo: Number(task.meetingNo || 1),
+      deadline: toDateTimeLocalInputValue(task.rawDeadline || task.deadline),
+      note: task.note || '',
+    });
+    setCreateTaskNotice(null);
+  };
+
+  const handleSaveAssignmentEdit = async (e) => {
+    e.preventDefault();
+    if (!isEducatorOrAdmin || savingAssignmentEdit || !editingAssignment?.id) return;
+    if (!editingAssignment.title.trim()) {
+      setCreateTaskNotice({
+        type: 'error',
+        text: language === 'en' ? 'Task title is required.' : 'Judul tugas wajib diisi.',
+      });
+      return;
+    }
+
+    setSavingAssignmentEdit(true);
+    setCreateTaskNotice(null);
+    try {
+      const updated = await updateAssignmentInFirestore(editingAssignment.id, {
+        title: editingAssignment.title.trim(),
+        meetingNo: Number(editingAssignment.meetingNo || 1),
+        deadline: editingAssignment.deadline,
+        note: editingAssignment.note,
+      });
+      setTaskSubmissions((prev) =>
+        prev.map((item) => (item.id === updated.id ? { ...item, ...updated } : item))
+      );
+      setClassSubmissions((prev) =>
+        prev.map((sub) =>
+          sub.assignmentId === updated.id
+            ? { ...sub, assignment: updated.title, meetingNo: updated.meetingNo }
+            : sub
+        )
+      );
+      setEditingAssignment(null);
+      setCreateTaskNotice({
+        type: 'success',
+        text:
+          language === 'en'
+            ? `Task "${updated.title}" updated.`
+            : `Tugas "${updated.title}" berhasil diperbarui.`,
+      });
+    } catch (err) {
+      setCreateTaskNotice({
+        type: 'error',
+        text: err.message || 'Gagal memperbarui tugas pertemuan.',
+      });
+    } finally {
+      setSavingAssignmentEdit(false);
+    }
+  };
+
+  const executeDeleteAssignment = async () => {
+    if (!isEducatorOrAdmin || deletingAssignment || !deleteAssignmentTarget?.id) return;
+    setDeletingAssignment(true);
+    setCreateTaskNotice(null);
+    try {
+      const deletedId = deleteAssignmentTarget.id;
+      const deletedTitle = deleteAssignmentTarget.title || '';
+      await deleteAssignmentInFirestore(deletedId);
+      setTaskSubmissions((prev) => prev.filter((item) => item.id !== deletedId));
+      setGradingAssignmentFilter((prev) => (prev === deletedId ? 'all' : prev));
+      setDeleteAssignmentTarget(null);
+      setCreateTaskNotice({
+        type: 'success',
+        text:
+          language === 'en'
+            ? `Task "${deletedTitle}" deleted from Firestore.`
+            : `Tugas "${deletedTitle}" berhasil dihapus dari Firestore.`,
+      });
+    } catch (err) {
+      setCreateTaskNotice({
+        type: 'error',
+        text: err.message || 'Gagal menghapus tugas dari Firestore.',
+      });
+    } finally {
+      setDeletingAssignment(false);
+    }
+  };
+
   const handleJoinFromPreview = async () => {
     if (!classData?.code || joiningClass) return;
     setJoiningClass(true);
@@ -1601,6 +2216,7 @@ export default function ClassDetailView({
     setEditClassDesc(classData?.description || '');
     setEditClassDay(classData?.day || '');
     setEditClassTime(classData?.time || '');
+    setEditClassCoverImage(classData?.coverImage || '');
     setClassInfoFeedback(null);
     setIsEditingClassInfo(true);
   };
@@ -1617,6 +2233,20 @@ export default function ClassDetailView({
       return;
     }
 
+    let cleanCoverImage = '';
+    try {
+      cleanCoverImage = normalizeHttpsImageUrl(
+        editClassCoverImage,
+        language === 'en' ? 'Class cover URL' : 'URL cover kelas'
+      );
+    } catch (err) {
+      setClassInfoFeedback({
+        type: 'error',
+        text: err.message,
+      });
+      return;
+    }
+
     setSavingClassInfo(true);
     setClassInfoFeedback(null);
     try {
@@ -1625,7 +2255,10 @@ export default function ClassDetailView({
         description: editClassDesc.trim(),
         day: editClassDay,
         time: editClassTime.trim(),
+        coverImage: cleanCoverImage,
       });
+      const resolvedCover =
+        typeof updated.coverImage === 'string' ? updated.coverImage : cleanCoverImage;
       onClassUpdated?.({
         ...classData,
         name: updated.name || cleanName,
@@ -1633,6 +2266,7 @@ export default function ClassDetailView({
         description: typeof updated.description === 'string' ? updated.description : editClassDesc.trim(),
         day: typeof updated.day === 'string' ? updated.day : editClassDay,
         time: typeof updated.time === 'string' ? updated.time : editClassTime.trim(),
+        coverImage: resolvedCover,
       });
       setIsEditingClassInfo(false);
       setClassInfoFeedback({
@@ -2069,9 +2703,180 @@ export default function ClassDetailView({
         onClose={() => setDeleteMeetingTarget(null)}
       />
 
+      <AccessibleDialog
+        isOpen={confirmDeleteExam}
+        variant="danger"
+        title={language === 'en' ? 'Delete Evaluation' : 'Hapus Evaluasi'}
+        message={
+          language === 'en'
+            ? `Delete ${evalKeyType.toUpperCase()} for Meeting ${currentMeetingNo}? Questions and server reference keys will be removed.`
+            : `Hapus ${evalKeyType.toUpperCase()} pada Pertemuan ${currentMeetingNo}? Soal dan kunci jawaban server akan dihapus permanen.`
+        }
+        confirmLabel={language === 'en' ? 'Yes, Delete Exam' : 'Ya, Hapus Evaluasi'}
+        cancelLabel={t('dialog_cancel')}
+        onConfirm={() => void executeDeleteMeetingExam()}
+        onClose={() => setConfirmDeleteExam(false)}
+      />
+
+      <AccessibleDialog
+        isOpen={Boolean(deleteAssignmentTarget)}
+        variant="danger"
+        title={language === 'en' ? 'Delete Assignment' : 'Hapus Tugas Pertemuan'}
+        message={
+          deleteAssignmentTarget
+            ? language === 'en'
+              ? `Delete assignment "${deleteAssignmentTarget.title}" (Meeting ${deleteAssignmentTarget.meetingNo || 1}) from Firestore?`
+              : `Hapus tugas "${deleteAssignmentTarget.title}" (Pertemuan ${deleteAssignmentTarget.meetingNo || 1}) dari Firestore?`
+            : ''
+        }
+        confirmLabel={language === 'en' ? 'Yes, Delete Task' : 'Ya, Hapus Tugas'}
+        cancelLabel={t('dialog_cancel')}
+        onConfirm={() => void executeDeleteAssignment()}
+        onClose={() => setDeleteAssignmentTarget(null)}
+      />
+
+      {editingAssignment && (
+        <div className="fixed inset-0 z-50 bg-slate-950/75 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-white dark:bg-[#121822] border border-slate-200 dark:border-[#232f42] rounded-2xl w-full max-w-md overflow-hidden shadow-2xl">
+            <div className="p-4 border-b border-slate-200 dark:border-[#1b263b] flex items-center justify-between bg-slate-50 dark:bg-[#090d16]">
+              <h3 className="text-sm font-mono font-bold text-amber-700 dark:text-[#f59e0b] uppercase">
+                {language === 'en' ? '// Edit Assignment' : '// Ubah Tugas Pertemuan'}
+              </h3>
+              <button
+                type="button"
+                aria-label={language === 'en' ? 'Close edit dialog' : 'Tutup modal ubah tugas'}
+                onClick={() => setEditingAssignment(null)}
+                className="w-7 h-7 rounded-full bg-slate-200 dark:bg-slate-800 text-slate-600 dark:text-slate-300 flex items-center justify-center"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <form onSubmit={handleSaveAssignmentEdit} className="p-4 space-y-3 font-mono text-xs">
+              <div>
+                <label className="block text-[10px] font-bold text-slate-600 dark:text-slate-400 mb-1 uppercase">
+                  {language === 'en' ? 'Assignment Title' : 'Judul Tugas'}
+                </label>
+                <input
+                  type="text"
+                  required
+                  aria-label={language === 'en' ? 'Edit assignment title' : 'Edit judul tugas'}
+                  value={editingAssignment.title}
+                  onChange={(e) =>
+                    setEditingAssignment((prev) => ({ ...prev, title: e.target.value }))
+                  }
+                  className="w-full px-3 py-2 rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-[#0b0f17] text-slate-900 dark:text-slate-100"
+                />
+              </div>
+
+              <div className="grid grid-cols-2 gap-2.5">
+                <div>
+                  <label className="block text-[10px] font-bold text-slate-600 dark:text-slate-400 mb-1 uppercase">
+                    {language === 'en' ? 'Meeting' : 'Pertemuan'}
+                  </label>
+                  <select
+                    aria-label={language === 'en' ? 'Edit assignment meeting' : 'Edit pertemuan tugas'}
+                    value={editingAssignment.meetingNo}
+                    onChange={(e) =>
+                      setEditingAssignment((prev) => ({
+                        ...prev,
+                        meetingNo: Number(e.target.value),
+                      }))
+                    }
+                    className="w-full px-2.5 py-2 rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-[#0b0f17] text-slate-900 dark:text-slate-100"
+                  >
+                    {(meetingsList.length > 0
+                      ? meetingsList
+                      : [{ order: editingAssignment.meetingNo || 1, title: '' }]
+                    ).map((m) => (
+                      <option key={m.id || m.order} value={Number(m.order || 1)}>
+                        P{String(Number(m.order || 1)).padStart(2, '0')}
+                        {m.title ? `: ${m.title}` : ''}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-[10px] font-bold text-slate-600 dark:text-slate-400 mb-1 uppercase">
+                    {language === 'en' ? 'Deadline' : 'Tenggat Waktu'}
+                  </label>
+                  <input
+                    type="datetime-local"
+                    aria-label={language === 'en' ? 'Edit assignment deadline' : 'Edit tenggat tugas'}
+                    value={editingAssignment.deadline}
+                    onChange={(e) =>
+                      setEditingAssignment((prev) => ({ ...prev, deadline: e.target.value }))
+                    }
+                    className="w-full px-2.5 py-2 rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-[#0b0f17] text-slate-900 dark:text-slate-100"
+                  />
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-[10px] font-bold text-slate-600 dark:text-slate-400 mb-1 uppercase">
+                  {language === 'en' ? 'Description / Instructions' : 'Deskripsi / Instruksi'}
+                </label>
+                <textarea
+                  rows="3"
+                  aria-label={language === 'en' ? 'Edit assignment description' : 'Edit deskripsi tugas'}
+                  value={editingAssignment.note}
+                  onChange={(e) =>
+                    setEditingAssignment((prev) => ({ ...prev, note: e.target.value }))
+                  }
+                  className="w-full px-3 py-2 rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-[#0b0f17] text-slate-900 dark:text-slate-100"
+                />
+              </div>
+
+              <div className="flex justify-end gap-2 pt-2 border-t border-slate-200 dark:border-[#1b263b]">
+                <button
+                  type="button"
+                  onClick={() => setEditingAssignment(null)}
+                  className="px-3 py-1.5 text-slate-500 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white"
+                >
+                  {t('dialog_cancel')}
+                </button>
+                <button
+                  type="submit"
+                  disabled={savingAssignmentEdit || !editingAssignment.title.trim()}
+                  className="bg-[#f59e0b] hover:bg-[#d97706] text-black font-bold px-4 py-1.5 rounded flex items-center gap-1.5 disabled:opacity-50"
+                >
+                  <Save className="w-3.5 h-3.5" />
+                  {savingAssignmentEdit
+                    ? language === 'en'
+                      ? 'Saving...'
+                      : 'Menyimpan...'
+                    : language === 'en'
+                      ? 'Save Changes'
+                      : 'Simpan Perubahan Tugas'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
       {/* Top Header Card */}
       <div className="bg-white dark:bg-[#121822] p-5 sm:p-6 rounded-xl border border-slate-200 dark:border-[#232f42] relative overflow-hidden shadow-md text-slate-900 dark:text-slate-100">
         <div className="absolute top-0 left-0 right-0 h-1 bg-[#f59e0b]" />
+
+        {classData?.coverImage && (() => {
+          try {
+            const safeHeaderCover = normalizeHttpsImageUrl(classData.coverImage, 'URL cover kelas');
+            if (!safeHeaderCover) return null;
+            return (
+              <div className="mb-3 rounded-lg overflow-hidden border border-slate-200 dark:border-[#232f42] h-32 sm:h-40 bg-slate-100 dark:bg-[#0b0f17]">
+                <SafeImage
+                  src={safeHeaderCover}
+                  alt={classData.name || classData.title}
+                  fallbackLabel={classData.code || classData.category}
+                  variant="cover"
+                  className="w-full h-full object-cover"
+                />
+              </div>
+            );
+          } catch {
+            return null;
+          }
+        })()}
 
         <div className="flex flex-wrap items-center justify-between gap-2 mb-3">
           <button
@@ -2148,6 +2953,7 @@ export default function ClassDetailView({
 
         {classInfoFeedback && (
           <div
+            role={classInfoFeedback.type === 'error' ? 'alert' : undefined}
             className={`mt-3 p-2.5 rounded-lg text-xs font-mono flex items-center gap-2 border ${
               classInfoFeedback.type === 'success'
                 ? 'bg-emerald-50 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-300 border-emerald-200 dark:border-emerald-500/40'
@@ -2212,6 +3018,18 @@ export default function ClassDetailView({
                 />
               </div>
             </div>
+            <CoverImageField
+              value={editClassCoverImage}
+              onChange={(val) => {
+                setClassInfoFeedback(null);
+                setEditClassCoverImage(val);
+              }}
+              disabled={savingClassInfo}
+              language={language}
+              fallbackLabel={classData?.code || editClassName || 'SMARTSA'}
+              previewAlt={editClassName || classData?.name || 'Preview Cover Kelas'}
+              compact
+            />
             <div>
               <label className="block text-[10px] font-bold text-slate-600 dark:text-slate-400 mb-1 uppercase">
                 {language === 'en' ? 'Description' : 'Deskripsi Silabus'}
@@ -2844,7 +3662,16 @@ export default function ClassDetailView({
               {isEducatorOrAdmin && selectedMeeting && (
                 <button
                   type="button"
-                  onClick={() => setMaterialEditOpen((prev) => !prev)}
+                  onClick={() =>
+                    setMaterialEditOpen((prev) => {
+                      const nextOpen = !prev;
+                      if (nextOpen) {
+                        setMaterialTextInput(deltaToEditableText(selectedMeeting?.deltaContent));
+                        setMaterialImageUrlInput('');
+                      }
+                      return nextOpen;
+                    })
+                  }
                   className="bg-slate-100 dark:bg-[#1c2432] hover:bg-slate-200 dark:hover:bg-[#253245] text-slate-800 dark:text-slate-200 border border-slate-300 dark:border-slate-700 text-xs font-mono font-bold px-3 py-1.5 rounded-xs transition flex items-center gap-1.5"
                 >
                   <Edit3 className="w-3.5 h-3.5" />
@@ -2875,7 +3702,7 @@ export default function ClassDetailView({
               onSubmit={handleSaveMeetingDelta}
               className="p-4 rounded-xl bg-slate-50 dark:bg-[#0a0f18] border border-slate-200 dark:border-[#1e2a3f] space-y-3 font-mono"
             >
-              <div className="flex items-center justify-between gap-2">
+              <div className="flex flex-wrap items-center justify-between gap-2">
                 <h4 className="text-xs font-bold text-amber-700 dark:text-[#f59e0b] uppercase">
                   {language === 'en'
                     ? `Manage Meeting ${selectedMeeting.order} Material`
@@ -2883,26 +3710,110 @@ export default function ClassDetailView({
                 </h4>
                 <span className="text-[10px] text-slate-500 dark:text-slate-400">
                   {language === 'en'
-                    ? 'Use "# " for headings and "- " for bullet lists.'
-                    : 'Gunakan "# " untuk subbab dan "- " untuk daftar poin.'}
+                    ? 'Supports # H1..### H3, **bold**, *italic*, `code`, [link](https://), > quote, lists, ```code-block```, images'
+                    : 'Mendukung # H1..### H3, **tebal**, *miring*, `kode`, [tautan](https://), > kutipan, daftar, ```blok kode```, gambar'}
                 </span>
               </div>
+
+              <div className="flex flex-wrap items-center gap-1.5">
+                {[
+                  { label: '## Subbab', snippet: '## Subbab Materi' },
+                  { label: '**Tebal**', snippet: '**teks tebal**', sep: ' ' },
+                  { label: '*Miring*', snippet: '*teks miring*', sep: ' ' },
+                  { label: '[Tautan]', snippet: '[Referensi](https://smartsa.edu)', sep: ' ' },
+                  { label: '> Kutipan', snippet: '> Catatan penting perkuliahan.' },
+                  { label: '1. Urutan', snippet: '1. Langkah pertama' },
+                  { label: '``` Kode', snippet: '```\nconsole.log("Smartsa");\n```' },
+                ].map((tool) => (
+                  <button
+                    key={tool.label}
+                    type="button"
+                    disabled={savingMaterial || uploadingMaterialImage}
+                    onClick={() => appendMaterialSnippet(tool.snippet, tool.sep || '\n')}
+                    className="px-2 py-1 text-[10px] font-bold rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-[#121822] hover:bg-slate-100 dark:hover:bg-[#1c2536] text-slate-700 dark:text-slate-300 transition disabled:opacity-50"
+                  >
+                    {tool.label}
+                  </button>
+                ))}
+              </div>
+
               <textarea
-                rows={5}
+                rows={7}
                 aria-label={language === 'en' ? 'Meeting reading material text' : 'Teks materi pertemuan'}
                 value={materialTextInput}
                 onChange={(e) => setMaterialTextInput(e.target.value)}
                 placeholder={
                   language === 'en'
-                    ? '# Topic Heading\nWrite structured reading material here...\n- Key takeaway 1'
-                    : '# Judul Materi Pertemuan\nTuliskan pembahasan materi terstruktur di sini...\n- Poin penting 1'
+                    ? '# Topic Heading\nWrite structured reading material with **bold**, *italic*, [link](https://example.com)...\n- Key takeaway 1'
+                    : '# Judul Materi Pertemuan\nTuliskan pembahasan materi dengan **tebal**, *miring*, [tautan](https://example.com)...\n- Poin penting 1'
                 }
                 className="w-full px-3 py-2 text-xs rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-[#121822] text-slate-900 dark:text-slate-100"
               />
+
+              <div className="p-3 rounded-lg bg-white dark:bg-[#121822] border border-slate-200 dark:border-[#1e2a3f] space-y-2">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-[11px] font-bold text-slate-700 dark:text-slate-300 flex items-center gap-1.5">
+                    <ImageIcon className="w-3.5 h-3.5 text-amber-500" />
+                    {language === 'en' ? 'Insert Image into Delta Material' : 'Sisipkan Gambar ke Materi'}
+                  </span>
+                  <span className="text-[10px] text-slate-500 dark:text-slate-400">
+                    {language === 'en' ? 'HTTPS URL or Cloudinary CDN' : 'URL https:// atau Cloudinary'}
+                  </span>
+                </div>
+                <div className="flex flex-col sm:flex-row gap-2">
+                  <input
+                    type="text"
+                    inputMode="url"
+                    aria-label={
+                      language === 'en' ? 'Material image URL (https://)' : 'URL gambar materi (https://)'
+                    }
+                    disabled={savingMaterial || uploadingMaterialImage}
+                    placeholder="https://res.cloudinary.com/.../diagram.png"
+                    value={materialImageUrlInput}
+                    onChange={(e) => setMaterialImageUrlInput(e.target.value)}
+                    className="flex-1 px-2.5 py-1.5 text-xs rounded border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-[#0a0f18] text-slate-900 dark:text-slate-100"
+                  />
+                  <button
+                    type="button"
+                    disabled={savingMaterial || uploadingMaterialImage}
+                    onClick={handleInsertMaterialImageUrl}
+                    className="px-3 py-1.5 text-[11px] font-bold rounded border border-amber-300 dark:border-[#f59e0b]/40 bg-amber-50 dark:bg-amber-950/30 hover:bg-amber-100 text-amber-800 dark:text-[#f59e0b] transition disabled:opacity-50"
+                  >
+                    {language === 'en' ? 'Insert Image URL' : 'Sisipkan URL Gambar'}
+                  </button>
+                  <label
+                    className={`inline-flex items-center justify-center gap-1.5 px-3 py-1.5 text-[11px] font-bold rounded border transition cursor-pointer ${
+                      savingMaterial || uploadingMaterialImage
+                        ? 'opacity-50 cursor-not-allowed bg-slate-100 dark:bg-slate-800 text-slate-500 border-slate-300 dark:border-slate-700'
+                        : 'bg-indigo-50 dark:bg-indigo-950/50 hover:bg-indigo-100 dark:hover:bg-indigo-900/60 text-indigo-700 dark:text-indigo-300 border-indigo-200 dark:border-indigo-500/40'
+                    }`}
+                  >
+                    <Upload className="w-3.5 h-3.5" />
+                    <span>
+                      {uploadingMaterialImage
+                        ? language === 'en'
+                          ? 'Uploading...'
+                          : 'Mengunggah...'
+                        : language === 'en'
+                          ? 'Upload Image'
+                          : 'Unggah Gambar'}
+                    </span>
+                    <input
+                      type="file"
+                      accept="image/png,image/jpeg,image/webp,image/gif"
+                      aria-label={language === 'en' ? 'Upload material image' : 'Unggah gambar materi'}
+                      disabled={savingMaterial || uploadingMaterialImage}
+                      onChange={handleUploadMaterialImage}
+                      className="sr-only"
+                    />
+                  </label>
+                </div>
+              </div>
+
               <div className="flex flex-wrap items-center gap-2">
                 <button
                   type="submit"
-                  disabled={savingMaterial}
+                  disabled={savingMaterial || uploadingMaterialImage}
                   className="bg-[#f59e0b] hover:bg-[#d97706] text-black text-xs font-bold px-3.5 py-1.5 rounded flex items-center gap-1.5 disabled:opacity-50"
                 >
                   <Save className="w-3.5 h-3.5" />
@@ -2917,7 +3828,7 @@ export default function ClassDetailView({
                 {selectedMeeting.deltaContent && (
                   <button
                     type="button"
-                    disabled={savingMaterial}
+                    disabled={savingMaterial || uploadingMaterialImage}
                     onClick={() => void handleClearMeetingDelta()}
                     className="bg-rose-50 dark:bg-rose-950/40 hover:bg-rose-100 text-rose-700 dark:text-rose-300 border border-rose-200 dark:border-rose-500/40 text-xs font-bold px-3 py-1.5 rounded flex items-center gap-1.5 disabled:opacity-50"
                   >
@@ -3347,9 +4258,15 @@ export default function ClassDetailView({
                 // {language === 'en' ? 'COMPETENCY EVALUATION SESSION' : 'SESI EVALUASI KOMPETENSI'}
               </h3>
               <p className="text-xs text-slate-600 dark:text-slate-300 leading-relaxed">
-                {language === 'en'
-                  ? 'Assessment duration is 15 minutes with active session logging in Firestore.'
-                  : 'Evaluasi memiliki durasi 15 menit dengan pencatatan sesi aktif di Firestore (exam_attempts).'}
+                {(() => {
+                  const configuredMinutes =
+                    meetingExams.pretest?.durationMinutes ||
+                    meetingExams.posttest?.durationMinutes ||
+                    DEFAULT_EXAM_DURATION_MINUTES;
+                  return language === 'en'
+                    ? `Assessment duration is ${configuredMinutes} minutes with active session logging in Firestore.`
+                    : `Evaluasi memiliki durasi ${configuredMinutes} menit dengan pencatatan sesi aktif di Firestore (exam_attempts).`;
+                })()}
                 <strong className="text-rose-600 dark:text-rose-400 block mt-1.5">
                   ⚠️{' '}
                   {language === 'en'
@@ -3424,16 +4341,59 @@ export default function ClassDetailView({
                 </div>
               )}
 
-              <div className="flex flex-wrap justify-center gap-2.5 pt-2">
-                {(() => {
-                  const hasPretestQuestions = Boolean(meetingExams.pretest?.questions?.length);
-                  const hasPosttestQuestions = Boolean(meetingExams.posttest?.questions?.length);
-                  const pretestDisabled =
-                    activeCycle.pretestDone || !hasPretestQuestions || !selectedMeeting;
-                  const posttestDisabled =
-                    !activeCycle.canStartPosttest || !hasPosttestQuestions || !selectedMeeting;
-                  return (
-                    <>
+              {(() => {
+                const pretestStatus = String(meetingExams.pretest?.status || 'published')
+                  .trim()
+                  .toLowerCase();
+                const posttestStatus = String(meetingExams.posttest?.status || 'published')
+                  .trim()
+                  .toLowerCase();
+                const hasPretestQuestions = Boolean(meetingExams.pretest?.questions?.length);
+                const hasPosttestQuestions = Boolean(meetingExams.posttest?.questions?.length);
+                const pretestPublished = hasPretestQuestions && pretestStatus === 'published';
+                const posttestPublished = hasPosttestQuestions && posttestStatus === 'published';
+                const pretestDisabled =
+                  activeCycle.pretestDone || !pretestPublished || !selectedMeeting;
+                const posttestDisabled =
+                  activeCycle.posttestDone ||
+                  !activeCycle.canStartPosttest ||
+                  !posttestPublished ||
+                  !selectedMeeting;
+
+                const statusNotices = [];
+                if (hasPretestQuestions && pretestStatus !== 'published') {
+                  statusNotices.push(
+                    pretestStatus === 'draft'
+                      ? language === 'en'
+                        ? 'Pretest is currently in draft mode.'
+                        : 'Pretest saat ini berstatus draft dan belum dibuka oleh dosen.'
+                      : language === 'en'
+                        ? 'Pretest has been archived by the lecturer.'
+                        : 'Pretest telah diarsipkan oleh dosen.'
+                  );
+                }
+                if (hasPosttestQuestions && posttestStatus !== 'published') {
+                  statusNotices.push(
+                    posttestStatus === 'draft'
+                      ? language === 'en'
+                        ? 'Post-test is currently in draft mode.'
+                        : 'Post-test saat ini berstatus draft dan belum dibuka oleh dosen.'
+                      : language === 'en'
+                        ? 'Post-test has been archived by the lecturer.'
+                        : 'Post-test telah diarsipkan oleh dosen.'
+                  );
+                }
+
+                return (
+                  <div className="space-y-2.5 pt-2">
+                    {statusNotices.length > 0 && (
+                      <div className="p-2.5 rounded-lg bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-500/40 text-amber-800 dark:text-amber-300 text-[11px] text-left space-y-0.5">
+                        {statusNotices.map((msg, idx) => (
+                          <div key={idx}>{msg}</div>
+                        ))}
+                      </div>
+                    )}
+                    <div className="flex flex-wrap justify-center gap-2.5">
                       <button
                         type="button"
                         onClick={() => void handleStartExam('pretest')}
@@ -3453,6 +4413,16 @@ export default function ClassDetailView({
                           </>
                         ) : !hasPretestQuestions ? (
                           language === 'en' ? 'PRETEST UNAVAILABLE' : 'PRETEST BELUM TERSEDIA'
+                        ) : pretestStatus === 'draft' ? (
+                          <>
+                            <Lock className="w-3.5 h-3.5" />
+                            {language === 'en' ? 'PRETEST IN DRAFT' : 'PRETEST MASIH DRAFT'}
+                          </>
+                        ) : pretestStatus === 'archived' ? (
+                          <>
+                            <Lock className="w-3.5 h-3.5" />
+                            {language === 'en' ? 'PRETEST ARCHIVED' : 'PRETEST DIARSIPKAN'}
+                          </>
                         ) : language === 'en' ? (
                           'START PRETEST'
                         ) : (
@@ -3470,18 +4440,30 @@ export default function ClassDetailView({
                         }`}
                       >
                         {posttestDisabled && <Lock className="w-3.5 h-3.5" />}
-                        {!hasPosttestQuestions
+                        {activeCycle.posttestDone
                           ? language === 'en'
-                            ? 'POST-TEST UNAVAILABLE'
-                            : 'POST-TEST BELUM TERSEDIA'
-                          : language === 'en'
-                            ? 'START POST-TEST'
-                            : 'MULAI POST-TEST'}
+                            ? `POST-TEST COMPLETED (${activeCycle.posttestAttempt?.score})`
+                            : `POST-TEST SELESAI (SKOR: ${activeCycle.posttestAttempt?.score})`
+                          : !hasPosttestQuestions
+                            ? language === 'en'
+                              ? 'POST-TEST UNAVAILABLE'
+                              : 'POST-TEST BELUM TERSEDIA'
+                            : posttestStatus === 'draft'
+                              ? language === 'en'
+                                ? 'POST-TEST IN DRAFT'
+                                : 'POST-TEST MASIH DRAFT'
+                              : posttestStatus === 'archived'
+                                ? language === 'en'
+                                  ? 'POST-TEST ARCHIVED'
+                                  : 'POST-TEST DIARSIPKAN'
+                                : language === 'en'
+                                  ? 'START POST-TEST'
+                                  : 'MULAI POST-TEST'}
                       </button>
-                    </>
-                  );
-                })()}
-              </div>
+                    </div>
+                  </div>
+                );
+              })()}
             </div>
           )}
 
@@ -3491,6 +4473,10 @@ export default function ClassDetailView({
                 <div className="flex items-center gap-2 text-xs">
                   <span className="font-bold text-rose-400 uppercase">
                     {examType === 'pretest' ? '// PRETEST AKTIF' : '// POST-TEST AKTIF'}
+                  </span>
+                  <span className="text-slate-600">•</span>
+                  <span className="text-[10px] text-slate-400">
+                    DURASI: {activeStudentExam?.durationMinutes || DEFAULT_EXAM_DURATION_MINUTES} MNT
                   </span>
                   <span className="text-slate-600">•</span>
                   <span className="text-[10px] text-slate-400">LOCKOUT AI: AKTIF</span>
@@ -3729,14 +4715,32 @@ export default function ClassDetailView({
 
                       <div className="flex items-center gap-2 self-end sm:self-center shrink-0 font-mono">
                         {isDone ? (
-                          <button
-                            type="button"
-                            onClick={() => setWithdrawConfirmTaskId(task.id)}
-                            className="bg-rose-50 dark:bg-rose-950/40 hover:bg-rose-100 dark:hover:bg-rose-900/60 text-rose-700 dark:text-rose-300 text-[10px] font-bold px-3 py-1.5 rounded-xs border border-rose-200 dark:border-rose-500/40 transition flex items-center gap-1 uppercase"
-                          >
-                            <Trash2 className="w-3 h-3" />
-                            {t('task_reupload_btn')}
-                          </button>
+                          <>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setActiveTaskModal(task);
+                                setUploadedFile(null);
+                                setExternalUrlInput(task.externalUrl || task.submittedFile?.url || '');
+                                setTaskNotes(task.notes || '');
+                                setTaskFeedback(null);
+                              }}
+                              className="bg-slate-100 dark:bg-[#1c2432] hover:bg-slate-200 dark:hover:bg-[#253245] text-slate-700 dark:text-slate-300 text-[10px] font-bold px-3 py-1.5 rounded-xs border border-slate-300 dark:border-slate-600 transition flex items-center gap-1 uppercase"
+                            >
+                              <Eye className="w-3 h-3" />
+                              {language === 'en' ? 'Task Details' : 'Detail Tugas'}
+                            </button>
+                            {typeof task.grade !== 'number' && (
+                              <button
+                                type="button"
+                                onClick={() => setWithdrawConfirmTaskId(task.id)}
+                                className="bg-rose-50 dark:bg-rose-950/40 hover:bg-rose-100 dark:hover:bg-rose-900/60 text-rose-700 dark:text-rose-300 text-[10px] font-bold px-3 py-1.5 rounded-xs border border-rose-200 dark:border-rose-500/40 transition flex items-center gap-1 uppercase"
+                              >
+                                <Trash2 className="w-3 h-3" />
+                                {t('task_reupload_btn')}
+                              </button>
+                            )}
+                          </>
                         ) : (
                           <button
                             type="button"
@@ -4005,7 +5009,7 @@ export default function ClassDetailView({
         </div>
       )}
 
-      {/* INSTRUCTOR / ADMIN TAB: Submissions Grading & Task Creation */}
+      {/* INSTRUCTOR / ADMIN TAB: Submissions Grading & Task Creation/Edit/Delete */}
       {!isPreviewMode && isEducatorOrAdmin && activeTab === 'grading' && (
         <div className="bg-white dark:bg-[#121822] p-5 rounded-xl border border-slate-200 dark:border-[#232f42] space-y-5">
           {/* Create Meeting Task Form */}
@@ -4039,18 +5043,28 @@ export default function ClassDetailView({
                   Pertemuan
                 </label>
                 <select
-                  value={effectiveNewTaskMeetingNo}
+                  aria-label={language === 'en' ? 'New assignment meeting' : 'Pertemuan tugas baru'}
+                  value={meetingsList.length > 0 ? effectiveNewTaskMeetingNo : ''}
                   onChange={(e) => setNewTaskMeetingNo(Number(e.target.value))}
-                  className="w-full px-2.5 py-2 text-xs rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-[#121822] text-slate-900 dark:text-slate-100"
+                  disabled={meetingsList.length === 0}
+                  className="w-full px-2.5 py-2 text-xs rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-[#121822] text-slate-900 dark:text-slate-100 disabled:opacity-50"
                 >
-                  {(meetingsList.length > 0
-                    ? meetingsList.map((m) => m.order)
-                    : Array.from({ length: 16 }, (_, idx) => idx + 1)
-                  ).map((num) => (
-                    <option key={num} value={num}>
-                      Pertemuan {num < 10 ? `0${num}` : num}
+                  {meetingsList.length === 0 ? (
+                    <option value="">
+                      {language === 'en'
+                        ? 'Add a meeting first'
+                        : 'Tambahkan pertemuan dulu'}
                     </option>
-                  ))}
+                  ) : (
+                    meetingsList.map((m) => {
+                      const num = Number(m.order || 1);
+                      return (
+                        <option key={m.id || num} value={num}>
+                          P{num < 10 ? `0${num}` : num}: {m.title}
+                        </option>
+                      );
+                    })
+                  )}
                 </select>
               </div>
               <div className="sm:col-span-2">
@@ -4094,7 +5108,7 @@ export default function ClassDetailView({
               </div>
               <button
                 type="submit"
-                disabled={creatingTask}
+                disabled={creatingTask || meetingsList.length === 0}
                 className="bg-[#f59e0b] hover:bg-[#d97706] text-black text-xs font-bold px-4 py-2 rounded-lg transition flex items-center justify-center gap-1.5 disabled:opacity-50"
               >
                 <Plus className="w-4 h-4" />
@@ -4103,156 +5117,382 @@ export default function ClassDetailView({
             </div>
           </form>
 
-          <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-200 dark:border-[#1b263b] pb-3">
-            <div>
-              <h3 className="text-xs font-mono font-bold text-amber-700 dark:text-[#f59e0b] uppercase tracking-wider flex items-center gap-1.5">
-                <Award className="w-4 h-4" />
-                <span>
-                  {language === 'en'
-                    ? '// CLASS SUBMISSIONS & GRADING'
-                    : '// PENILAIAN TUGAS MAHASISWA'}
-                </span>
-              </h3>
-              <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-0.5">
-                {language === 'en'
-                  ? 'Review student submissions in this class and save 0–100 grades + feedback.'
-                  : 'Tinjau pengumpulan tugas mahasiswa pada kelas ini dan simpan nilai (0–100) beserta umpan balik.'}
-              </p>
-            </div>
-            <button
-              type="button"
-              onClick={() => void loadInstructorGrading()}
-              disabled={gradingLoading}
-              className="text-[11px] font-mono font-bold px-3 py-1.5 rounded-xs bg-slate-100 dark:bg-[#1c2432] text-slate-700 dark:text-slate-200 border border-slate-200 dark:border-slate-700 flex items-center gap-1.5"
-            >
-              <RefreshCw className={`w-3.5 h-3.5 ${gradingLoading ? 'animate-spin' : ''}`} />
-              {language === 'en' ? 'Refresh' : 'Muat Ulang'}
-            </button>
-          </div>
+          {(() => {
+            const taskById = new Map((taskSubmissions || []).map((tItem) => [tItem.id, tItem]));
+            const scopedTasks = (taskSubmissions || []).filter((tItem) =>
+              gradingMeetingFilter === 'all'
+                ? true
+                : Number(tItem.meetingNo || 1) === Number(gradingMeetingFilter)
+            );
+            const activeAssignmentFilterValid =
+              gradingAssignmentFilter !== 'all' &&
+              scopedTasks.some((tItem) => tItem.id === gradingAssignmentFilter);
+            const effectiveAssignmentFilter = activeAssignmentFilterValid
+              ? gradingAssignmentFilter
+              : 'all';
 
-          {gradingNotice && (
-            <div
-              className={`p-3 rounded-lg text-xs font-mono flex items-center gap-2 border ${
-                gradingNotice.type === 'success'
-                  ? 'bg-emerald-50 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-300 border-emerald-200 dark:border-emerald-500/40'
-                  : 'bg-rose-50 dark:bg-rose-950/40 text-rose-700 dark:text-rose-300 border-rose-200 dark:border-rose-500/40'
-              }`}
-            >
-              {gradingNotice.type === 'success' ? (
-                <CheckCircle2 className="w-4 h-4 shrink-0" />
-              ) : (
-                <AlertTriangle className="w-4 h-4 shrink-0" />
-              )}
-              <span>{gradingNotice.text}</span>
-            </div>
-          )}
+            const filteredSubmissions = (classSubmissions || []).filter((sub) => {
+              const matchedTask = taskById.get(sub.assignmentId);
+              const subMeetingNo = Number(sub.meetingNo || matchedTask?.meetingNo || 1);
+              if (
+                gradingMeetingFilter !== 'all' &&
+                subMeetingNo !== Number(gradingMeetingFilter)
+              ) {
+                return false;
+              }
+              if (
+                effectiveAssignmentFilter !== 'all' &&
+                sub.assignmentId !== effectiveAssignmentFilter
+              ) {
+                return false;
+              }
+              return true;
+            });
 
-          {gradingLoading ? (
-            <div className="py-8 text-center text-xs font-mono text-slate-400">
-              Memuat daftar pengumpulan tugas...
-            </div>
-          ) : classSubmissions.length === 0 ? (
-            <div className="py-8 text-center bg-slate-50 dark:bg-[#0a0f18] rounded-xl border border-dashed border-slate-200 dark:border-[#232f42] text-xs font-mono text-slate-500 dark:text-slate-400">
-              {language === 'en'
-                ? 'No student submissions recorded in Firestore for this class yet.'
-                : 'Belum ada pengumpulan tugas mahasiswa pada kelas ini di Firestore.'}
-            </div>
-          ) : (
-            <div className="space-y-3">
-              {classSubmissions.map((sub) => (
-                <div
-                  key={sub.id}
-                  className="p-4 rounded-xl border border-slate-200 dark:border-[#1e2a3f] bg-slate-50 dark:bg-[#0a0f18] space-y-3"
-                >
-                  <div className="flex flex-wrap items-start justify-between gap-2">
-                    <div>
-                      <div className="flex items-center gap-2">
-                        <span className="text-xs font-bold text-slate-900 dark:text-slate-100">
-                          {sub.studentName}
-                        </span>
-                        <span
-                          className={`text-[9px] font-mono font-bold px-2 py-0.5 rounded-xs border ${
-                            sub.status === 'graded'
-                              ? 'bg-emerald-50 dark:bg-emerald-950/60 text-emerald-700 dark:text-emerald-300 border-emerald-200 dark:border-emerald-500/40'
-                              : 'bg-amber-50 dark:bg-amber-950/60 text-amber-700 dark:text-amber-300 border-amber-200 dark:border-amber-500/40'
-                          }`}
-                        >
-                          {sub.status === 'graded' ? `DINILAI (${sub.grade})` : 'MENUNGGU NILAI'}
-                        </span>
-                      </div>
-                      <p className="text-xs font-mono text-slate-600 dark:text-slate-300 mt-0.5">
-                        {sub.assignment} • {sub.submittedAt}
-                      </p>
-                      {sub.notes && (
-                        <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-1">
-                          Catatan: {sub.notes}
-                        </p>
-                      )}
-                    </div>
-                    {sub.fileUrl && (
-                      <a
-                        href={sub.fileUrl}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="text-xs font-mono font-bold text-blue-600 dark:text-[#00e5ff] hover:underline flex items-center gap-1"
-                      >
-                        <ExternalLink className="w-3.5 h-3.5" />
-                        {sub.fileName || 'Buka Berkas'}
-                      </a>
-                    )}
+            const approvedStudents = (classMembersList || []).filter((m) => {
+              const st = m?.status;
+              const isApproved =
+                st === undefined || st === null || st === '' || st === 'approved' || st === 'active';
+              const isStudent = m?.role !== ROLES.LECTURER && m?.role !== ROLES.ADMIN;
+              return isApproved && isStudent && Boolean(m?.uid);
+            });
+
+            const selectedMonitorTask =
+              effectiveAssignmentFilter !== 'all'
+                ? taskById.get(effectiveAssignmentFilter) || null
+                : scopedTasks.find(
+                    (tItem) => Number(tItem.meetingNo || 1) === Number(currentMeetingNo)
+                  ) ||
+                  scopedTasks[0] ||
+                  null;
+
+            const submittedUidsForTask = selectedMonitorTask
+              ? new Set(
+                  (classSubmissions || [])
+                    .filter((s) => s.assignmentId === selectedMonitorTask.id)
+                    .map((s) => s.uid)
+                    .filter(Boolean)
+                )
+              : new Set();
+
+            const unsubmittedStudents = selectedMonitorTask
+              ? approvedStudents.filter((m) => !submittedUidsForTask.has(m.uid))
+              : [];
+
+            return (
+              <>
+                {/* Managed Assignments List (Edit / Delete) */}
+                <div className="space-y-2.5">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <h4 className="text-xs font-mono font-bold text-slate-800 dark:text-slate-200 uppercase">
+                      {language === 'en'
+                        ? '// PUBLISHED CLASS ASSIGNMENTS (EDIT / DELETE)'
+                        : '// DAFTAR TUGAS PERTEMUAN (EDIT / HAPUS)'}
+                    </h4>
+                    <span className="text-[10px] font-mono text-slate-500 dark:text-slate-400">
+                      {scopedTasks.length} {language === 'en' ? 'assignments' : 'tugas'}
+                    </span>
                   </div>
 
-                  <div className="grid grid-cols-1 sm:grid-cols-12 gap-2 items-center pt-2 border-t border-slate-200 dark:border-[#1b263b] font-mono">
-                    <div className="sm:col-span-2">
-                      <input
-                        type="number"
-                        min={0}
-                        max={100}
-                        value={gradeInputs[sub.id] ?? ''}
-                        onChange={(e) =>
-                          setGradeInputs((prev) => ({ ...prev, [sub.id]: e.target.value }))
-                        }
-                        placeholder="0–100"
-                        className="w-full px-2.5 py-1.5 text-xs rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-[#121822] text-slate-900 dark:text-slate-100"
-                      />
+                  {scopedTasks.length === 0 ? (
+                    <div className="p-4 rounded-xl bg-slate-50 dark:bg-[#0a0f18] border border-dashed border-slate-200 dark:border-[#232f42] text-xs font-mono text-slate-500 dark:text-slate-400 text-center">
+                      {language === 'en'
+                        ? 'No assignments published for this filter yet.'
+                        : 'Belum ada tugas yang diterbitkan untuk filter ini.'}
                     </div>
-                    <div className="sm:col-span-7">
-                      <input
-                        type="text"
-                        value={feedbackInputs[sub.id] ?? ''}
-                        onChange={(e) =>
-                          setFeedbackInputs((prev) => ({ ...prev, [sub.id]: e.target.value }))
-                        }
-                        placeholder={
-                          language === 'en'
-                            ? 'Optional feedback for student...'
-                            : 'Umpan balik / catatan dosen (opsional)...'
-                        }
-                        className="w-full px-2.5 py-1.5 text-xs rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-[#121822] text-slate-900 dark:text-slate-100"
-                      />
+                  ) : (
+                    <div className="space-y-2">
+                      {scopedTasks.map((taskItem) => (
+                        <div
+                          key={taskItem.id}
+                          className="p-3 rounded-xl border border-slate-200 dark:border-[#1e2a3f] bg-slate-50 dark:bg-[#0a0f18] flex flex-wrap items-center justify-between gap-2.5"
+                        >
+                          <div className="min-w-0 flex-1">
+                            <div className="flex flex-wrap items-center gap-1.5">
+                              <span className="text-[9px] font-mono font-bold px-2 py-0.5 rounded-xs bg-sky-50 dark:bg-[#00e5ff]/10 text-sky-700 dark:text-[#00e5ff] border border-sky-200 dark:border-[#00e5ff]/30">
+                                P{Number(taskItem.meetingNo || 1)}
+                              </span>
+                              <span className="text-xs font-bold text-slate-900 dark:text-slate-100 truncate">
+                                {taskItem.title}
+                              </span>
+                            </div>
+                            <p className="text-[11px] font-mono text-slate-500 dark:text-slate-400 mt-0.5 truncate">
+                              {language === 'en' ? 'Deadline:' : 'Tenggat:'}{' '}
+                              {taskItem.deadline || 'Sesuai jadwal'}
+                              {taskItem.note ? ` • ${taskItem.note}` : ''}
+                            </p>
+                          </div>
+                          <div className="flex items-center gap-1.5 font-mono">
+                            <button
+                              type="button"
+                              aria-label={`Edit Tugas ${taskItem.title}`}
+                              onClick={() => handleOpenEditAssignment(taskItem)}
+                              className="px-2.5 py-1 text-[10px] font-bold rounded border border-sky-300 dark:border-[#00e5ff]/40 bg-sky-50 dark:bg-[#00e5ff]/10 text-sky-700 dark:text-[#00e5ff] flex items-center gap-1"
+                            >
+                              <Edit3 className="w-3 h-3" />
+                              {language === 'en' ? 'Edit' : 'Edit Tugas'}
+                            </button>
+                            <button
+                              type="button"
+                              aria-label={`Hapus Tugas ${taskItem.title}`}
+                              onClick={() => setDeleteAssignmentTarget(taskItem)}
+                              className="px-2.5 py-1 text-[10px] font-bold rounded border border-rose-300 dark:border-rose-500/40 bg-rose-50 dark:bg-rose-950/30 text-rose-700 dark:text-rose-300 flex items-center gap-1"
+                            >
+                              <Trash2 className="w-3 h-3" />
+                              {language === 'en' ? 'Delete' : 'Hapus Tugas'}
+                            </button>
+                          </div>
+                        </div>
+                      ))}
                     </div>
-                    <div className="sm:col-span-3 flex justify-end">
-                      <button
-                        type="button"
-                        onClick={() => handleSaveSubmissionGrade(sub)}
-                        disabled={gradingId === sub.id}
-                        className="w-full sm:w-auto bg-[#f59e0b] hover:bg-[#d97706] text-black text-xs font-bold px-3.5 py-1.5 rounded-lg transition flex items-center justify-center gap-1.5 disabled:opacity-50"
-                      >
-                        <Save className="w-3.5 h-3.5" />
-                        {gradingId === sub.id
-                          ? language === 'en'
-                            ? 'Saving...'
-                            : 'Menyimpan...'
-                          : language === 'en'
-                            ? 'Save Grade'
-                            : 'Simpan Nilai'}
-                      </button>
-                    </div>
+                  )}
+                </div>
+
+                {/* Filter Header + Unsubmitted Members Monitoring */}
+                <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-200 dark:border-[#1b263b] pb-3 pt-1">
+                  <div>
+                    <h3 className="text-xs font-mono font-bold text-amber-700 dark:text-[#f59e0b] uppercase tracking-wider flex items-center gap-1.5">
+                      <Award className="w-4 h-4" />
+                      <span>
+                        {language === 'en'
+                          ? '// CLASS SUBMISSIONS & GRADING'
+                          : '// PENILAIAN TUGAS MAHASISWA'}
+                      </span>
+                    </h3>
+                    <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-0.5">
+                      {language === 'en'
+                        ? 'Filter by meeting or task, track missing submissions, and save 0–100 grades + feedback.'
+                        : 'Filter per pertemuan/tugas, pantau mahasiswa yang belum mengumpulkan, dan simpan nilai (0–100).'}
+                    </p>
+                  </div>
+                  <div className="flex flex-wrap items-center gap-2 font-mono">
+                    <select
+                      aria-label={
+                        language === 'en' ? 'Filter grading by meeting' : 'Filter pertemuan penilaian'
+                      }
+                      value={gradingMeetingFilter}
+                      onChange={(e) => {
+                        setGradingMeetingFilter(e.target.value);
+                        setGradingAssignmentFilter('all');
+                      }}
+                      className="px-2.5 py-1.5 text-[11px] rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-[#0b0f17] text-slate-800 dark:text-slate-200"
+                    >
+                      <option value="all">
+                        {language === 'en' ? 'All Meetings' : 'Semua Pertemuan'}
+                      </option>
+                      {meetingsList.map((m) => {
+                        const ord = Number(m.order || 1);
+                        return (
+                          <option key={m.id || ord} value={String(ord)}>
+                            P{ord < 10 ? `0${ord}` : ord}
+                            {ord === currentMeetingNo ? ' (Aktif)' : ''}
+                          </option>
+                        );
+                      })}
+                    </select>
+
+                    <select
+                      aria-label={
+                        language === 'en' ? 'Filter grading by assignment' : 'Filter tugas penilaian'
+                      }
+                      value={effectiveAssignmentFilter}
+                      onChange={(e) => setGradingAssignmentFilter(e.target.value)}
+                      className="px-2.5 py-1.5 text-[11px] rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-[#0b0f17] text-slate-800 dark:text-slate-200 max-w-[220px]"
+                    >
+                      <option value="all">
+                        {language === 'en' ? 'All Tasks' : 'Semua Tugas'}
+                      </option>
+                      {scopedTasks.map((tItem) => (
+                        <option key={tItem.id} value={tItem.id}>
+                          {tItem.title} (P{tItem.meetingNo || 1})
+                        </option>
+                      ))}
+                    </select>
+
+                    <button
+                      type="button"
+                      onClick={() => void loadInstructorGrading()}
+                      disabled={gradingLoading}
+                      className="text-[11px] font-mono font-bold px-3 py-1.5 rounded-xs bg-slate-100 dark:bg-[#1c2432] text-slate-700 dark:text-slate-200 border border-slate-200 dark:border-slate-700 flex items-center gap-1.5"
+                    >
+                      <RefreshCw className={`w-3.5 h-3.5 ${gradingLoading ? 'animate-spin' : ''}`} />
+                      {language === 'en' ? 'Refresh' : 'Muat Ulang'}
+                    </button>
                   </div>
                 </div>
-              ))}
-            </div>
-          )}
+
+                {selectedMonitorTask && (
+                  <div className="p-3.5 rounded-xl bg-slate-50 dark:bg-[#0a0f18] border border-slate-200 dark:border-[#1e2a3f] space-y-2 font-mono">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <span className="text-[11px] font-bold text-slate-800 dark:text-slate-200 uppercase flex items-center gap-1.5">
+                        <Users className="w-3.5 h-3.5 text-rose-500" />
+                        {language === 'en'
+                          ? `Unsubmitted Members — ${selectedMonitorTask.title}`
+                          : `Belum Mengumpulkan — ${selectedMonitorTask.title}`}
+                      </span>
+                      <span className="text-[10px] font-bold px-2 py-0.5 rounded-xs bg-rose-50 dark:bg-rose-950/40 text-rose-700 dark:text-rose-300 border border-rose-200 dark:border-rose-500/40">
+                        {unsubmittedStudents.length}{' '}
+                        {language === 'en' ? 'Not Submitted' : 'Belum Kumpul'}
+                      </span>
+                    </div>
+                    {approvedStudents.length === 0 ? (
+                      <p className="text-[11px] text-slate-500 dark:text-slate-400">
+                        {language === 'en'
+                          ? 'No approved student members recorded in this class yet.'
+                          : 'Belum ada anggota mahasiswa aktif di kelas ini.'}
+                      </p>
+                    ) : unsubmittedStudents.length === 0 ? (
+                      <p className="text-[11px] text-emerald-700 dark:text-emerald-300">
+                        {language === 'en'
+                          ? 'All approved members have submitted this assignment!'
+                          : 'Seluruh anggota aktif sudah mengumpulkan tugas ini.'}
+                      </p>
+                    ) : (
+                      <div className="flex flex-wrap gap-2">
+                        {unsubmittedStudents.map((member) => (
+                          <div
+                            key={member.id || member.uid}
+                            className="px-2.5 py-1 rounded border border-rose-200 dark:border-rose-500/30 bg-white dark:bg-[#121822] text-[11px] text-slate-800 dark:text-slate-200 flex items-center gap-1.5"
+                          >
+                            <span className="font-bold">
+                              {member.studentName || member.displayName || member.name || member.email || member.uid}
+                            </span>
+                            <span className="text-[9px] text-rose-600 dark:text-rose-400 uppercase">
+                              Belum Mengumpulkan
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {gradingNotice && (
+                  <div
+                    className={`p-3 rounded-lg text-xs font-mono flex items-center gap-2 border ${
+                      gradingNotice.type === 'success'
+                        ? 'bg-emerald-50 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-300 border-emerald-200 dark:border-emerald-500/40'
+                        : 'bg-rose-50 dark:bg-rose-950/40 text-rose-700 dark:text-rose-300 border-rose-200 dark:border-rose-500/40'
+                    }`}
+                  >
+                    {gradingNotice.type === 'success' ? (
+                      <CheckCircle2 className="w-4 h-4 shrink-0" />
+                    ) : (
+                      <AlertTriangle className="w-4 h-4 shrink-0" />
+                    )}
+                    <span>{gradingNotice.text}</span>
+                  </div>
+                )}
+
+                {gradingLoading ? (
+                  <div className="py-8 text-center text-xs font-mono text-slate-400">
+                    Memuat daftar pengumpulan tugas...
+                  </div>
+                ) : filteredSubmissions.length === 0 ? (
+                  <div className="py-8 text-center bg-slate-50 dark:bg-[#0a0f18] rounded-xl border border-dashed border-slate-200 dark:border-[#232f42] text-xs font-mono text-slate-500 dark:text-slate-400">
+                    {language === 'en'
+                      ? 'No student submissions match the selected filter.'
+                      : 'Belum ada pengumpulan tugas mahasiswa untuk filter yang dipilih.'}
+                  </div>
+                ) : (
+                  <div className="space-y-3">
+                    {filteredSubmissions.map((sub) => (
+                      <div
+                        key={sub.id}
+                        className="p-4 rounded-xl border border-slate-200 dark:border-[#1e2a3f] bg-slate-50 dark:bg-[#0a0f18] space-y-3"
+                      >
+                        <div className="flex flex-wrap items-start justify-between gap-2">
+                          <div>
+                            <div className="flex items-center gap-2">
+                              <span className="text-xs font-bold text-slate-900 dark:text-slate-100">
+                                {sub.studentName}
+                              </span>
+                              <span
+                                className={`text-[9px] font-mono font-bold px-2 py-0.5 rounded-xs border ${
+                                  sub.status === 'graded'
+                                    ? 'bg-emerald-50 dark:bg-emerald-950/60 text-emerald-700 dark:text-emerald-300 border-emerald-200 dark:border-emerald-500/40'
+                                    : 'bg-amber-50 dark:bg-amber-950/60 text-amber-700 dark:text-amber-300 border-amber-200 dark:border-amber-500/40'
+                                }`}
+                              >
+                                {sub.status === 'graded' ? `DINILAI (${sub.grade})` : 'MENUNGGU NILAI'}
+                              </span>
+                            </div>
+                            <p className="text-xs font-mono text-slate-600 dark:text-slate-300 mt-0.5">
+                              {sub.assignment} • {sub.submittedAt}
+                            </p>
+                            {sub.notes && (
+                              <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-1">
+                                Catatan: {sub.notes}
+                              </p>
+                            )}
+                          </div>
+                          {sub.fileUrl && (
+                            <a
+                              href={sub.fileUrl}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="text-xs font-mono font-bold text-blue-600 dark:text-[#00e5ff] hover:underline flex items-center gap-1"
+                            >
+                              <ExternalLink className="w-3.5 h-3.5" />
+                              {sub.fileName || 'Buka Berkas'}
+                            </a>
+                          )}
+                        </div>
+
+                        <div className="grid grid-cols-1 sm:grid-cols-12 gap-2 items-center pt-2 border-t border-slate-200 dark:border-[#1b263b] font-mono">
+                          <div className="sm:col-span-2">
+                            <input
+                              type="number"
+                              min={0}
+                              max={100}
+                              value={gradeInputs[sub.id] ?? ''}
+                              onChange={(e) =>
+                                setGradeInputs((prev) => ({ ...prev, [sub.id]: e.target.value }))
+                              }
+                              placeholder="0–100"
+                              className="w-full px-2.5 py-1.5 text-xs rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-[#121822] text-slate-900 dark:text-slate-100"
+                            />
+                          </div>
+                          <div className="sm:col-span-7">
+                            <input
+                              type="text"
+                              value={feedbackInputs[sub.id] ?? ''}
+                              onChange={(e) =>
+                                setFeedbackInputs((prev) => ({ ...prev, [sub.id]: e.target.value }))
+                              }
+                              placeholder={
+                                language === 'en'
+                                  ? 'Optional feedback for student...'
+                                  : 'Umpan balik / catatan dosen (opsional)...'
+                              }
+                              className="w-full px-2.5 py-1.5 text-xs rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-[#121822] text-slate-900 dark:text-slate-100"
+                            />
+                          </div>
+                          <div className="sm:col-span-3 flex justify-end">
+                            <button
+                              type="button"
+                              onClick={() => handleSaveSubmissionGrade(sub)}
+                              disabled={gradingId === sub.id}
+                              className="w-full sm:w-auto bg-[#f59e0b] hover:bg-[#d97706] text-black text-xs font-bold px-3.5 py-1.5 rounded-lg transition flex items-center justify-center gap-1.5 disabled:opacity-50"
+                            >
+                              <Save className="w-3.5 h-3.5" />
+                              {gradingId === sub.id
+                                ? language === 'en'
+                                  ? 'Saving...'
+                                  : 'Menyimpan...'
+                                : language === 'en'
+                                  ? 'Save Grade'
+                                  : 'Simpan Nilai'}
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </>
+            );
+          })()}
         </div>
       )}
 
@@ -4306,10 +5546,64 @@ export default function ClassDetailView({
                       : 'Buat / Edit Soal & Kunci'}
                 </button>
               )}
+              {selectedMeeting && instructorExamQuestions.length > 0 && (
+                <>
+                  {activeInstructorExam?.status !== 'archived' && (
+                    <button
+                      type="button"
+                      disabled={archivingExam}
+                      onClick={() => void handleArchiveMeetingExam()}
+                      className="px-3 py-1.5 rounded-xs text-[10px] font-bold uppercase border border-amber-300 dark:border-amber-500/40 bg-amber-50 dark:bg-amber-950/30 text-amber-800 dark:text-amber-300 flex items-center gap-1 disabled:opacity-50"
+                    >
+                      <Lock className="w-3 h-3" />
+                      {archivingExam
+                        ? language === 'en'
+                          ? 'Archiving...'
+                          : 'Mengarsipkan...'
+                        : language === 'en'
+                          ? 'Archive Exam'
+                          : 'Arsipkan Evaluasi'}
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    disabled={deletingExam}
+                    onClick={() => setConfirmDeleteExam(true)}
+                    className="px-3 py-1.5 rounded-xs text-[10px] font-bold uppercase border border-rose-300 dark:border-rose-500/40 bg-rose-50 dark:bg-rose-950/30 text-rose-700 dark:text-rose-300 flex items-center gap-1 disabled:opacity-50"
+                  >
+                    <Trash2 className="w-3 h-3" />
+                    {language === 'en' ? 'Delete Exam' : 'Hapus Evaluasi'}
+                  </button>
+                </>
+              )}
             </div>
           </div>
 
           {renderEducatorMeetingToolbar('educator-exam-meeting')}
+
+          {selectedMeeting && activeInstructorExam && (
+            <div className="flex flex-wrap items-center gap-2 text-[10px] font-mono">
+              <span
+                className={`px-2 py-0.5 rounded-xs font-bold uppercase border ${
+                  activeInstructorExam.status === 'archived'
+                    ? 'bg-slate-200 dark:bg-slate-800 text-slate-700 dark:text-slate-300 border-slate-300 dark:border-slate-700'
+                    : activeInstructorExam.status === 'draft'
+                      ? 'bg-amber-50 dark:bg-amber-950/40 text-amber-700 dark:text-amber-300 border-amber-300 dark:border-amber-500/40'
+                      : 'bg-emerald-50 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-300 border-emerald-300 dark:border-emerald-500/40'
+                }`}
+              >
+                STATUS: {String(activeInstructorExam.status || 'published').toUpperCase()}
+              </span>
+              <span className="px-2 py-0.5 rounded-xs font-bold bg-sky-50 dark:bg-[#00e5ff]/10 text-sky-700 dark:text-[#00e5ff] border border-sky-200 dark:border-[#00e5ff]/30">
+                DURASI: {activeInstructorExam.durationMinutes || DEFAULT_EXAM_DURATION_MINUTES} MENIT
+              </span>
+              {activeInstructorExam.deadline && (
+                <span className="px-2 py-0.5 rounded-xs font-bold bg-purple-50 dark:bg-purple-950/40 text-purple-700 dark:text-purple-300 border border-purple-200 dark:border-purple-500/30">
+                  DEADLINE: {new Date(activeInstructorExam.deadline).toLocaleString('id-ID')}
+                </span>
+              )}
+            </div>
+          )}
 
           {examSaveFeedback && (
             <div
@@ -4370,72 +5664,163 @@ export default function ClassDetailView({
                 />
               </div>
 
-              <div className="space-y-3">
-                {examDraftQuestions.map((q, qIdx) => (
-                  <div
-                    key={q.id}
-                    className="p-3.5 rounded-lg bg-white dark:bg-[#121822] border border-slate-200 dark:border-[#232f42] space-y-2.5"
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                <div>
+                  <label className="block text-[10px] font-bold text-slate-600 dark:text-slate-400 mb-1 uppercase">
+                    {language === 'en' ? 'Publication Status' : 'Status Publikasi'}
+                  </label>
+                  <select
+                    aria-label={language === 'en' ? 'Exam publication status' : 'Status evaluasi'}
+                    value={examDraftStatus}
+                    onChange={(e) => setExamDraftStatus(e.target.value)}
+                    className="w-full px-3 py-2 text-xs rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-[#121822] text-slate-900 dark:text-slate-100"
                   >
-                    <div className="flex items-center justify-between gap-2">
-                      <span className="text-[11px] font-bold text-sky-700 dark:text-[#00e5ff]">
-                        SOAL {qIdx + 1} ({q.id})
-                      </span>
-                      {examDraftQuestions.length > 1 && (
-                        <button
-                          type="button"
-                          onClick={() => handleRemoveDraftQuestion(q.id)}
-                          aria-label={`Hapus Soal ${qIdx + 1}`}
-                          className="text-rose-600 hover:text-rose-700 text-[11px] font-bold flex items-center gap-1"
-                        >
-                          <Trash2 className="w-3.5 h-3.5" />
-                          {language === 'en' ? 'Remove' : 'Hapus'}
-                        </button>
-                      )}
-                    </div>
-                    <input
-                      type="text"
-                      required
-                      aria-label={`Teks Soal ${qIdx + 1}`}
-                      value={q.question}
-                      onChange={(e) => handleUpdateDraftQuestionText(q.id, e.target.value)}
-                      placeholder={
-                        language === 'en' ? 'Enter question text...' : 'Tuliskan teks pertanyaan...'
-                      }
-                      className="w-full px-2.5 py-1.5 text-xs rounded border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-[#0a0f18] text-slate-900 dark:text-slate-100"
-                    />
-                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                      {(q.options || []).map((opt, optIdx) => (
-                        <input
-                          key={optIdx}
-                          type="text"
-                          required
-                          aria-label={`Soal ${qIdx + 1} Opsi ${optIdx + 1}`}
-                          value={opt}
-                          onChange={(e) => handleUpdateDraftOption(q.id, optIdx, e.target.value)}
-                          placeholder={`Opsi ${String.fromCharCode(65 + optIdx)}`}
-                          className="w-full px-2.5 py-1.5 text-xs rounded border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-[#0a0f18] text-slate-900 dark:text-slate-100"
-                        />
-                      ))}
-                    </div>
-                    <div className="flex items-center justify-between gap-2 pt-1">
-                      <label className="text-[10px] font-bold text-emerald-700 dark:text-emerald-400 uppercase">
-                        {language === 'en' ? 'Server Reference Key:' : 'Kunci Jawaban Referensi:'}
-                      </label>
-                      <select
-                        aria-label={`Kunci Jawaban Soal ${qIdx + 1}`}
-                        value={examDraftAnswerKey?.[q.id] ?? 0}
-                        onChange={(e) => handleUpdateDraftAnswerKey(q.id, e.target.value)}
-                        className="px-2.5 py-1 text-xs rounded border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-[#0a0f18] text-slate-900 dark:text-slate-100"
+                    <option value="published">
+                      {language === 'en' ? 'Published (Open)' : 'Dipublikasikan (Published)'}
+                    </option>
+                    <option value="draft">
+                      {language === 'en' ? 'Draft (Hidden)' : 'Draft (Belum Dibuka)'}
+                    </option>
+                    <option value="archived">
+                      {language === 'en' ? 'Archived (Closed)' : 'Diarsipkan (Archived)'}
+                    </option>
+                  </select>
+                </div>
+
+                <div>
+                  <label className="block text-[10px] font-bold text-slate-600 dark:text-slate-400 mb-1 uppercase">
+                    {language === 'en' ? 'Duration (1-180 mins)' : 'Durasi (1–180 Menit)'}
+                  </label>
+                  <input
+                    type="number"
+                    min={1}
+                    max={180}
+                    required
+                    aria-label={language === 'en' ? 'Exam duration minutes' : 'Durasi ujian (menit)'}
+                    value={examDraftDurationMinutes}
+                    onChange={(e) => setExamDraftDurationMinutes(e.target.value)}
+                    className="w-full px-3 py-2 text-xs rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-[#121822] text-slate-900 dark:text-slate-100"
+                  />
+                </div>
+
+                <div>
+                  <div className="flex items-center justify-between mb-1">
+                    <label className="block text-[10px] font-bold text-slate-600 dark:text-slate-400 uppercase">
+                      {language === 'en' ? 'Deadline (Optional)' : 'Batas Waktu (Opsional)'}
+                    </label>
+                    {examDraftDeadline && (
+                      <button
+                        type="button"
+                        onClick={() => setExamDraftDeadline('')}
+                        className="text-[10px] font-bold text-rose-600 dark:text-rose-400 hover:underline"
                       >
-                        {(q.options || []).map((_, optIdx) => (
-                          <option key={optIdx} value={optIdx}>
-                            Opsi {String.fromCharCode(65 + optIdx)}
-                          </option>
-                        ))}
-                      </select>
-                    </div>
+                        {language === 'en' ? 'Clear Deadline' : 'Hapus Deadline'}
+                      </button>
+                    )}
                   </div>
-                ))}
+                  <input
+                    type="datetime-local"
+                    aria-label={language === 'en' ? 'Exam deadline' : 'Deadline evaluasi'}
+                    value={examDraftDeadline}
+                    onChange={(e) => setExamDraftDeadline(e.target.value)}
+                    className="w-full px-3 py-2 text-xs rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-[#121822] text-slate-900 dark:text-slate-100"
+                  />
+                </div>
+              </div>
+
+              <div className="space-y-3">
+                {examDraftQuestions.map((q, qIdx) => {
+                  const qOptions = Array.isArray(q.options) ? q.options : ['', ''];
+                  return (
+                    <div
+                      key={q.id}
+                      className="p-3.5 rounded-lg bg-white dark:bg-[#121822] border border-slate-200 dark:border-[#232f42] space-y-2.5"
+                    >
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="text-[11px] font-bold text-sky-700 dark:text-[#00e5ff]">
+                          SOAL {qIdx + 1} ({q.id})
+                        </span>
+                        <div className="flex items-center gap-2">
+                          <button
+                            type="button"
+                            disabled={qOptions.length >= 6}
+                            onClick={() => handleAddDraftOption(q.id)}
+                            aria-label={`Tambah opsi Soal ${qIdx + 1}`}
+                            className="text-sky-700 dark:text-[#00e5ff] hover:underline text-[11px] font-bold flex items-center gap-1 disabled:opacity-40"
+                          >
+                            <Plus className="w-3 h-3" />
+                            {language === 'en' ? 'Add Option' : 'Tambah Opsi'} ({qOptions.length}/6)
+                          </button>
+                          {examDraftQuestions.length > 1 && (
+                            <button
+                              type="button"
+                              onClick={() => handleRemoveDraftQuestion(q.id)}
+                              aria-label={`Hapus Soal ${qIdx + 1}`}
+                              className="text-rose-600 hover:text-rose-700 text-[11px] font-bold flex items-center gap-1"
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                              {language === 'en' ? 'Remove' : 'Hapus'}
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                      <input
+                        type="text"
+                        required
+                        aria-label={`Teks Soal ${qIdx + 1}`}
+                        value={q.question}
+                        onChange={(e) => handleUpdateDraftQuestionText(q.id, e.target.value)}
+                        placeholder={
+                          language === 'en' ? 'Enter question text...' : 'Tuliskan teks pertanyaan...'
+                        }
+                        className="w-full px-2.5 py-1.5 text-xs rounded border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-[#0a0f18] text-slate-900 dark:text-slate-100"
+                      />
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                        {qOptions.map((opt, optIdx) => (
+                          <div key={optIdx} className="flex items-center gap-1.5">
+                            <input
+                              type="text"
+                              required
+                              aria-label={`Soal ${qIdx + 1} Opsi ${optIdx + 1}`}
+                              value={opt}
+                              onChange={(e) => handleUpdateDraftOption(q.id, optIdx, e.target.value)}
+                              placeholder={`Opsi ${String.fromCharCode(65 + optIdx)}`}
+                              className="w-full px-2.5 py-1.5 text-xs rounded border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-[#0a0f18] text-slate-900 dark:text-slate-100"
+                            />
+                            {qOptions.length > 2 && (
+                              <button
+                                type="button"
+                                onClick={() => handleRemoveDraftOption(q.id, optIdx)}
+                                aria-label={`Hapus pilihan ${optIdx + 1} pertanyaan ${qIdx + 1}`}
+                                title={language === 'en' ? 'Remove option' : 'Hapus opsi'}
+                                className="p-1.5 rounded border border-rose-200 dark:border-rose-500/30 text-rose-600 dark:text-rose-400 hover:bg-rose-50 dark:hover:bg-rose-950/40 shrink-0"
+                              >
+                                <X className="w-3 h-3" />
+                              </button>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                      <div className="flex items-center justify-between gap-2 pt-1">
+                        <label className="text-[10px] font-bold text-emerald-700 dark:text-emerald-400 uppercase">
+                          {language === 'en' ? 'Server Reference Key:' : 'Kunci Jawaban Referensi:'}
+                        </label>
+                        <select
+                          aria-label={`Kunci Jawaban Soal ${qIdx + 1}`}
+                          value={examDraftAnswerKey?.[q.id] ?? 0}
+                          onChange={(e) => handleUpdateDraftAnswerKey(q.id, e.target.value)}
+                          className="px-2.5 py-1 text-xs rounded border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-[#0a0f18] text-slate-900 dark:text-slate-100"
+                        >
+                          {qOptions.map((_, optIdx) => (
+                            <option key={optIdx} value={optIdx}>
+                              Opsi {String.fromCharCode(65 + optIdx)}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                    </div>
+                  );
+                })}
               </div>
 
               <div className="flex justify-end">
@@ -4457,9 +5842,23 @@ export default function ClassDetailView({
             </form>
           )}
 
-          {/* Class Exam Statistics Summary */}
+          {/* Class Exam Statistics Summary & Scoped Rekap */}
           {(() => {
-            const scoredAttempts = classExamAttempts.filter((a) => typeof a.score === 'number');
+            const memberByUid = new Map();
+            (classMembersList || []).forEach((m) => {
+              const memberUid = String(m?.uid || '').trim();
+              if (memberUid) {
+                memberByUid.set(memberUid, m);
+              }
+            });
+
+            const meetingAttempts = classExamAttempts.filter(
+              (a) => Number(a.meetingNo || 1) === Number(currentMeetingNo)
+            );
+            const scopedAttempts = meetingAttempts.filter(
+              (a) => (a.examType === 'posttest' ? 'posttest' : 'pretest') === evalKeyType
+            );
+            const scoredAttempts = scopedAttempts.filter((a) => typeof a.score === 'number');
             const avgScore =
               scoredAttempts.length > 0
                 ? Math.round(
@@ -4467,142 +5866,263 @@ export default function ClassDetailView({
                   )
                 : 0;
             const passedCount = scoredAttempts.filter((a) => a.score >= 75).length;
+
+            const gainByUid = new Map();
+            meetingAttempts.forEach((att) => {
+              const identity = resolveAttemptStudentDisplay(att, memberByUid);
+              const key = identity.uid;
+              const existing = gainByUid.get(key) || {
+                uid: key,
+                displayName: identity.displayName,
+                email: identity.email,
+                pretestScore: null,
+                posttestScore: null,
+              };
+              const type = att.examType === 'posttest' ? 'posttest' : 'pretest';
+              if (typeof att.score === 'number') {
+                if (type === 'pretest') {
+                  existing.pretestScore = att.score;
+                } else {
+                  existing.posttestScore = att.score;
+                }
+              }
+              if (identity.displayName && identity.displayName !== key) {
+                existing.displayName = identity.displayName;
+              }
+              if (identity.email && !existing.email) {
+                existing.email = identity.email;
+              }
+              gainByUid.set(key, existing);
+            });
+            const gainRows = Array.from(gainByUid.values()).map((row) => ({
+              ...row,
+              gainDelta:
+                row.pretestScore !== null && row.posttestScore !== null
+                  ? row.posttestScore - row.pretestScore
+                  : null,
+            }));
+
             return (
-              <div className="grid grid-cols-3 gap-3 font-mono">
-                <div className="p-3 rounded-xl bg-slate-50 dark:bg-[#0a0f18] border border-slate-200 dark:border-[#1e2a3f]">
-                  <span className="text-[10px] text-slate-500 dark:text-slate-400 block">
-                    TOTAL PESERTA UJIAN
-                  </span>
-                  <span className="text-lg font-black text-slate-900 dark:text-white">
-                    {classExamAttempts.length}
-                  </span>
+              <>
+                <div className="grid grid-cols-3 gap-3 font-mono">
+                  <div className="p-3 rounded-xl bg-slate-50 dark:bg-[#0a0f18] border border-slate-200 dark:border-[#1e2a3f]">
+                    <span className="text-[10px] text-slate-500 dark:text-slate-400 block">
+                      TOTAL PESERTA UJIAN ({evalKeyType.toUpperCase()} • P{currentMeetingNo})
+                    </span>
+                    <span className="text-lg font-black text-slate-900 dark:text-white">
+                      {scopedAttempts.length}
+                    </span>
+                  </div>
+                  <div className="p-3 rounded-xl bg-slate-50 dark:bg-[#0a0f18] border border-slate-200 dark:border-[#1e2a3f]">
+                    <span className="text-[10px] text-slate-500 dark:text-slate-400 block">
+                      RATA-RATA SKOR
+                    </span>
+                    <span className="text-lg font-black text-amber-600 dark:text-[#f59e0b]">
+                      {avgScore} / 100
+                    </span>
+                  </div>
+                  <div className="p-3 rounded-xl bg-slate-50 dark:bg-[#0a0f18] border border-slate-200 dark:border-[#1e2a3f]">
+                    <span className="text-[10px] text-slate-500 dark:text-slate-400 block">
+                      LULUS (≥ 75)
+                    </span>
+                    <span className="text-lg font-black text-emerald-600 dark:text-emerald-400">
+                      {passedCount} / {scoredAttempts.length}
+                    </span>
+                  </div>
                 </div>
-                <div className="p-3 rounded-xl bg-slate-50 dark:bg-[#0a0f18] border border-slate-200 dark:border-[#1e2a3f]">
-                  <span className="text-[10px] text-slate-500 dark:text-slate-400 block">
-                    RATA-RATA SKOR
-                  </span>
-                  <span className="text-lg font-black text-amber-600 dark:text-[#f59e0b]">
-                    {avgScore} / 100
-                  </span>
+
+                {/* Server Reference Answer Keys */}
+                <div className="space-y-2.5">
+                  <div className="flex items-center justify-between">
+                    <h4 className="text-xs font-mono font-bold text-slate-800 dark:text-slate-200 flex items-center gap-1.5">
+                      <KeyRound className="w-4 h-4 text-amber-600 dark:text-[#f59e0b]" />
+                      {language === 'en' ? 'Reference Answer Key' : 'Kunci Jawaban Referensi'} (
+                      {evalKeyType.toUpperCase()} — P{currentMeetingNo})
+                    </h4>
+                    {instructorKeySource && (
+                      <span className="text-[10px] font-mono text-sky-700 dark:text-[#00e5ff] bg-sky-50 dark:bg-[#00e5ff]/10 px-2 py-0.5 rounded border border-sky-200 dark:border-[#00e5ff]/30">
+                        SOURCE: {instructorKeySource.toUpperCase()}
+                      </span>
+                    )}
+                  </div>
+
+                  {evalAnalyticsLoading ? (
+                    <div className="py-6 text-center text-xs font-mono text-slate-400">
+                      Memuat soal &amp; kunci evaluasi dari server...
+                    </div>
+                  ) : instructorExamQuestions.length === 0 ? (
+                    <div className="py-6 text-center text-xs font-mono text-slate-500 dark:text-slate-400 bg-slate-50 dark:bg-[#0a0f18] rounded-lg border border-dashed border-slate-300 dark:border-[#1e2a3f]">
+                      {language === 'en'
+                        ? `No ${evalKeyType} questions configured for Meeting ${currentMeetingNo} yet.`
+                        : `Belum ada soal & kunci ${evalKeyType.toUpperCase()} untuk Pertemuan ${currentMeetingNo}. Gunakan editor di atas untuk menambahkan.`}
+                    </div>
+                  ) : (
+                    <div className="space-y-2.5">
+                      {instructorExamQuestions.map((q, idx) => {
+                        const refOptionIdx = instructorKeyMap?.[q.id];
+                        return (
+                          <div
+                            key={q.id}
+                            className="p-3.5 rounded-lg border border-slate-200 dark:border-[#1e2a3f] bg-slate-50 dark:bg-[#0a0f18] space-y-2"
+                          >
+                            <p className="text-xs font-mono font-bold text-slate-900 dark:text-slate-100">
+                              [SOAL 0{idx + 1}] {q.question}
+                            </p>
+                            <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5">
+                              {q.options.map((opt, optIdx) => {
+                                const isRefAnswer = refOptionIdx === optIdx;
+                                return (
+                                  <div
+                                    key={optIdx}
+                                    className={`p-2 rounded text-[11px] font-mono border ${
+                                      isRefAnswer
+                                        ? 'bg-emerald-50 dark:bg-emerald-950/50 border-emerald-300 dark:border-emerald-500/50 text-emerald-800 dark:text-emerald-300 font-bold'
+                                        : 'bg-white dark:bg-[#121822] border-slate-200 dark:border-[#1e2a3f] text-slate-600 dark:text-slate-400'
+                                    }`}
+                                  >
+                                    {isRefAnswer ? '✓ ' : ''}
+                                    {opt}
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
                 </div>
-                <div className="p-3 rounded-xl bg-slate-50 dark:bg-[#0a0f18] border border-slate-200 dark:border-[#1e2a3f]">
-                  <span className="text-[10px] text-slate-500 dark:text-slate-400 block">
-                    LULUS (≥ 75)
-                  </span>
-                  <span className="text-lg font-black text-emerald-600 dark:text-emerald-400">
-                    {passedCount} / {scoredAttempts.length}
-                  </span>
+
+                {/* Per-Meeting Pretest vs Posttest Gain Summary Table */}
+                <div className="space-y-2">
+                  <h4 className="text-xs font-mono font-bold text-slate-800 dark:text-slate-200 flex items-center gap-1.5">
+                    <TrendingUp className="w-4 h-4 text-emerald-600 dark:text-emerald-400" />
+                    <span>
+                      {language === 'en'
+                        ? `Pretest vs Post-test Gain Comparison (Meeting ${currentMeetingNo})`
+                        : `Rekap Perbandingan Gain (Δ = Posttest - Pretest) — P${currentMeetingNo}`}
+                    </span>
+                  </h4>
+                  {gainRows.length === 0 ? (
+                    <div className="py-4 text-center text-xs font-mono text-slate-500 dark:text-slate-400 bg-slate-50 dark:bg-[#0a0f18] rounded-lg border border-dashed border-slate-300 dark:border-[#1e2a3f]">
+                      {language === 'en'
+                        ? `No student Pretest/Post-test attempts recorded for Meeting ${currentMeetingNo} yet.`
+                        : `Belum ada data evaluasi mahasiswa untuk Pertemuan ${currentMeetingNo}.`}
+                    </div>
+                  ) : (
+                    <div className="overflow-x-auto">
+                      <table className="w-full text-left text-xs font-mono">
+                        <thead className="bg-slate-50 dark:bg-[#0a0f18] text-slate-500 dark:text-slate-400 uppercase text-[10px] border-b border-slate-200 dark:border-[#232f42]">
+                          <tr>
+                            <th className="py-2 px-3">Mahasiswa</th>
+                            <th className="py-2 px-3">Pretest</th>
+                            <th className="py-2 px-3">Post-test</th>
+                            <th className="py-2 px-3">Gain (Δ)</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-slate-100 dark:divide-[#1e2a3f]">
+                          {gainRows.map((row) => (
+                            <tr key={`gain_${row.uid}`}>
+                              <td className="py-2 px-3 text-slate-800 dark:text-slate-200">
+                                <span className="font-bold block">{row.displayName}</span>
+                                {row.email && row.email !== row.displayName && (
+                                  <span className="text-[10px] text-slate-500 dark:text-slate-400">
+                                    {row.email}
+                                  </span>
+                                )}
+                              </td>
+                              <td className="py-2 px-3 font-bold text-amber-600 dark:text-[#f59e0b]">
+                                {row.pretestScore !== null ? `${row.pretestScore} / 100` : '—'}
+                              </td>
+                              <td className="py-2 px-3 font-bold text-sky-700 dark:text-[#00e5ff]">
+                                {row.posttestScore !== null ? `${row.posttestScore} / 100` : '—'}
+                              </td>
+                              <td className="py-2 px-3 font-black">
+                                {row.gainDelta !== null ? (
+                                  <span
+                                    className={
+                                      row.gainDelta >= 0
+                                        ? 'text-emerald-600 dark:text-emerald-400'
+                                        : 'text-rose-600 dark:text-rose-400'
+                                    }
+                                  >
+                                    {row.gainDelta >= 0 ? `+${row.gainDelta}` : row.gainDelta}
+                                  </span>
+                                ) : (
+                                  <span className="text-slate-400">—</span>
+                                )}
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
                 </div>
-              </div>
+
+                {/* Scoped Student Exam Attempts List */}
+                <div className="space-y-2">
+                  <h4 className="text-xs font-mono font-bold text-slate-800 dark:text-slate-200">
+                    {language === 'en'
+                      ? `Class Attempts (${evalKeyType.toUpperCase()} — P${currentMeetingNo})`
+                      : `Riwayat Evaluasi Mahasiswa (${evalKeyType.toUpperCase()} — P${currentMeetingNo})`}
+                  </h4>
+                  {scopedAttempts.length === 0 ? (
+                    <div className="py-4 text-center text-xs font-mono text-slate-500 dark:text-slate-400 bg-slate-50 dark:bg-[#0a0f18] rounded-lg border border-dashed border-slate-300 dark:border-[#1e2a3f]">
+                      {language === 'en'
+                        ? `No ${evalKeyType} attempts recorded for Meeting ${currentMeetingNo} yet.`
+                        : `Belum ada riwayat peserta untuk ${evalKeyType.toUpperCase()} Pertemuan ${currentMeetingNo}.`}
+                    </div>
+                  ) : (
+                    <div className="overflow-x-auto">
+                      <table className="w-full text-left text-xs font-mono">
+                        <thead className="bg-slate-50 dark:bg-[#0a0f18] text-slate-500 dark:text-slate-400 uppercase text-[10px] border-b border-slate-200 dark:border-[#232f42]">
+                          <tr>
+                            <th className="py-2 px-3">Mahasiswa</th>
+                            <th className="py-2 px-3">Pertemuan</th>
+                            <th className="py-2 px-3">Tipe</th>
+                            <th className="py-2 px-3">Skor</th>
+                            <th className="py-2 px-3">Status</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-slate-100 dark:divide-[#1e2a3f]">
+                          {scopedAttempts.map((att) => {
+                            const identity = resolveAttemptStudentDisplay(att, memberByUid);
+                            return (
+                              <tr key={att.id}>
+                                <td className="py-2 px-3 text-slate-800 dark:text-slate-200">
+                                  <span className="font-bold block">{identity.displayName}</span>
+                                  {identity.email && identity.email !== identity.displayName && (
+                                    <span className="text-[10px] text-slate-500 dark:text-slate-400">
+                                      {identity.email}
+                                    </span>
+                                  )}
+                                </td>
+                                <td className="py-2 px-3 text-sky-700 dark:text-[#00e5ff] font-bold">
+                                  P{att.meetingNo || 1}
+                                </td>
+                                <td className="py-2 px-3 uppercase text-slate-600 dark:text-slate-400">
+                                  {att.examType || 'pretest'}
+                                </td>
+                                <td className="py-2 px-3 font-bold text-amber-600 dark:text-[#f59e0b]">
+                                  {typeof att.score === 'number' ? `${att.score} / 100` : '-'}
+                                </td>
+                                <td className="py-2 px-3">
+                                  <span className="px-2 py-0.5 rounded-xs text-[10px] bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300">
+                                    {att.examActive ? 'SEDANG UJIAN' : 'SELESAI'}
+                                  </span>
+                                </td>
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+                </div>
+              </>
             );
           })()}
-
-          {/* Server Reference Answer Keys */}
-          <div className="space-y-2.5">
-            <div className="flex items-center justify-between">
-              <h4 className="text-xs font-mono font-bold text-slate-800 dark:text-slate-200 flex items-center gap-1.5">
-                <KeyRound className="w-4 h-4 text-amber-600 dark:text-[#f59e0b]" />
-                {language === 'en' ? 'Reference Answer Key' : 'Kunci Jawaban Referensi'} (
-                {evalKeyType.toUpperCase()} — P{currentMeetingNo})
-              </h4>
-              {instructorKeySource && (
-                <span className="text-[10px] font-mono text-sky-700 dark:text-[#00e5ff] bg-sky-50 dark:bg-[#00e5ff]/10 px-2 py-0.5 rounded border border-sky-200 dark:border-[#00e5ff]/30">
-                  SOURCE: {instructorKeySource.toUpperCase()}
-                </span>
-              )}
-            </div>
-
-            {evalAnalyticsLoading ? (
-              <div className="py-6 text-center text-xs font-mono text-slate-400">
-                Memuat soal &amp; kunci evaluasi dari server...
-              </div>
-            ) : instructorExamQuestions.length === 0 ? (
-              <div className="py-6 text-center text-xs font-mono text-slate-500 dark:text-slate-400 bg-slate-50 dark:bg-[#0a0f18] rounded-lg border border-dashed border-slate-300 dark:border-[#1e2a3f]">
-                {language === 'en'
-                  ? `No ${evalKeyType} questions configured for Meeting ${currentMeetingNo} yet.`
-                  : `Belum ada soal & kunci ${evalKeyType.toUpperCase()} untuk Pertemuan ${currentMeetingNo}. Gunakan editor di atas untuk menambahkan.`}
-              </div>
-            ) : (
-              <div className="space-y-2.5">
-                {instructorExamQuestions.map((q, idx) => {
-                  const refOptionIdx = instructorKeyMap?.[q.id];
-                  return (
-                    <div
-                      key={q.id}
-                      className="p-3.5 rounded-lg border border-slate-200 dark:border-[#1e2a3f] bg-slate-50 dark:bg-[#0a0f18] space-y-2"
-                    >
-                      <p className="text-xs font-mono font-bold text-slate-900 dark:text-slate-100">
-                        [SOAL 0{idx + 1}] {q.question}
-                      </p>
-                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5">
-                        {q.options.map((opt, optIdx) => {
-                          const isRefAnswer = refOptionIdx === optIdx;
-                          return (
-                            <div
-                              key={optIdx}
-                              className={`p-2 rounded text-[11px] font-mono border ${
-                                isRefAnswer
-                                  ? 'bg-emerald-50 dark:bg-emerald-950/50 border-emerald-300 dark:border-emerald-500/50 text-emerald-800 dark:text-emerald-300 font-bold'
-                                  : 'bg-white dark:bg-[#121822] border-slate-200 dark:border-[#1e2a3f] text-slate-600 dark:text-slate-400'
-                              }`}
-                            >
-                              {isRefAnswer ? '✓ ' : ''}
-                              {opt}
-                            </div>
-                          );
-                        })}
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-            )}
-          </div>
-
-          {/* Student Exam Attempts List */}
-          {classExamAttempts.length > 0 && (
-            <div className="space-y-2">
-              <h4 className="text-xs font-mono font-bold text-slate-800 dark:text-slate-200">
-                {language === 'en' ? 'Recent Class Attempts' : 'Riwayat Evaluasi Mahasiswa'}
-              </h4>
-              <div className="overflow-x-auto">
-                <table className="w-full text-left text-xs font-mono">
-                  <thead className="bg-slate-50 dark:bg-[#0a0f18] text-slate-500 dark:text-slate-400 uppercase text-[10px] border-b border-slate-200 dark:border-[#232f42]">
-                    <tr>
-                      <th className="py-2 px-3">UID / Mahasiswa</th>
-                      <th className="py-2 px-3">Pertemuan</th>
-                      <th className="py-2 px-3">Tipe</th>
-                      <th className="py-2 px-3">Skor</th>
-                      <th className="py-2 px-3">Status</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-slate-100 dark:divide-[#1e2a3f]">
-                    {classExamAttempts.map((att) => (
-                      <tr key={att.id}>
-                        <td className="py-2 px-3 text-slate-800 dark:text-slate-200">
-                          {att.uid || att.id}
-                        </td>
-                        <td className="py-2 px-3 text-sky-700 dark:text-[#00e5ff] font-bold">
-                          P{att.meetingNo || 1}
-                        </td>
-                        <td className="py-2 px-3 uppercase text-slate-600 dark:text-slate-400">
-                          {att.examType || 'pretest'}
-                        </td>
-                        <td className="py-2 px-3 font-bold text-amber-600 dark:text-[#f59e0b]">
-                          {typeof att.score === 'number' ? `${att.score} / 100` : '-'}
-                        </td>
-                        <td className="py-2 px-3">
-                          <span className="px-2 py-0.5 rounded-xs text-[10px] bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300">
-                            {att.examActive ? 'SEDANG UJIAN' : 'SELESAI'}
-                          </span>
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            </div>
-          )}
         </div>
       )}
 
@@ -4618,7 +6138,9 @@ export default function ClassDetailView({
       )}
 
       {/* Task Upload Modal */}
-      {activeTaskModal && (
+      {activeTaskModal && (() => {
+        const isActiveTaskGraded = typeof activeTaskModal.grade === 'number';
+        return (
         <div className="fixed inset-0 bg-black/75 backdrop-blur-xs flex items-center justify-center p-4 z-50 font-sans overflow-y-auto">
           <div
             role="dialog"
@@ -4629,7 +6151,13 @@ export default function ClassDetailView({
             <div className="p-4 bg-slate-50 dark:bg-[#161c24] border-b border-slate-200 dark:border-slate-700 flex items-center justify-between">
               <div>
                 <span className="text-[10px] font-mono font-bold text-amber-600 dark:text-[#f59e0b] uppercase tracking-wider block">
-                  // PENGUNGGAHAN BERKAS TUGAS
+                  {isActiveTaskGraded
+                    ? language === 'en'
+                      ? '// GRADED ASSIGNMENT DETAILS'
+                      : '// DETAIL TUGAS & HASIL PENILAIAN'
+                    : language === 'en'
+                      ? '// ASSIGNMENT SUBMISSION LINK'
+                      : '// PENGUMPULAN TAUTAN TUGAS'}
                 </span>
                 <h3
                   id="class-detail-task-modal-title"
@@ -4685,56 +6213,88 @@ export default function ClassDetailView({
                 </div>
               </div>
 
-              <div>
-                <label className="block text-[11px] font-mono font-bold text-slate-700 dark:text-slate-300 mb-1.5 uppercase">
-                  UNGGAH DOKUMEN VIA CLOUDINARY
-                </label>
-                <div className="border-2 border-dashed border-slate-300 dark:border-slate-700 hover:border-[#f59e0b] rounded-xl p-4 text-center bg-slate-50 dark:bg-[#0d121a] transition cursor-pointer relative group">
-                  <input
-                    type="file"
-                    accept={activeTaskModal.allowedFormats}
-                    onChange={(e) => {
-                      const f = e.target.files?.[0];
-                      if (f) setUploadedFile(f);
-                    }}
-                    className="absolute inset-0 opacity-0 cursor-pointer w-full h-full"
-                  />
-                  <FileUp className="w-7 h-7 text-[#f59e0b] mx-auto mb-1.5 group-hover:scale-110 transition-transform" />
-                  <p className="text-xs font-bold text-slate-800 dark:text-slate-200">
-                    {uploadedFile ? uploadedFile.name : 'Klik atau seret file PDF / ZIP ke sini'}
-                  </p>
-                  <p className="text-[10px] text-slate-500 dark:text-slate-400 mt-1 font-mono">
-                    {uploadedFile
-                      ? `Ukuran: ${(uploadedFile.size / (1024 * 1024)).toFixed(2)} MB • Siap diunggah`
-                      : `Maksimal ukuran file: ${activeTaskModal.maxSize}`}
-                  </p>
+              {isActiveTaskGraded && (
+                <div className="p-3 bg-indigo-50 dark:bg-indigo-950/40 rounded-lg border border-indigo-200 dark:border-indigo-500/40 text-xs font-mono space-y-1">
+                  <div className="flex items-center justify-between font-bold text-indigo-800 dark:text-indigo-200">
+                    <span>{language === 'en' ? 'GRADED SCORE (LOCKED)' : 'NILAI TUGAS (TERKUNCI)'}</span>
+                    <span>{activeTaskModal.grade} / 100</span>
+                  </div>
+                  {activeTaskModal.feedback && (
+                    <p className="text-[11px] text-indigo-700 dark:text-indigo-300">
+                      {language === 'en' ? 'Feedback:' : 'Catatan Dosen:'} {activeTaskModal.feedback}
+                    </p>
+                  )}
                 </div>
-              </div>
+              )}
+
+              {isEducatorOrAdmin && !isActiveTaskGraded && (
+                <div>
+                  <label className="block text-[11px] font-mono font-bold text-slate-700 dark:text-slate-300 mb-1.5 uppercase">
+                    UNGGAH DOKUMEN VIA CLOUDINARY
+                  </label>
+                  <div className="border-2 border-dashed border-slate-300 dark:border-slate-700 hover:border-[#f59e0b] rounded-xl p-4 text-center bg-slate-50 dark:bg-[#0d121a] transition cursor-pointer relative group">
+                    <input
+                      type="file"
+                      accept={activeTaskModal.allowedFormats}
+                      onChange={(e) => {
+                        const f = e.target.files?.[0];
+                        if (f) setUploadedFile(f);
+                      }}
+                      className="absolute inset-0 opacity-0 cursor-pointer w-full h-full"
+                    />
+                    <FileUp className="w-7 h-7 text-[#f59e0b] mx-auto mb-1.5 group-hover:scale-110 transition-transform" />
+                    <p className="text-xs font-bold text-slate-800 dark:text-slate-200">
+                      {uploadedFile ? uploadedFile.name : 'Klik atau seret file PDF / ZIP ke sini'}
+                    </p>
+                    <p className="text-[10px] text-slate-500 dark:text-slate-400 mt-1 font-mono">
+                      {uploadedFile
+                        ? `Ukuran: ${(uploadedFile.size / (1024 * 1024)).toFixed(2)} MB • Siap diunggah`
+                        : `Maksimal ukuran file: ${activeTaskModal.maxSize}`}
+                    </p>
+                  </div>
+                </div>
+              )}
 
               <div>
                 <label className="block text-[11px] font-mono font-bold text-slate-700 dark:text-slate-300 mb-1 uppercase flex items-center gap-1">
                   <LinkIcon className="w-3 h-3 text-sky-600 dark:text-[#00e5ff]" />
-                  <span>TAUTAN URL EKSTERNAL (FALLBACK / GITHUB / GDRIVE)</span>
+                  <span>
+                    {language === 'en'
+                      ? 'EXTERNAL SUBMISSION URL (GOOGLE DRIVE / GITHUB / ONEDRIVE / DOCS)'
+                      : 'TAUTAN URL EKSTERNAL (GOOGLE DRIVE / GITHUB / ONEDRIVE / DOCS)'}
+                  </span>
                 </label>
                 <input
                   type="url"
+                  required={!isEducatorOrAdmin && !isActiveTaskGraded}
+                  readOnly={isActiveTaskGraded}
+                  disabled={isActiveTaskGraded}
                   value={externalUrlInput}
                   onChange={(e) => setExternalUrlInput(e.target.value)}
                   placeholder="https://drive.google.com/... atau https://github.com/..."
-                  className="w-full p-2.5 bg-white dark:bg-[#070b12] border border-slate-300 dark:border-slate-700 rounded-md text-xs text-slate-900 dark:text-slate-100 placeholder-slate-400 dark:placeholder-slate-600 focus:outline-none focus:border-[#00e5ff] font-mono"
+                  className="w-full p-2.5 bg-white dark:bg-[#070b12] border border-slate-300 dark:border-slate-700 rounded-md text-xs text-slate-900 dark:text-slate-100 placeholder-slate-400 dark:placeholder-slate-600 focus:outline-none focus:border-[#00e5ff] font-mono disabled:opacity-70"
                 />
+                {!isEducatorOrAdmin && !isActiveTaskGraded && (
+                  <p className="text-[10px] text-slate-500 dark:text-slate-400 mt-1">
+                    {language === 'en'
+                      ? 'Share an accessible Google Drive, GitHub, OneDrive, or Google Docs link.'
+                      : 'Tempel tautan Google Drive, GitHub, OneDrive, atau Docs yang dapat diakses dosen.'}
+                  </p>
+                )}
               </div>
 
               <div>
                 <label className="block text-[11px] font-mono font-bold text-slate-700 dark:text-slate-300 mb-1 uppercase">
-                  CATATAN / RINGKASAN (OPSIONAL)
+                  {language === 'en' ? 'ANSWER NOTES / SUMMARY (OPTIONAL)' : 'CATATAN JAWABAN / RINGKASAN (OPSIONAL)'}
                 </label>
                 <textarea
                   rows="2"
+                  readOnly={isActiveTaskGraded}
+                  disabled={isActiveTaskGraded}
                   value={taskNotes}
                   onChange={(e) => setTaskNotes(e.target.value)}
                   placeholder="Catatan pengerjaan atau tautan repositori..."
-                  className="w-full p-2.5 bg-white dark:bg-[#070b12] border border-slate-300 dark:border-slate-700 rounded-md text-xs text-slate-900 dark:text-slate-100 placeholder-slate-400 dark:placeholder-slate-600 focus:outline-none focus:border-[#f59e0b]"
+                  className="w-full p-2.5 bg-white dark:bg-[#070b12] border border-slate-300 dark:border-slate-700 rounded-md text-xs text-slate-900 dark:text-slate-100 placeholder-slate-400 dark:placeholder-slate-600 focus:outline-none focus:border-[#f59e0b] disabled:opacity-70"
                 />
               </div>
 
@@ -4748,21 +6308,35 @@ export default function ClassDetailView({
                   }}
                   className="px-3 py-1.5 text-xs text-slate-500 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white transition"
                 >
-                  {t('dialog_cancel')}
+                  {isActiveTaskGraded ? (language === 'en' ? 'Close' : 'Tutup') : t('dialog_cancel')}
                 </button>
-                <button
-                  type="submit"
-                  disabled={isUploading || (!uploadedFile && !externalUrlInput.trim())}
-                  className="bg-[#f59e0b] hover:bg-[#d97706] text-black text-xs font-bold px-4 py-2 rounded-sm transition flex items-center gap-1.5 uppercase shadow-md disabled:opacity-40"
-                >
-                  <Upload className="w-3.5 h-3.5" />
-                  {isUploading ? 'Mengunggah...' : 'Kirim Berkas Tugas'}
-                </button>
+                {!isActiveTaskGraded && (
+                  <button
+                    type="submit"
+                    disabled={
+                      isUploading ||
+                      (!isEducatorOrAdmin
+                        ? !externalUrlInput.trim()
+                        : !uploadedFile && !externalUrlInput.trim())
+                    }
+                    className="bg-[#f59e0b] hover:bg-[#d97706] text-black text-xs font-bold px-4 py-2 rounded-sm transition flex items-center gap-1.5 uppercase shadow-md disabled:opacity-40"
+                  >
+                    <Upload className="w-3.5 h-3.5" />
+                    {isUploading
+                      ? language === 'en'
+                        ? 'Submitting...'
+                        : 'Mengirim...'
+                      : language === 'en'
+                        ? 'Submit Assignment Link'
+                        : 'Kirim Tautan Tugas'}
+                  </button>
+                )}
               </div>
             </form>
           </div>
         </div>
-      )}
+        );
+      })()}
     </div>
   );
 }
