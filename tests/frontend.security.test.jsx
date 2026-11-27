@@ -3744,7 +3744,7 @@ describe('Frontend Security & UI Components', () => {
             tokens_consumed: 180,
             mode: 'gemini_live',
             is_live: true,
-            model: 'gemini-2.5-flash',
+            model: 'gemini-4-hydrogen',
             remaining_quota: 19,
           }),
         };
@@ -3776,7 +3776,7 @@ describe('Frontend Security & UI Components', () => {
     });
 
     expect(await screen.findByText(/RPC menyederhanakan pemanggilan prosedur antar node\./i)).toBeInTheDocument();
-    expect(screen.getByText(/Google Gemini AI \(Live • gemini-2\.5-flash\)/i)).toBeInTheDocument();
+    expect(screen.getByText(/Google Gemini AI \(Live • gemini-4-hydrogen\)/i)).toBeInTheDocument();
     expect(screen.getByText(/Sisa Kuota Permintaan: 19 \/ 20/i)).toBeInTheDocument();
 
     const aiPostCalls = fetchMock.mock.calls.filter(([url]) => String(url).includes('/api/ai'));
@@ -4825,5 +4825,636 @@ describe('Frontend Security & UI Components', () => {
     });
     expect(shellContainer.querySelector('aside svg.lucide-graduation-cap')).toBeNull();
     unmountShell();
+  });
+
+  it('supports stepwise TOTP MFA setup (QR, manualKey, confirm, backup codes) and AccessibleDialog disable flow in ProfileView', async () => {
+    const authUser = {
+      uid: 'uid_mfa_profile',
+      email: 'mhs.mfa@kampus.ac.id',
+      displayName: 'Mahasiswa MFA',
+      emailVerified: true,
+      getIdToken: vi.fn(async () => 'token-mfa-profile'),
+    };
+    mockAuthObj.currentUser = authUser;
+    mockOnAuthStateChanged.mockImplementation((_auth, cb) => {
+      void cb(authUser);
+      return () => {};
+    });
+
+    const fetchMock = vi.fn(async (url, opts) => {
+      const body = opts?.body ? JSON.parse(opts.body) : {};
+      if (url === '/api/bootstrap') {
+        return {
+          ok: true,
+          headers: { get: () => 'application/json' },
+          json: async () => ({
+            success: true,
+            isNewUser: false,
+            mfaEnabled: false,
+            mfaRequired: false,
+            profile: {
+              uid: 'uid_mfa_profile',
+              email: 'mhs.mfa@kampus.ac.id',
+              displayName: 'Mahasiswa MFA',
+              role: 'student',
+              accountType: 'MAHASISWA',
+              isInstitutional: true,
+              mfaEnabled: false,
+            },
+          }),
+        };
+      }
+      if (url === '/api/mfa' && body.action === 'status') {
+        return {
+          ok: true,
+          headers: { get: () => 'application/json' },
+          json: async () => ({
+            success: true,
+            enabled: false,
+            mfaRequired: false,
+            backupCodesRemaining: 0,
+          }),
+        };
+      }
+      if (url === '/api/mfa' && body.action === 'setup') {
+        return {
+          ok: true,
+          headers: { get: () => 'application/json' },
+          json: async () => ({
+            success: true,
+            manualKey: 'JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP',
+            otpauthUri:
+              'otpauth://totp/Smartsa%20LMS:mhs.mfa%40kampus.ac.id?secret=JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP&issuer=Smartsa%20LMS',
+          }),
+        };
+      }
+      if (url === '/api/mfa' && body.action === 'confirm') {
+        expect(body.code).toBe('654321');
+        return {
+          ok: true,
+          headers: { get: () => 'application/json' },
+          json: async () => ({
+            success: true,
+            enabled: true,
+            mfaRequired: false,
+            backupCodesRemaining: 6,
+            backupCodes: ['AAAA-1111', 'BBBB-2222', 'CCCC-3333', 'DDDD-4444', 'EEEE-5555', 'FFFF-6666'],
+          }),
+        };
+      }
+      if (url === '/api/mfa' && body.action === 'disable') {
+        expect(body.code).toBe('112233');
+        return {
+          ok: true,
+          headers: { get: () => 'application/json' },
+          json: async () => ({
+            success: true,
+            enabled: false,
+            mfaRequired: false,
+            backupCodesRemaining: 0,
+          }),
+        };
+      }
+      return { ok: false, headers: { get: () => 'application/json' }, json: async () => ({}) };
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const { unmount } = render(
+      <ThemeProvider>
+        <LanguageProvider>
+          <AuthProvider>
+            <ProfileView onOpenAuth={vi.fn()} />
+          </AuthProvider>
+        </LanguageProvider>
+      </ThemeProvider>
+    );
+
+    const activateBtn = await screen.findByRole('button', { name: /AKTIFKAN 2FA/i });
+    await act(async () => {
+      fireEvent.click(activateBtn);
+    });
+
+    // Step 1: QR Code image + manualKey rendered without dangerouslySetInnerHTML
+    await waitFor(() => {
+      expect(screen.getByTestId('mfa-manual-key')).toHaveTextContent(
+        'JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP'
+      );
+    });
+    const qrImg = await screen.findByAltText(/QR Code 2FA Authenticator Smartsa/i);
+    expect(qrImg.getAttribute('src')).toContain('data:image/png;base64,MOCK_QR_');
+
+    // Confirm 6-digit OTP
+    fireEvent.change(screen.getByLabelText(/Masukkan Kode Verifikasi 6 Digit dari Aplikasi/i), {
+      target: { value: '654321' },
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /Verifikasi & Aktifkan/i }));
+    });
+
+    // Step 2: 6 one-time backup codes rendered + Active status
+    expect(await screen.findByText('AAAA-1111')).toBeInTheDocument();
+    expect(screen.getByText('FFFF-6666')).toBeInTheDocument();
+    expect(screen.getByText('AKTIF')).toBeInTheDocument();
+
+    // Close backup step and test Disable via AccessibleDialog
+    fireEvent.click(screen.getByRole('button', { name: /Selesai, Sudah Disimpan/i }));
+    const disableBtn = await screen.findByRole('button', { name: /NONAKTIFKAN 2FA/i });
+    fireEvent.click(disableBtn);
+
+    const disableDialog = await screen.findByRole('dialog');
+    expect(disableDialog).toHaveTextContent(/Nonaktifkan Autentikasi Dua Faktor/i);
+    fireEvent.change(screen.getByLabelText(/Kode OTP 6 Digit Aktif atau Backup Code/i), {
+      target: { value: '112233' },
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /Ya, Nonaktifkan 2FA/i }));
+    });
+
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: /AKTIFKAN 2FA/i })).toBeInTheDocument();
+    });
+    unmount();
+  });
+
+  it('locks all LMS_VIEWS in App.jsx when mfaRequired === true until POST /api/mfa verify succeeds or user logs out', async () => {
+    // 1. User visits #dashboard while mfaRequired === true -> locked behind TOTP screen, unlocks on verify
+    window.location.hash = '#dashboard';
+    const mfaUser = {
+      uid: 'uid_mfa_gate',
+      email: 'mfa.user@kampus.ac.id',
+      displayName: 'Mahasiswa Terkunci',
+      emailVerified: true,
+      getIdToken: vi.fn(async () => 'token-mfa-gate'),
+    };
+    mockAuthObj.currentUser = mfaUser;
+    mockOnAuthStateChanged.mockImplementation((_auth, cb) => {
+      void cb(mfaUser);
+      return () => {};
+    });
+
+    let verifyCount = 0;
+    const fetchGateMock = vi.fn(async (url, opts) => {
+      const body = opts?.body ? JSON.parse(opts.body) : {};
+      if (url === '/api/bootstrap') {
+        return {
+          ok: true,
+          headers: { get: () => 'application/json' },
+          json: async () => ({
+            success: true,
+            isNewUser: false,
+            mfaEnabled: true,
+            mfaRequired: true,
+            profile: {
+              uid: 'uid_mfa_gate',
+              email: 'mfa.user@kampus.ac.id',
+              displayName: 'Mahasiswa Terkunci',
+              role: 'student',
+              accountType: 'MAHASISWA',
+              isInstitutional: true,
+              mfaEnabled: true,
+              mfaRequired: true,
+            },
+          }),
+        };
+      }
+      if (url === '/api/mfa' && body.action === 'verify') {
+        verifyCount += 1;
+        return {
+          ok: true,
+          headers: { get: () => 'application/json' },
+          json: async () => ({
+            success: true,
+            verified: true,
+            method: 'backup_code',
+            mfaRequired: false,
+            backupCodesRemaining: 5,
+          }),
+        };
+      }
+      return { ok: false, headers: { get: () => 'application/json' }, json: async () => ({}) };
+    });
+    vi.stubGlobal('fetch', fetchGateMock);
+    mockGetDocs.mockResolvedValue({ docs: [] });
+
+    const { unmount } = render(<App />);
+
+    // Must render 2FA Verification gate and NOT render LMS navigation / dashboard
+    expect(await screen.findByText(/Verifikasi 2FA \(TOTP\)/i)).toBeInTheDocument();
+    expect(screen.queryByText(/Portal Pembelajaran/i)).toBeNull();
+    expect(screen.queryByText(/Semester Aktif/i)).toBeNull();
+
+    // Switch to Backup Code mode, submit backup code, verify unlock
+    fireEvent.click(screen.getByRole('button', { name: /Gunakan Backup Code/i }));
+    fireEvent.change(screen.getByLabelText(/Backup Code Sekali Pakai/i), {
+      target: { value: 'AAAA-1111' },
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /VERIFIKASI & BUKA LMS/i }));
+    });
+
+    await waitFor(() => {
+      expect(verifyCount).toBe(1);
+      expect(screen.queryByText(/Verifikasi 2FA \(TOTP\)/i)).toBeNull();
+    });
+    unmount();
+
+    // 2. User with mfaRequired === true clicking Logout exits cleanly to #landing
+    window.location.hash = '#profil';
+    const { signOut: fbSignOut } = await import('firebase/auth');
+    fbSignOut.mockClear();
+    fbSignOut.mockResolvedValueOnce(undefined);
+
+    render(<App />);
+    expect(await screen.findByText(/Verifikasi 2FA \(TOTP\)/i)).toBeInTheDocument();
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /Logout/i }));
+    });
+    expect(fbSignOut).toHaveBeenCalledTimes(1);
+  });
+
+  it('connects AdminDashboard 4 health cards to live GET /api/health across ready, missing-env, and unreachable states', async () => {
+    const adminUser = {
+      uid: 'uid_admin_health',
+      email: 'admin@smartsa.edu',
+      displayName: 'Admin Infra',
+      emailVerified: true,
+      getIdToken: vi.fn(async () => 'token-admin-health'),
+    };
+    mockAuthObj.currentUser = adminUser;
+    mockOnAuthStateChanged.mockImplementation((_auth, cb) => {
+      void cb(adminUser);
+      return () => {};
+    });
+
+    mockGetDocs.mockResolvedValue({ docs: [] });
+
+    let healthScenario = 'all_ready';
+    const fetchHealthMock = vi.fn(async (url, opts) => {
+      if (url === '/api/bootstrap') {
+        return {
+          ok: true,
+          headers: { get: () => 'application/json' },
+          json: async () => ({
+            success: true,
+            isNewUser: false,
+            mfaEnabled: false,
+            mfaRequired: false,
+            profile: {
+              uid: 'uid_admin_health',
+              email: 'admin@smartsa.edu',
+              displayName: 'Admin Infra',
+              role: 'admin',
+              accountType: 'DOSEN',
+              isInstitutional: true,
+            },
+          }),
+        };
+      }
+      if (url === '/api/health') {
+        expect(opts?.method).toBe('GET');
+        if (healthScenario === 'unreachable') {
+          throw new Error('Backend offline');
+        }
+        return {
+          ok: true,
+          headers: { get: () => 'application/json' },
+          json: async () =>
+            healthScenario === 'all_ready'
+              ? {
+                  success: true,
+                  firestore: true,
+                  cloudinaryConfigured: true,
+                  geminiConfigured: true,
+                  geminiModel: 'gemini-4-hydrogen',
+                }
+              : {
+                  success: true,
+                  firestore: true,
+                  cloudinaryConfigured: false,
+                  geminiConfigured: false,
+                  geminiModel: 'gemini-4-hydrogen',
+                },
+        };
+      }
+      return { ok: false, headers: { get: () => 'application/json' }, json: async () => ({}) };
+    });
+    vi.stubGlobal('fetch', fetchHealthMock);
+
+    // 1. All configured -> green ready states, no static Env Configured / Exam-Safe Guard copy
+    const { unmount } = render(
+      <LanguageProvider>
+        <AuthProvider>
+          <AdminDashboard onClassesChanged={vi.fn()} />
+        </AuthProvider>
+      </LanguageProvider>
+    );
+
+    expect(await screen.findByText(/Ready \(gemini-4-hydrogen\)/i)).toBeInTheDocument();
+    expect(screen.getByTestId('health-card-backend')).toHaveTextContent(/Online/i);
+    expect(screen.getByTestId('health-card-cloudinary')).toHaveTextContent(/Terkonfigurasi/i);
+    expect(screen.queryByText(/Env Configured/i)).toBeNull();
+    expect(screen.queryByText(/Exam-Safe Guard/i)).toBeNull();
+
+    // 2. Refresh when env missing -> amber warning labels
+    healthScenario = 'missing_env';
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /Muat Ulang/i }));
+    });
+    expect(await screen.findByText(/Env Belum Terpasang/i)).toBeInTheDocument();
+    expect(screen.getByTestId('health-card-gemini')).toHaveTextContent(
+      /API Key Kosong \(gemini-4-hydrogen\)/i
+    );
+
+    // 3. Refresh when backend unreachable -> red unreachable state
+    healthScenario = 'unreachable';
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /Muat Ulang/i }));
+    });
+    expect(await screen.findByTestId('health-card-backend')).toHaveTextContent(/Tidak Terjangkau/i);
+    expect(screen.getByTestId('health-card-cloudinary')).toHaveTextContent(/Backend Gagal/i);
+    unmount();
+  });
+
+  it('renders ClassDetailView ANGGOTA tab for lecturer with pending approve/reject, active search, AccessibleDialog remove, and enrolledCount sync', async () => {
+    const lecturerUser = {
+      uid: 'uid_dosen_members',
+      email: 'dosen.members@smartsa.edu',
+      displayName: 'Dosen Pengampu Anggota',
+      emailVerified: true,
+      getIdToken: vi.fn(async () => 'token-dosen-members'),
+    };
+    mockAuthObj.currentUser = lecturerUser;
+    mockOnAuthStateChanged.mockImplementation((_auth, cb) => {
+      void cb(lecturerUser);
+      return () => {};
+    });
+
+    mockGetDoc.mockImplementation(async (ref) => {
+      if (ref?.path === 'users/uid_dosen_members') {
+        return {
+          exists: () => true,
+          data: () => ({
+            uid: 'uid_dosen_members',
+            email: 'dosen.members@smartsa.edu',
+            role: 'lecturer',
+            displayName: 'Dosen Pengampu Anggota',
+          }),
+        };
+      }
+      return { exists: () => false };
+    });
+
+    mockGetDocs.mockImplementation(async (qOrRef) => {
+      const colName = qOrRef?.col || qOrRef?.args?.[0]?.col;
+      if (colName === 'class_members') {
+        return {
+          docs: [
+            {
+              id: 'cls_mem_ui_u_pend1',
+              data: () => ({
+                uid: 'u_pend1',
+                classId: 'cls_mem_ui',
+                studentName: 'Rina Pending',
+                email: 'rina@gmail.com',
+                accountType: 'UMUM',
+                status: 'pending',
+              }),
+            },
+            {
+              id: 'cls_mem_ui_u_pend2',
+              data: () => ({
+                uid: 'u_pend2',
+                classId: 'cls_mem_ui',
+                studentName: 'Dono Ditolak',
+                email: 'dono@gmail.com',
+                accountType: 'UMUM',
+                status: 'pending',
+              }),
+            },
+            {
+              id: 'cls_mem_ui_u_act1',
+              data: () => ({
+                uid: 'u_act1',
+                classId: 'cls_mem_ui',
+                studentName: 'Sari Aktif',
+                email: 'sari@kampus.ac.id',
+                accountType: 'MAHASISWA',
+                status: 'approved',
+              }),
+            },
+            {
+              id: 'cls_mem_ui_u_act2',
+              data: () => ({
+                uid: 'u_act2',
+                classId: 'cls_mem_ui',
+                studentName: 'Budi Tetap',
+                email: 'budi@kampus.ac.id',
+                accountType: 'MAHASISWA',
+                status: 'active',
+              }),
+            },
+          ],
+        };
+      }
+      return { docs: [] };
+    });
+
+    const apiCalls = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url, opts) => {
+        const body = opts?.body ? JSON.parse(opts.body) : {};
+        if (url === '/api/bootstrap') {
+          return {
+            ok: true,
+            headers: { get: () => 'application/json' },
+            json: async () => ({
+              success: true,
+              isNewUser: false,
+              mfaEnabled: false,
+              mfaRequired: false,
+              profile: {
+                uid: 'uid_dosen_members',
+                email: 'dosen.members@smartsa.edu',
+                displayName: 'Dosen Pengampu Anggota',
+                role: 'lecturer',
+              },
+            }),
+          };
+        }
+        if (url === '/api/manage-members') {
+          apiCalls.push(body);
+          const countMap = { approve: 3, reject: 3, remove: 2 };
+          return {
+            ok: true,
+            headers: { get: () => 'application/json' },
+            json: async () => ({
+              success: true,
+              action: body.action,
+              classId: body.classId,
+              uid: body.memberUid,
+              enrolledCount: countMap[body.action] ?? 2,
+            }),
+          };
+        }
+        return { ok: false, headers: { get: () => 'application/json' }, json: async () => ({}) };
+      })
+    );
+
+    const onClassUpdatedSpy = vi.fn();
+    const initialClassData = {
+      id: 'cls_mem_ui',
+      name: 'Keamanan Jaringan',
+      code: 'SEC404',
+      category: 'Keamanan Siber',
+      lecturerId: 'uid_dosen_members',
+      instructor: 'Dosen Pengampu Anggota',
+      enrolledCount: 2,
+      meetings: [{ id: 'm1', order: 1, title: 'Pengantar', status: 'open' }],
+    };
+
+    const { rerender, unmount } = render(
+      <LanguageProvider>
+        <AuthProvider>
+          <ClassDetailView
+            classData={initialClassData}
+            onClassUpdated={onClassUpdatedSpy}
+            onBack={vi.fn()}
+          />
+        </AuthProvider>
+      </LanguageProvider>
+    );
+
+    const membersTabBtn = await screen.findByRole('button', { name: /^ANGGOTA$/i });
+    await act(async () => {
+      fireEvent.click(membersTabBtn);
+    });
+
+    expect(await screen.findByText('Rina Pending')).toBeInTheDocument();
+    expect(screen.getByText('Dono Ditolak')).toBeInTheDocument();
+    expect(screen.getByText('Sari Aktif')).toBeInTheDocument();
+    expect(screen.getByText('Budi Tetap')).toBeInTheDocument();
+    expect(screen.getByTestId('members-enrolled-summary')).toHaveTextContent(/2 Peserta Terdaftar/i);
+
+    // 1. Approve Rina Pending -> enrolledCount syncs 2 -> 3
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /Setujui Rina Pending/i }));
+    });
+    expect(apiCalls[0]).toMatchObject({
+      action: 'approve',
+      classId: 'cls_mem_ui',
+      memberUid: 'u_pend1',
+    });
+    expect(onClassUpdatedSpy).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'cls_mem_ui', enrolledCount: 3 })
+    );
+    rerender(
+      <LanguageProvider>
+        <AuthProvider>
+          <ClassDetailView
+            classData={{ ...initialClassData, enrolledCount: 3 }}
+            onClassUpdated={onClassUpdatedSpy}
+            onBack={vi.fn()}
+          />
+        </AuthProvider>
+      </LanguageProvider>
+    );
+    expect(screen.getByTestId('members-enrolled-summary')).toHaveTextContent(/3 Peserta Terdaftar/i);
+    expect(screen.getByTestId('class-enrolled-badge')).toHaveTextContent(/3 Peserta/i);
+
+    // 2. Reject Dono Ditolak
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /Tolak Dono Ditolak/i }));
+    });
+    expect(apiCalls[1]).toMatchObject({
+      action: 'reject',
+      classId: 'cls_mem_ui',
+      memberUid: 'u_pend2',
+    });
+    expect(screen.queryByText('Dono Ditolak')).toBeNull();
+
+    // 3. Fast search filters active members table
+    const searchInput = screen.getByLabelText(/Cari anggota aktif/i);
+    fireEvent.change(searchInput, { target: { value: 'Sari' } });
+    expect(screen.getByText('Sari Aktif')).toBeInTheDocument();
+    expect(screen.queryByText('Budi Tetap')).toBeNull();
+    fireEvent.change(searchInput, { target: { value: '' } });
+    expect(screen.getByText('Budi Tetap')).toBeInTheDocument();
+
+    // 4. Remove Sari Aktif via AccessibleDialog variant="danger" -> enrolledCount 3 -> 2
+    fireEvent.click(screen.getByRole('button', { name: /Keluarkan Sari Aktif/i }));
+    const confirmDialog = await screen.findByRole('dialog');
+    expect(confirmDialog).toHaveTextContent(/Keluarkan Anggota Kelas/i);
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /Ya, Keluarkan/i }));
+    });
+    expect(apiCalls[2]).toMatchObject({
+      action: 'remove',
+      classId: 'cls_mem_ui',
+      memberUid: 'u_act1',
+    });
+    expect(onClassUpdatedSpy).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'cls_mem_ui', enrolledCount: 2 })
+    );
+    expect(screen.queryByText('Sari Aktif')).toBeNull();
+    unmount();
+
+    // 5. Verify Student role does NOT see ANGGOTA tab
+    const studentUser = {
+      uid: 'uid_mhs_no_memtab',
+      email: 'mhs@kampus.ac.id',
+      displayName: 'Mahasiswa Biasa',
+      emailVerified: true,
+      getIdToken: vi.fn(async () => 'token-mhs-no-memtab'),
+    };
+    mockAuthObj.currentUser = studentUser;
+    mockOnAuthStateChanged.mockImplementation((_auth, cb) => {
+      void cb(studentUser);
+      return () => {};
+    });
+    mockGetDoc.mockResolvedValue({
+      exists: () => true,
+      data: () => ({ uid: 'uid_mhs_no_memtab', role: 'student', displayName: 'Mahasiswa Biasa' }),
+    });
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url) => {
+        if (url === '/api/bootstrap') {
+          return {
+            ok: true,
+            headers: { get: () => 'application/json' },
+            json: async () => ({
+              success: true,
+              isNewUser: false,
+              mfaEnabled: false,
+              mfaRequired: false,
+              profile: {
+                uid: 'uid_mhs_no_memtab',
+                email: 'mhs@kampus.ac.id',
+                displayName: 'Mahasiswa Biasa',
+                role: 'student',
+              },
+            }),
+          };
+        }
+        return { ok: false, headers: { get: () => 'application/json' }, json: async () => ({}) };
+      })
+    );
+
+    const { unmount: unmountStudent } = render(
+      <LanguageProvider>
+        <AuthProvider>
+          <ClassDetailView
+            classData={initialClassData}
+            isMember={true}
+            onBack={vi.fn()}
+          />
+        </AuthProvider>
+      </LanguageProvider>
+    );
+    expect(await screen.findByRole('button', { name: /^SILABUS$/i })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /^ANGGOTA$/i })).toBeNull();
+    unmountStudent();
   });
 });

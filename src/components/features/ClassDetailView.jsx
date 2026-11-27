@@ -20,6 +20,7 @@ import {
   deleteMeetingExamByInstructor,
   gradeSubmissionInFirestore,
   joinClassWithToken,
+  manageClassMemberViaApi,
   saveMeetingExamByInstructor,
   submitAssignmentToFirestore,
   cancelSubmissionInFirestore,
@@ -51,6 +52,7 @@ import {
   AIKEN_SAMPLE_TEMPLATE,
 } from '../../services/aikenParser';
 import DiscussionTab from './DiscussionTab';
+import ClassMembersTab from './ClassMembersTab';
 import {
   ArrowLeft,
   BookOpen,
@@ -244,7 +246,7 @@ export default function ClassDetailView({
   const isPreviewMode = Boolean(currentUser && role === ROLES.STUDENT && isMember === false);
 
   const [activeTab, setActiveTab] = useState(() =>
-    initialTab && ['meetings', 'exam', 'tasks', 'discussion'].includes(initialTab)
+    initialTab && ['meetings', 'exam', 'tasks', 'discussion', 'members'].includes(initialTab)
       ? initialTab
       : 'meetings'
   );
@@ -346,6 +348,11 @@ export default function ClassDetailView({
   const [instructorKeySource, setInstructorKeySource] = useState('');
   const [classExamAttempts, setClassExamAttempts] = useState([]);
   const [classMembersList, setClassMembersList] = useState([]);
+  const [membersLoading, setMembersLoading] = useState(false);
+  const [memberActionId, setMemberActionId] = useState(null);
+  const [membersFeedback, setMembersFeedback] = useState(null);
+  const [removeMemberTarget, setRemoveMemberTarget] = useState(null);
+  const membersReqIdRef = useRef(0);
   const [evalAnalyticsLoading, setEvalAnalyticsLoading] = useState(false);
   const [evalAnalyticsError, setEvalAnalyticsError] = useState('');
   const [showExamEditor, setShowExamEditor] = useState(false);
@@ -431,7 +438,7 @@ export default function ClassDetailView({
     setMeetingsList(nextMeetings);
     if (switchedClass) {
       setActiveTab(
-        initialTab && ['meetings', 'exam', 'tasks', 'discussion'].includes(initialTab)
+        initialTab && ['meetings', 'exam', 'tasks', 'discussion', 'members'].includes(initialTab)
           ? initialTab
           : 'meetings'
       );
@@ -444,6 +451,10 @@ export default function ClassDetailView({
       setSelectedAnswers({});
       recoveredAttemptIdRef.current = '';
       setClassMembersList([]);
+      setMembersLoading(false);
+      setMemberActionId(null);
+      setMembersFeedback(null);
+      setRemoveMemberTarget(null);
       setConfirmDeleteExam(false);
       setShowExamEditor(false);
       setExamEditorMode('visual');
@@ -484,7 +495,7 @@ export default function ClassDetailView({
   }, [classData, initialMeetingNo, initialTab]);
 
   useEffect(() => {
-    if (initialTab && ['meetings', 'exam', 'tasks', 'discussion'].includes(initialTab)) {
+    if (initialTab && ['meetings', 'exam', 'tasks', 'discussion', 'members'].includes(initialTab)) {
       setActiveTab(initialTab);
     }
     if (initialMeetingNo && meetingsList.length > 0) {
@@ -605,6 +616,28 @@ export default function ClassDetailView({
     } finally {
       if (mountedRef.current && reqId === gradingReqIdRef.current) {
         setGradingLoading(false);
+      }
+    }
+  }, [classData?.id]);
+
+  const loadClassMembers = useCallback(async () => {
+    if (!classData?.id) return;
+    const reqId = ++membersReqIdRef.current;
+    const targetClassId = classData.id;
+    setMembersLoading(true);
+    try {
+      const members = await fetchClassMembers(targetClassId);
+      if (
+        !mountedRef.current ||
+        reqId !== membersReqIdRef.current ||
+        classIdRef.current !== targetClassId
+      ) {
+        return;
+      }
+      setClassMembersList(members || []);
+    } finally {
+      if (mountedRef.current && reqId === membersReqIdRef.current) {
+        setMembersLoading(false);
       }
     }
   }, [classData?.id]);
@@ -757,6 +790,8 @@ export default function ClassDetailView({
       void loadInstructorGrading();
     } else if (activeTab === 'exam_insights') {
       void loadInstructorEvalAnalytics(evalKeyType, currentMeetingNo);
+    } else if (activeTab === 'members') {
+      void loadClassMembers();
     }
   }, [
     isEducatorOrAdmin,
@@ -766,6 +801,7 @@ export default function ClassDetailView({
     loadInstructorAttendance,
     loadInstructorGrading,
     loadInstructorEvalAnalytics,
+    loadClassMembers,
   ]);
 
   const activeStudentExam = meetingExams[examType] || null;
@@ -2320,6 +2356,71 @@ export default function ClassDetailView({
     }
   };
 
+  const handleMemberDecision = async (member, action) => {
+    if (!isEducatorOrAdmin || !classData?.id || !member) return;
+    const rowKey = member.id || member.uid;
+    setMemberActionId(rowKey);
+    setMembersFeedback(null);
+    try {
+      const res = await manageClassMemberViaApi({
+        classId: classData.id,
+        memberUid: member.uid,
+        memberId: member.id,
+        action,
+      });
+
+      let updatedActiveCount = null;
+      setClassMembersList((prev) => {
+        const nextList =
+          action === 'approve'
+            ? prev.map((m) =>
+                (m.id || m.uid) === rowKey ? { ...m, status: 'approved' } : m
+              )
+            : prev.filter((m) => (m.id || m.uid) !== rowKey);
+        updatedActiveCount = nextList.filter((m) => {
+          const st = String(m?.status || 'approved').toLowerCase();
+          return st === 'approved' || st === 'active';
+        }).length;
+        return nextList;
+      });
+
+      const resolvedEnrolledCount =
+        typeof res?.enrolledCount === 'number'
+          ? res.enrolledCount
+          : Math.max(0, Number(updatedActiveCount ?? 0));
+
+      onClassUpdated?.({
+        ...classData,
+        enrolledCount: resolvedEnrolledCount,
+      });
+
+      const targetLabel =
+        member.studentName || member.displayName || member.name || member.email || member.uid;
+      setMembersFeedback({
+        type: 'success',
+        text:
+          action === 'approve'
+            ? language === 'en'
+              ? `${targetLabel} has been approved into this class.`
+              : `${targetLabel} berhasil disetujui masuk ke kelas.`
+            : action === 'reject'
+              ? language === 'en'
+                ? `Join request from ${targetLabel} was rejected.`
+                : `Permintaan bergabung ${targetLabel} telah ditolak.`
+              : language === 'en'
+                ? `${targetLabel} has been removed from this class.`
+                : `${targetLabel} telah dikeluarkan dari kelas.`,
+      });
+    } catch (err) {
+      setMembersFeedback({
+        type: 'error',
+        text: err.message || 'Gagal memproses perubahan keanggotaan kelas.',
+      });
+    } finally {
+      setMemberActionId(null);
+    }
+  };
+
   const handleJoinFromPreview = async () => {
     if (!classData?.code || joiningClass) return;
     setJoiningClass(true);
@@ -2708,6 +2809,11 @@ export default function ClassDetailView({
           label: language === 'en' ? 'EVAL KEYS & STATS' : 'KUNCI & STATISTIK',
         },
         {
+          id: 'members',
+          icon: Users,
+          label: language === 'en' ? 'MEMBERS' : 'ANGGOTA',
+        },
+        {
           id: 'discussion',
           icon: MessageSquare,
           label: language === 'en' ? 'DISCUSSION' : 'DISKUSI',
@@ -2883,6 +2989,43 @@ export default function ClassDetailView({
         cancelLabel={t('dialog_cancel')}
         onConfirm={() => void executeDeleteAssignment()}
         onClose={() => setDeleteAssignmentTarget(null)}
+      />
+
+      <AccessibleDialog
+        isOpen={Boolean(removeMemberTarget)}
+        variant="danger"
+        title={language === 'en' ? 'Remove Class Member' : 'Keluarkan Anggota Kelas'}
+        message={
+          removeMemberTarget
+            ? language === 'en'
+              ? `Remove "${
+                  removeMemberTarget.studentName ||
+                  removeMemberTarget.displayName ||
+                  removeMemberTarget.name ||
+                  removeMemberTarget.email ||
+                  removeMemberTarget.uid
+                }" from this class? The enrolled participant count will be updated.`
+              : `Keluarkan "${
+                  removeMemberTarget.studentName ||
+                  removeMemberTarget.displayName ||
+                  removeMemberTarget.name ||
+                  removeMemberTarget.email ||
+                  removeMemberTarget.uid
+                }" dari kelas ini? Jumlah peserta terdaftar akan ikut diperbarui.`
+            : ''
+        }
+        confirmLabel={language === 'en' ? 'Yes, Remove' : 'Ya, Keluarkan'}
+        cancelLabel={t('dialog_cancel')}
+        confirmDisabled={Boolean(memberActionId)}
+        onConfirm={() => {
+          const target = removeMemberTarget;
+          setRemoveMemberTarget(null);
+          if (target) void handleMemberDecision(target, 'remove');
+        }}
+        onClose={() => {
+          if (memberActionId) return;
+          setRemoveMemberTarget(null);
+        }}
       />
 
       {editingAssignment && (
@@ -3134,6 +3277,13 @@ export default function ClassDetailView({
               </span>
               <span className="text-[10px] font-mono font-bold text-amber-700 dark:text-[#f59e0b] bg-amber-50 dark:bg-[#141d2c] border border-amber-200 dark:border-[#f59e0b]/30 px-2 py-0.5 rounded-xs">
                 {language === 'en' ? 'CODE' : 'KODE'}: {classData.code}
+              </span>
+              <span
+                data-testid="class-enrolled-badge"
+                className="text-[10px] font-mono font-semibold text-emerald-700 dark:text-emerald-300 bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-200 dark:border-emerald-500/30 px-2 py-0.5 rounded-xs"
+              >
+                {typeof classData.enrolledCount === 'number' ? classData.enrolledCount : 0}{' '}
+                {language === 'en' ? 'Enrolled' : 'Peserta'}
               </span>
               {(classData.day || classData.time) && (
                 <span className="text-[10px] font-mono text-slate-600 dark:text-slate-300 bg-slate-100 dark:bg-[#18212e] border border-slate-200 dark:border-[#232f42] px-2 py-0.5 rounded-xs">
@@ -6589,6 +6739,23 @@ export default function ClassDetailView({
             );
           })()}
         </div>
+      )}
+
+      {/* TAB ANGGOTA (Instructor / Admin Member Management via Admin SDK) */}
+      {!isPreviewMode && isEducatorOrAdmin && activeTab === 'members' && (
+        <ClassMembersTab
+          key={classData?.id || 'members'}
+          classData={classData}
+          members={classMembersList}
+          loading={membersLoading}
+          memberActionId={memberActionId}
+          feedback={membersFeedback}
+          language={language}
+          onRefresh={() => void loadClassMembers()}
+          onApprove={(member) => void handleMemberDecision(member, 'approve')}
+          onReject={(member) => void handleMemberDecision(member, 'reject')}
+          onRequestRemove={(member) => setRemoveMemberTarget(member)}
+        />
       )}
 
       {/* TAB: Contextual Discussion per Class & Meeting */}

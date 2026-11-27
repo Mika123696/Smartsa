@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto';
+import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import { initializeApp, applicationDefault, cert, getApps } from 'firebase-admin/app';
 import { getAuth } from 'firebase-admin/auth';
 import { getFirestore, FieldValue } from 'firebase-admin/firestore';
@@ -235,7 +235,18 @@ export function applyCorsHeaders(req, res) {
     res.removeHeader('Access-Control-Allow-Origin');
   }
 
-  res.setHeader('Access-Control-Allow-Methods', ALLOWED_CORS_METHODS);
+  let isHealthRoute = false;
+  try {
+    isHealthRoute =
+      new URL(req?.url || '/', 'http://localhost').pathname.replace(/\/+$/, '') === '/api/health';
+  } catch {
+    isHealthRoute = false;
+  }
+
+  res.setHeader(
+    'Access-Control-Allow-Methods',
+    isHealthRoute ? 'GET, OPTIONS' : ALLOWED_CORS_METHODS
+  );
   res.setHeader('Access-Control-Allow-Headers', ALLOWED_CORS_HEADERS);
   res.setHeader('Vary', 'Origin');
 }
@@ -257,6 +268,7 @@ function sendJson(res, statusCode, payload, req = null, extraHeaders = null) {
 }
 
 const RATE_LIMIT_WINDOW_MS = 15 * 60 * 1000;
+const DEFAULT_GEMINI_MODEL = 'gemini-4-hydrogen';
 const AI_MAX_REQUESTS = 20;
 const AI_MAX_PROMPT_LENGTH = 2000;
 const AI_MAX_CONTEXT_LENGTH = 4000;
@@ -453,6 +465,39 @@ function buildLocalAssistantResponse({ mode = 'learning', prompt = '', context =
   ].join('\n');
 }
 
+function resolveGeminiModel() {
+  return String(process.env.GEMINI_MODEL || DEFAULT_GEMINI_MODEL).trim() || DEFAULT_GEMINI_MODEL;
+}
+
+async function handleHealth() {
+  let firestoreReady = false;
+  try {
+    firestoreReady = Boolean(getFirestore());
+  } catch {
+    firestoreReady = false;
+  }
+
+  const cloudName = String(process.env.CLOUDINARY_CLOUD_NAME || '').trim();
+  const cloudKey = String(process.env.CLOUDINARY_API_KEY || '').trim();
+  const cloudSecret = String(process.env.CLOUDINARY_API_SECRET || '').trim();
+  const cloudinaryConfigured = Boolean(cloudName && cloudKey && cloudSecret);
+
+  const geminiApiKey = String(process.env.GEMINI_API_KEY || '').trim();
+  const geminiConfigured = Boolean(geminiApiKey);
+  const geminiModel = resolveGeminiModel();
+
+  return {
+    status: 200,
+    payload: {
+      success: true,
+      firestore: firestoreReady,
+      cloudinaryConfigured,
+      geminiConfigured,
+      geminiModel,
+    },
+  };
+}
+
 async function handleAi(body, decodedToken) {
   const uid = String(decodedToken?.uid || '').trim();
   if (!uid) {
@@ -597,7 +642,7 @@ async function handleAi(body, decodedToken) {
     ? `${systemPrompt}\n\nKonteks Kelas/Materi:\n${cleanContext}`
     : systemPrompt;
 
-  const model = String(process.env.GEMINI_MODEL || 'gemini-2.5-flash').trim() || 'gemini-2.5-flash';
+  const model = resolveGeminiModel();
   const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(apiKey)}`;
 
   const contents =
@@ -947,6 +992,616 @@ async function resolveCallerRole(db, decodedToken) {
   return 'student';
 }
 
+const BASE32_ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
+const MFA_TOTP_PERIOD_SECONDS = 30;
+const MFA_TOTP_DIGITS = 6;
+const MFA_TOTP_WINDOW_STEPS = 1;
+const MFA_MAX_FAILED_ATTEMPTS = 5;
+const MFA_BACKUP_CODE_COUNT = 6;
+const MFA_ISSUER = 'Smartsa LMS';
+
+export function base32Encode(buffer) {
+  const bytes = Buffer.isBuffer(buffer) ? buffer : Buffer.from(buffer);
+  let bits = 0;
+  let value = 0;
+  let output = '';
+  for (const byte of bytes) {
+    value = (value << 8) | byte;
+    bits += 8;
+    while (bits >= 5) {
+      output += BASE32_ALPHABET[(value >>> (bits - 5)) & 31];
+      bits -= 5;
+    }
+  }
+  if (bits > 0) {
+    output += BASE32_ALPHABET[(value << (5 - bits)) & 31];
+  }
+  return output;
+}
+
+export function base32Decode(str) {
+  const clean = String(str || '')
+    .toUpperCase()
+    .replace(/=+$/g, '')
+    .replace(/[\s-]+/g, '');
+  if (!clean) return Buffer.alloc(0);
+  let bits = 0;
+  let value = 0;
+  const bytes = [];
+  for (const ch of clean) {
+    const idx = BASE32_ALPHABET.indexOf(ch);
+    if (idx === -1) {
+      throw new Error('Invalid Base32 character.');
+    }
+    value = (value << 5) | idx;
+    bits += 5;
+    if (bits >= 8) {
+      bytes.push((value >>> (bits - 8)) & 255);
+      bits -= 8;
+    }
+  }
+  return Buffer.from(bytes);
+}
+
+export function generateTotpAtStep(secretBase32, counterStep, digits = MFA_TOTP_DIGITS) {
+  const key = base32Decode(secretBase32);
+  if (!key.length) {
+    throw new Error('TOTP secret is empty.');
+  }
+  const counterBuf = Buffer.alloc(8);
+  counterBuf.writeBigUInt64BE(BigInt(counterStep));
+  const hmac = createHmac('sha1', key).update(counterBuf).digest();
+  const offset = hmac[hmac.length - 1] & 0x0f;
+  const binaryCode =
+    ((hmac[offset] & 0x7f) << 24) |
+    ((hmac[offset + 1] & 0xff) << 16) |
+    ((hmac[offset + 2] & 0xff) << 8) |
+    (hmac[offset + 3] & 0xff);
+  const mod = 10 ** digits;
+  return String(binaryCode % mod).padStart(digits, '0');
+}
+
+export function verifyTotpCode(
+  secretBase32,
+  rawCode,
+  { nowMs = Date.now(), windowSteps = MFA_TOTP_WINDOW_STEPS, minStepExclusive = null } = {}
+) {
+  const cleanCode = String(rawCode || '').replace(/\s+/g, '');
+  if (!/^\d{6}$/.test(cleanCode)) {
+    return { valid: false, matchedStep: null, replayed: false };
+  }
+
+  let decodedKey;
+  try {
+    decodedKey = base32Decode(secretBase32);
+  } catch {
+    return { valid: false, matchedStep: null, replayed: false };
+  }
+  if (decodedKey.length < 10) {
+    return { valid: false, matchedStep: null, replayed: false };
+  }
+
+  const currentStep = Math.floor(nowMs / 1000 / MFA_TOTP_PERIOD_SECONDS);
+  const codeBuf = Buffer.from(cleanCode, 'utf8');
+  let matchedStep = null;
+
+  for (let delta = -windowSteps; delta <= windowSteps; delta += 1) {
+    const candidateStep = currentStep + delta;
+    if (candidateStep < 0) continue;
+    const expected = generateTotpAtStep(secretBase32, candidateStep);
+    const expectedBuf = Buffer.from(expected, 'utf8');
+    if (expectedBuf.length === codeBuf.length && timingSafeEqual(expectedBuf, codeBuf)) {
+      matchedStep = candidateStep;
+    }
+  }
+
+  if (matchedStep === null) {
+    return { valid: false, matchedStep: null, replayed: false };
+  }
+
+  if (
+    typeof minStepExclusive === 'number' &&
+    Number.isFinite(minStepExclusive) &&
+    matchedStep <= minStepExclusive
+  ) {
+    return { valid: false, matchedStep, replayed: true };
+  }
+
+  return { valid: true, matchedStep, replayed: false };
+}
+
+function normalizeBackupCode(rawValue) {
+  return String(rawValue || '')
+    .toUpperCase()
+    .replace(/[^A-Z0-9]/g, '');
+}
+
+function hashBackupCode(rawValue) {
+  return createHash('sha256').update(normalizeBackupCode(rawValue)).digest('hex');
+}
+
+function generateBackupCodes(count = MFA_BACKUP_CODE_COUNT) {
+  const codes = [];
+  const hashes = [];
+  for (let i = 0; i < count; i += 1) {
+    const rawHex = randomBytes(4).toString('hex').toUpperCase();
+    const formatted = `${rawHex.slice(0, 4)}-${rawHex.slice(4, 8)}`;
+    codes.push(formatted);
+    hashes.push(hashBackupCode(formatted));
+  }
+  return { codes, hashes };
+}
+
+function resolveTokenAuthTime(decodedToken) {
+  if (typeof decodedToken?.auth_time === 'number' && Number.isFinite(decodedToken.auth_time)) {
+    return decodedToken.auth_time;
+  }
+  if (typeof decodedToken?.iat === 'number' && Number.isFinite(decodedToken.iat)) {
+    return decodedToken.iat;
+  }
+  return null;
+}
+
+function computeMfaRequired(mfaData, decodedToken) {
+  if (mfaData?.enabled !== true) return false;
+  const tokenAuthTime = resolveTokenAuthTime(decodedToken);
+  return mfaData?.verifiedAuthTime !== tokenAuthTime;
+}
+
+function verifyActiveMfaChallenge(
+  mfaData,
+  { code = '', backupCode = '', nowMs = Date.now() } = {}
+) {
+  const cleanBackup = normalizeBackupCode(backupCode);
+  const cleanCodeRaw = String(code || '').trim();
+  const cleanDigits = cleanCodeRaw.replace(/\s+/g, '');
+  const storedHashes = Array.isArray(mfaData?.backupCodeHashes) ? mfaData.backupCodeHashes : [];
+
+  const backupCandidate =
+    cleanBackup || (!/^\d{6}$/.test(cleanDigits) ? normalizeBackupCode(cleanCodeRaw) : '');
+
+  if (backupCandidate && storedHashes.length > 0) {
+    const candidateDigest = hashBackupCode(backupCandidate);
+    const candidateBuf = Buffer.from(candidateDigest, 'hex');
+    let matchedIdx = -1;
+    for (let i = 0; i < storedHashes.length; i += 1) {
+      const storedHex = String(storedHashes[i] || '');
+      if (storedHex.length !== candidateDigest.length) continue;
+      try {
+        const storedBuf = Buffer.from(storedHex, 'hex');
+        if (storedBuf.length === candidateBuf.length && timingSafeEqual(storedBuf, candidateBuf)) {
+          matchedIdx = i;
+        }
+      } catch {
+        // skip malformed stored hash
+      }
+    }
+    if (matchedIdx !== -1) {
+      return {
+        valid: true,
+        method: 'backup_code',
+        matchedStep: null,
+        replayed: false,
+        remainingHashes: storedHashes.filter((_, idx) => idx !== matchedIdx),
+      };
+    }
+    if (cleanBackup) {
+      return { valid: false, method: 'backup_code', matchedStep: null, replayed: false };
+    }
+  }
+
+  const totpResult = verifyTotpCode(mfaData?.secret, cleanDigits, {
+    nowMs,
+    windowSteps: MFA_TOTP_WINDOW_STEPS,
+    minStepExclusive:
+      typeof mfaData?.lastUsedStep === 'number' && Number.isFinite(mfaData.lastUsedStep)
+        ? mfaData.lastUsedStep
+        : null,
+  });
+
+  if (totpResult.valid) {
+    return {
+      valid: true,
+      method: 'totp',
+      matchedStep: totpResult.matchedStep,
+      replayed: false,
+      remainingHashes: storedHashes,
+    };
+  }
+
+  return {
+    valid: false,
+    method: 'totp',
+    matchedStep: totpResult.matchedStep,
+    replayed: Boolean(totpResult.replayed),
+  };
+}
+
+function mfaRateLimitedResponse(rateResult) {
+  return {
+    status: 429,
+    headers: { 'Retry-After': String(rateResult.retryAfterSeconds) },
+    payload: {
+      error: 'Terlalu banyak percobaan verifikasi 2FA yang gagal. Coba lagi beberapa saat lagi.',
+      code: 'RATE_LIMIT_EXCEEDED',
+      retryAfterSeconds: rateResult.retryAfterSeconds,
+    },
+  };
+}
+
+async function handleMfa(body, decodedToken) {
+  const uid = String(decodedToken?.uid || '').trim();
+  if (!uid) {
+    return {
+      status: 401,
+      payload: { error: 'Token pengguna tidak memiliki UID yang valid.', code: 'UNAUTHORIZED' },
+    };
+  }
+
+  const action = String(body?.action || '').trim().toLowerCase();
+  if (!['status', 'setup', 'confirm', 'verify', 'disable'].includes(action)) {
+    return {
+      status: 400,
+      payload: {
+        error: 'Aksi /api/mfa tidak valid. Gunakan status, setup, confirm, verify, atau disable.',
+        code: 'INVALID_MFA_ACTION',
+      },
+    };
+  }
+
+  const db = getFirestore();
+  const mfaRef = db.collection('user_mfa').doc(uid);
+  const userRef = db.collection('users').doc(uid);
+
+  if (action === 'status') {
+    const mfaSnap = await mfaRef.get();
+    const mfaData = mfaSnap?.exists ? mfaSnap.data() || {} : null;
+    const enabled = mfaData?.enabled === true;
+    const mfaRequired = computeMfaRequired(mfaData, decodedToken);
+    const backupCodesRemaining = Array.isArray(mfaData?.backupCodeHashes)
+      ? mfaData.backupCodeHashes.length
+      : 0;
+    return {
+      status: 200,
+      payload: {
+        success: true,
+        enabled,
+        mfaRequired,
+        backupCodesRemaining,
+      },
+    };
+  }
+
+  if (action === 'setup') {
+    const mfaSnap = await mfaRef.get();
+    const mfaData = mfaSnap?.exists ? mfaSnap.data() || {} : null;
+    if (mfaData?.enabled === true) {
+      return {
+        status: 409,
+        payload: {
+          error: 'Autentikasi Dua Faktor sudah aktif. Nonaktifkan terlebih dahulu untuk mengatur ulang.',
+          code: 'MFA_ALREADY_ENABLED',
+        },
+      };
+    }
+
+    const manualKey = base32Encode(randomBytes(20));
+    const cleanEmail = String(decodedToken?.email || '').trim().toLowerCase();
+    const accountLabel = cleanEmail || uid;
+    const encodedIssuer = encodeURIComponent(MFA_ISSUER);
+    const encodedLabel = encodeURIComponent(accountLabel);
+    const otpauthUri = `otpauth://totp/${encodedIssuer}:${encodedLabel}?secret=${manualKey}&issuer=${encodedIssuer}&algorithm=SHA1&digits=${MFA_TOTP_DIGITS}&period=${MFA_TOTP_PERIOD_SECONDS}`;
+
+    await mfaRef.set(
+      {
+        uid,
+        pendingSecret: manualKey,
+        pendingCreatedAt: FieldValue.serverTimestamp(),
+        updatedAt: FieldValue.serverTimestamp(),
+      },
+      { merge: true }
+    );
+
+    return {
+      status: 200,
+      payload: {
+        success: true,
+        otpauthUri,
+        manualKey,
+      },
+    };
+  }
+
+  // Remaining verification-sensitive actions (confirm, verify, disable) share persistent rate limit
+  const rateLimitPeek = await runRateLimitTx(db, {
+    scope: 'mfa_verify',
+    uid,
+    maxAttempts: MFA_MAX_FAILED_ATTEMPTS,
+    windowMs: RATE_LIMIT_WINDOW_MS,
+    increment: false,
+  });
+  if (!rateLimitPeek.allowed) {
+    return mfaRateLimitedResponse(rateLimitPeek);
+  }
+
+  const recordMfaFailure = async (failureResponse) => {
+    const failureRes = await runRateLimitTx(db, {
+      scope: 'mfa_verify',
+      uid,
+      maxAttempts: MFA_MAX_FAILED_ATTEMPTS,
+      windowMs: RATE_LIMIT_WINDOW_MS,
+      increment: true,
+    });
+    if (!failureRes.allowed) {
+      return mfaRateLimitedResponse(failureRes);
+    }
+    return failureResponse;
+  };
+
+  if (action === 'confirm') {
+    const rawCode = String(body?.code ?? body?.token ?? '').trim();
+    const tokenAuthTime = resolveTokenAuthTime(decodedToken);
+
+    const txOutcome = await db.runTransaction(async (tx) => {
+      const mfaSnap = await tx.get(mfaRef);
+      const mfaData = mfaSnap?.exists ? mfaSnap.data() || {} : null;
+
+      if (mfaData?.enabled === true) {
+        return {
+          ok: false,
+          countFailure: false,
+          response: {
+            status: 409,
+            payload: {
+              error: 'Autentikasi Dua Faktor sudah aktif pada akun ini.',
+              code: 'MFA_ALREADY_ENABLED',
+            },
+          },
+        };
+      }
+
+      if (!mfaData?.pendingSecret) {
+        return {
+          ok: false,
+          countFailure: false,
+          response: {
+            status: 400,
+            payload: {
+              error: 'Secret TOTP belum disiapkan. Mulai aktivasi 2FA terlebih dahulu.',
+              code: 'MFA_SETUP_REQUIRED',
+            },
+          },
+        };
+      }
+
+      const totpCheck = verifyTotpCode(mfaData.pendingSecret, rawCode, {
+        windowSteps: MFA_TOTP_WINDOW_STEPS,
+      });
+
+      if (!totpCheck.valid) {
+        return {
+          ok: false,
+          countFailure: true,
+          response: {
+            status: 400,
+            payload: {
+              error: 'Kode 6 digit Authenticator tidak cocok atau kedaluwarsa.',
+              code: 'INVALID_MFA_CODE',
+            },
+          },
+        };
+      }
+
+      const { codes: backupCodes, hashes: backupCodeHashes } = generateBackupCodes();
+
+      tx.set(
+        mfaRef,
+        {
+          uid,
+          enabled: true,
+          secret: mfaData.pendingSecret,
+          pendingSecret: null,
+          verifiedAuthTime: tokenAuthTime,
+          lastUsedStep: totpCheck.matchedStep,
+          backupCodeHashes,
+          enabledAt: FieldValue.serverTimestamp(),
+          updatedAt: FieldValue.serverTimestamp(),
+        },
+        { merge: true }
+      );
+      tx.set(
+        userRef,
+        {
+          mfaEnabled: true,
+          updatedAt: FieldValue.serverTimestamp(),
+        },
+        { merge: true }
+      );
+
+      return { ok: true, backupCodes };
+    });
+
+    if (!txOutcome.ok) {
+      return txOutcome.countFailure ? recordMfaFailure(txOutcome.response) : txOutcome.response;
+    }
+
+    return {
+      status: 200,
+      payload: {
+        success: true,
+        enabled: true,
+        mfaRequired: false,
+        backupCodes: txOutcome.backupCodes,
+        backupCodesRemaining: txOutcome.backupCodes.length,
+      },
+    };
+  }
+
+  if (action === 'verify') {
+    const rawCode = body?.code ?? body?.token ?? '';
+    const rawBackupCode = body?.backupCode ?? '';
+    const tokenAuthTime = resolveTokenAuthTime(decodedToken);
+
+    const txOutcome = await db.runTransaction(async (tx) => {
+      const mfaSnap = await tx.get(mfaRef);
+      const mfaData = mfaSnap?.exists ? mfaSnap.data() || {} : null;
+
+      if (!mfaSnap?.exists || mfaData?.enabled !== true || !mfaData?.secret) {
+        return {
+          ok: false,
+          countFailure: false,
+          response: {
+            status: 400,
+            payload: {
+              error: 'Autentikasi Dua Faktor belum aktif pada akun ini.',
+              code: 'MFA_NOT_ENABLED',
+            },
+          },
+        };
+      }
+
+      const challenge = verifyActiveMfaChallenge(mfaData, {
+        code: rawCode,
+        backupCode: rawBackupCode,
+      });
+
+      if (!challenge.valid) {
+        return {
+          ok: false,
+          countFailure: true,
+          response: {
+            status: 400,
+            payload: {
+              error: challenge.replayed
+                ? 'Kode OTP interval ini sudah pernah dipakai. Tunggu kode 6 digit berikutnya.'
+                : 'Kode Authenticator atau Backup Code tidak valid.',
+              code: challenge.replayed ? 'TOTP_REPLAYED' : 'INVALID_MFA_CODE',
+            },
+          },
+        };
+      }
+
+      tx.set(
+        mfaRef,
+        {
+          verifiedAuthTime: tokenAuthTime,
+          lastUsedStep:
+            challenge.method === 'totp' ? challenge.matchedStep : mfaData.lastUsedStep ?? null,
+          backupCodeHashes: challenge.remainingHashes,
+          lastVerifiedAt: FieldValue.serverTimestamp(),
+          updatedAt: FieldValue.serverTimestamp(),
+        },
+        { merge: true }
+      );
+
+      return {
+        ok: true,
+        method: challenge.method,
+        backupCodesRemaining: challenge.remainingHashes.length,
+      };
+    });
+
+    if (!txOutcome.ok) {
+      return txOutcome.countFailure ? recordMfaFailure(txOutcome.response) : txOutcome.response;
+    }
+
+    return {
+      status: 200,
+      payload: {
+        success: true,
+        verified: true,
+        method: txOutcome.method,
+        mfaRequired: false,
+        backupCodesRemaining: txOutcome.backupCodesRemaining,
+      },
+    };
+  }
+
+  // action === 'disable'
+  const rawCode = body?.code ?? body?.token ?? '';
+  const rawBackupCode = body?.backupCode ?? '';
+
+  const txOutcome = await db.runTransaction(async (tx) => {
+    const mfaSnap = await tx.get(mfaRef);
+    const mfaData = mfaSnap?.exists ? mfaSnap.data() || {} : null;
+
+    if (!mfaSnap?.exists || mfaData?.enabled !== true || !mfaData?.secret) {
+      return {
+        ok: false,
+        countFailure: false,
+        response: {
+          status: 400,
+          payload: {
+            error: 'Autentikasi Dua Faktor sudah nonaktif pada akun ini.',
+            code: 'MFA_NOT_ENABLED',
+          },
+        },
+      };
+    }
+
+    const challenge = verifyActiveMfaChallenge(mfaData, {
+      code: rawCode,
+      backupCode: rawBackupCode,
+    });
+
+    if (!challenge.valid) {
+      return {
+        ok: false,
+        countFailure: true,
+        response: {
+          status: 400,
+          payload: {
+            error: challenge.replayed
+              ? 'Kode OTP interval ini sudah pernah dipakai. Tunggu kode 6 digit berikutnya.'
+              : 'Verifikasi gagal: masukkan kode Authenticator 6 digit aktif atau Backup Code untuk menonaktifkan 2FA.',
+            code: challenge.replayed ? 'TOTP_REPLAYED' : 'INVALID_MFA_CODE',
+          },
+        },
+      };
+    }
+
+    tx.set(
+      mfaRef,
+      {
+        uid,
+        enabled: false,
+        secret: null,
+        pendingSecret: null,
+        backupCodeHashes: [],
+        lastUsedStep: null,
+        verifiedAuthTime: null,
+        disabledAt: FieldValue.serverTimestamp(),
+        updatedAt: FieldValue.serverTimestamp(),
+      },
+      { merge: true }
+    );
+    tx.set(
+      userRef,
+      {
+        mfaEnabled: false,
+        updatedAt: FieldValue.serverTimestamp(),
+      },
+      { merge: true }
+    );
+
+    return { ok: true };
+  });
+
+  if (!txOutcome.ok) {
+    return txOutcome.countFailure ? recordMfaFailure(txOutcome.response) : txOutcome.response;
+  }
+
+  return {
+    status: 200,
+    payload: {
+      success: true,
+      enabled: false,
+      mfaRequired: false,
+      backupCodesRemaining: 0,
+    },
+  };
+}
+
 async function handleBootstrap(body, decodedToken) {
   const uid = String(decodedToken?.uid || '').trim();
   if (!uid) {
@@ -981,9 +1636,13 @@ async function handleBootstrap(body, decodedToken) {
 
   const db = getFirestore();
   const userRef = db.collection('users').doc(uid);
+  const mfaCol = db.collection('user_mfa');
+  const mfaRef = typeof mfaCol?.doc === 'function' ? mfaCol.doc(uid) : null;
 
   const txResult = await db.runTransaction(async (tx) => {
     const userSnap = await tx.get(userRef);
+    const mfaSnap = mfaRef ? await tx.get(mfaRef) : null;
+    const mfaData = mfaSnap?.exists ? mfaSnap.data() || {} : null;
     const rawExisting = userSnap.exists ? userSnap.data() || {} : null;
     const { password: _removedPassword, ...existingData } = rawExisting || {};
 
@@ -1040,6 +1699,8 @@ async function handleBootstrap(body, decodedToken) {
 
       return {
         isNewUser: true,
+        mfaEnabled: false,
+        mfaRequired: false,
         profile: {
           uid,
           email: effectiveEmail,
@@ -1052,6 +1713,7 @@ async function handleBootstrap(body, decodedToken) {
           emailVerified,
           institution: resolvedInstitution,
           nim: bodyNim,
+          mfaEnabled: false,
         },
       };
     }
@@ -1087,8 +1749,19 @@ async function handleBootstrap(body, decodedToken) {
 
     tx.set(userRef, updatePatch, { merge: true });
 
+    const resolvedMfaEnabled = Boolean(
+      mfaData ? mfaData.enabled === true : existingData.mfaEnabled === true
+    );
+    const resolvedMfaRequired = resolvedMfaEnabled
+      ? mfaData
+        ? computeMfaRequired(mfaData, decodedToken)
+        : true
+      : false;
+
     return {
       isNewUser: false,
+      mfaEnabled: resolvedMfaEnabled,
+      mfaRequired: resolvedMfaRequired,
       profile: {
         ...existingData,
         uid,
@@ -1100,6 +1773,7 @@ async function handleBootstrap(body, decodedToken) {
         accountType: resolvedAccountType,
         isInstitutional: resolvedIsInstitutional,
         emailVerified,
+        mfaEnabled: resolvedMfaEnabled,
       },
     };
   });
@@ -1109,8 +1783,11 @@ async function handleBootstrap(body, decodedToken) {
     payload: {
       success: true,
       isNewUser: txResult.isNewUser,
+      mfaEnabled: txResult.mfaEnabled,
+      mfaRequired: txResult.mfaRequired,
       profile: {
         ...txResult.profile,
+        mfaRequired: txResult.mfaRequired,
         last_active: new Date().toISOString(),
       },
     },
@@ -2049,6 +2726,11 @@ async function handleJoinClass(body, decodedToken) {
       };
     }
 
+    const joinEmail = String(decodedToken?.email || '').trim().toLowerCase();
+    const joinDisplayName = String(
+      decodedToken?.name || decodedToken?.displayName || (joinEmail ? joinEmail.split('@')[0] : '')
+    ).trim();
+
     tx.set(memberRef, {
       memberId,
       classId: classDoc.id,
@@ -2058,6 +2740,8 @@ async function handleJoinClass(body, decodedToken) {
       accountType: domainInfo.accountType,
       isInstitutional: domainInfo.accountType !== ACCOUNT_TYPES.UMUM,
       autoApproved: isApproved,
+      ...(joinEmail ? { email: joinEmail } : {}),
+      ...(joinDisplayName ? { displayName: joinDisplayName, studentName: joinDisplayName } : {}),
       joinedAt: FieldValue.serverTimestamp(),
     });
 
@@ -2101,17 +2785,200 @@ async function handleJoinClass(body, decodedToken) {
   return txResult;
 }
 
+async function handleManageMembers(body, decodedToken) {
+  const uid = String(decodedToken?.uid || '').trim();
+  if (!uid) {
+    return {
+      status: 401,
+      payload: { error: 'Token pengguna tidak memiliki UID yang valid.', code: 'UNAUTHORIZED' },
+    };
+  }
+
+  const action = String(body?.action || '').trim().toLowerCase();
+  if (!['approve', 'reject', 'remove'].includes(action)) {
+    return {
+      status: 400,
+      payload: {
+        error: 'Aksi manajemen anggota tidak valid. Gunakan approve, reject, atau remove.',
+        code: 'INVALID_MEMBER_ACTION',
+      },
+    };
+  }
+
+  const safeClassId = String(body?.classId || '').trim().replace(/[^a-zA-Z0-9_-]/g, '');
+  if (!safeClassId) {
+    return {
+      status: 400,
+      payload: { error: 'classId wajib diisi dan valid.', code: 'INVALID_CLASS_ID' },
+    };
+  }
+
+  const rawMemberId = String(body?.memberId || '').trim();
+  let rawMemberUid = String(body?.memberUid || body?.uid || '').trim();
+  if (!rawMemberUid && rawMemberId.startsWith(`${safeClassId}_`)) {
+    rawMemberUid = rawMemberId.slice(safeClassId.length + 1);
+  }
+  const safeMemberUid = rawMemberUid.replace(/[^a-zA-Z0-9_-]/g, '');
+  if (!safeMemberUid) {
+    return {
+      status: 400,
+      payload: { error: 'UID anggota kelas wajib diisi dan valid.', code: 'INVALID_MEMBER_UID' },
+    };
+  }
+
+  const db = getFirestore();
+  const callerRole = await resolveCallerRole(db, decodedToken);
+  if (callerRole !== 'lecturer' && callerRole !== 'admin') {
+    return {
+      status: 403,
+      payload: {
+        error: 'AKSES DITOLAK: Hanya dosen pengampu kelas atau admin yang dapat mengelola anggota kelas.',
+        code: 'FORBIDDEN_ROLE',
+      },
+    };
+  }
+
+  const ownership = await verifyClassInstructorOwnership(db, {
+    safeClassId,
+    decodedToken,
+    callerRole,
+    forbiddenCode: 'FORBIDDEN_CLASS_ACCESS',
+    forbiddenMessage:
+      'AKSES DITOLAK: Anda tidak memiliki hak akses untuk mengelola anggota kelas ini.',
+  });
+  if (!ownership.ok) {
+    return ownership.response;
+  }
+
+  const ownerUid = String(ownership.classSnap.data()?.lecturerId || '').trim();
+  if (action === 'remove' && ownerUid && safeMemberUid === ownerUid) {
+    return {
+      status: 400,
+      payload: {
+        error: 'Dosen pengampu utama kelas tidak dapat dikeluarkan dari kelas.',
+        code: 'CANNOT_REMOVE_CLASS_OWNER',
+      },
+    };
+  }
+
+  const memberId = `${safeClassId}_${safeMemberUid}`;
+  const classRef = db.collection('classes').doc(safeClassId);
+  const memberRef = db.collection('class_members').doc(memberId);
+
+  return db.runTransaction(async (tx) => {
+    const [freshClassSnap, memberSnap] = await Promise.all([
+      tx.get(classRef),
+      tx.get(memberRef),
+    ]);
+
+    if (!freshClassSnap?.exists) {
+      return {
+        status: 404,
+        payload: { error: 'Kelas tidak ditemukan di Firestore.', code: 'CLASS_NOT_FOUND' },
+      };
+    }
+
+    if (!memberSnap?.exists) {
+      return {
+        status: 404,
+        payload: { error: 'Data anggota kelas tidak ditemukan.', code: 'MEMBER_NOT_FOUND' },
+      };
+    }
+
+    const freshClassData = freshClassSnap.data() || {};
+    const memberData = memberSnap.data() || {};
+    const currentStatus = String(memberData.status || 'approved').toLowerCase();
+    const isCurrentlyActive = currentStatus === 'approved' || currentStatus === 'active';
+    const currentEnrolled = Math.max(0, Number(freshClassData.enrolledCount || 0));
+    const maxStudents = Number(freshClassData.maxStudents || 0);
+
+    if (action === 'approve') {
+      if (isCurrentlyActive) {
+        return {
+          status: 200,
+          payload: {
+            success: true,
+            idempotent: true,
+            action: 'approve',
+            classId: safeClassId,
+            memberId,
+            uid: safeMemberUid,
+            status: currentStatus,
+            enrolledCount: currentEnrolled,
+          },
+        };
+      }
+
+      if (maxStudents > 0 && currentEnrolled >= maxStudents) {
+        return {
+          status: 409,
+          payload: { error: 'Kapasitas kelas sudah penuh.', code: 'CLASS_FULL' },
+        };
+      }
+
+      const nextCount = currentEnrolled + 1;
+      tx.set(
+        memberRef,
+        {
+          status: 'approved',
+          approvedBy: uid,
+          approvedAt: FieldValue.serverTimestamp(),
+          updatedAt: FieldValue.serverTimestamp(),
+        },
+        { merge: true }
+      );
+      tx.update(classRef, {
+        enrolledCount: nextCount,
+        updatedAt: FieldValue.serverTimestamp(),
+      });
+
+      return {
+        status: 200,
+        payload: {
+          success: true,
+          idempotent: false,
+          action: 'approve',
+          classId: safeClassId,
+          memberId,
+          uid: safeMemberUid,
+          status: 'approved',
+          enrolledCount: nextCount,
+        },
+      };
+    }
+
+    // action === 'reject' | 'remove'
+    const nextCount = isCurrentlyActive ? Math.max(0, currentEnrolled - 1) : currentEnrolled;
+    tx.delete(memberRef);
+    if (isCurrentlyActive) {
+      tx.update(classRef, {
+        enrolledCount: nextCount,
+        updatedAt: FieldValue.serverTimestamp(),
+      });
+    }
+
+    return {
+      status: 200,
+      payload: {
+        success: true,
+        action,
+        classId: safeClassId,
+        memberId,
+        uid: safeMemberUid,
+        deleted: true,
+        previousStatus: currentStatus,
+        enrolledCount: nextCount,
+      },
+    };
+  });
+}
+
 export default async function handler(req, res) {
   applyCorsHeaders(req, res);
 
   if (req.method === 'OPTIONS') {
     res.statusCode = 204;
     res.end();
-    return;
-  }
-
-  if (req.method !== 'POST') {
-    sendJson(res, 405, { error: 'Method Not Allowed. Use POST.' }, req);
     return;
   }
 
@@ -2123,9 +2990,26 @@ export default async function handler(req, res) {
     return;
   }
 
+  if (pathname === '/api/health') {
+    if (req.method !== 'GET') {
+      sendJson(res, 405, { error: 'Method Not Allowed. Use GET.' }, req);
+      return;
+    }
+  } else if (req.method !== 'POST') {
+    sendJson(res, 405, { error: 'Method Not Allowed. Use POST.' }, req);
+    return;
+  }
+
   try {
     initFirebaseAdmin();
     const decodedToken = await verifyBearerToken(req);
+
+    if (pathname === '/api/health') {
+      const result = await handleHealth();
+      sendJson(res, result.status, result.payload, req, result.headers);
+      return;
+    }
+
     const body = await parseJsonBody(req);
 
     if (pathname === '/api/bootstrap') {
@@ -2154,6 +3038,18 @@ export default async function handler(req, res) {
 
     if (pathname === '/api/join-class') {
       const result = await handleJoinClass(body, decodedToken);
+      sendJson(res, result.status, result.payload, req, result.headers);
+      return;
+    }
+
+    if (pathname === '/api/manage-members') {
+      const result = await handleManageMembers(body, decodedToken);
+      sendJson(res, result.status, result.payload, req, result.headers);
+      return;
+    }
+
+    if (pathname === '/api/mfa') {
+      const result = await handleMfa(body, decodedToken);
       sendJson(res, result.status, result.payload, req, result.headers);
       return;
     }

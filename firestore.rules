@@ -60,6 +60,7 @@ service cloud.firestore {
       allow create: if isSignedIn()
         && request.auth.uid == uid
         && !('password' in request.resource.data)
+        && !('mfaEnabled' in request.resource.data)
         && !('accountType' in request.resource.data)
         && !('isInstitutional' in request.resource.data)
         && (!('role' in request.resource.data) || request.resource.data.role == 'student');
@@ -67,8 +68,10 @@ service cloud.firestore {
         && request.auth.uid == uid
         && !('password' in request.resource.data)
         && !request.resource.data.diff(resource.data).affectedKeys().hasAny(['role', 'nim', 'nidn', 'password'])
-        && !request.resource.data.diff(resource.data).affectedKeys().hasAny(['accountType', 'isInstitutional', 'emailVerified', 'nip']))
-        || (isAdmin() && !('password' in request.resource.data));
+        && !request.resource.data.diff(resource.data).affectedKeys().hasAny(['accountType', 'isInstitutional', 'emailVerified', 'nip', 'mfaEnabled']))
+        || (isAdmin()
+          && !('password' in request.resource.data)
+          && !request.resource.data.diff(resource.data).affectedKeys().hasAny(['mfaEnabled']));
       allow delete: if false;
     }
 
@@ -370,6 +373,11 @@ service cloud.firestore {
       allow read: if isSignedIn();
       allow create: if isLecturerOrAdmin();
       allow update, delete: if isLecturerOrAdmin();
+    }
+
+    // 13. user_mfa/{uid} (secret TOTP & backupCodeHashes strictly server-only via Admin SDK)
+    match /user_mfa/{uid} {
+      allow read, write: if false;
     }
   }
 }

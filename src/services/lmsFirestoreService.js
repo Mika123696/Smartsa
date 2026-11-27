@@ -1151,6 +1151,61 @@ export async function fetchClassMembers(classId) {
   }
 }
 
+export async function manageClassMemberViaApi({
+  classId,
+  memberUid = '',
+  memberId = '',
+  action,
+} = {}) {
+  const cleanClassId = String(classId || '').trim();
+  const cleanAction = String(action || '').trim().toLowerCase();
+  if (!cleanClassId) {
+    throw new Error('ID kelas wajib diisi.');
+  }
+  if (!['approve', 'reject', 'remove'].includes(cleanAction)) {
+    throw new Error('Aksi pengelolaan anggota tidak valid.');
+  }
+
+  let resolvedUid = String(memberUid || '').trim();
+  const cleanMemberId = String(memberId || '').trim();
+  if (!resolvedUid && cleanMemberId.startsWith(`${cleanClassId}_`)) {
+    resolvedUid = cleanMemberId.slice(cleanClassId.length + 1);
+  }
+  if (!resolvedUid) {
+    throw new Error('UID anggota kelas wajib diisi.');
+  }
+
+  if (!auth?.currentUser || typeof auth.currentUser.getIdToken !== 'function') {
+    throw new Error('Sesi autentikasi tidak aktif. Silakan masuk kembali.');
+  }
+
+  const token = await auth.currentUser.getIdToken();
+  const res = await fetch('/api/manage-members', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${token}`,
+    },
+    body: JSON.stringify({
+      action: cleanAction,
+      classId: cleanClassId,
+      memberUid: resolvedUid,
+      ...(cleanMemberId ? { memberId: cleanMemberId } : {}),
+    }),
+  });
+
+  const isJson = res.headers?.get?.('content-type')?.includes('application/json');
+  const data = isJson ? await res.json().catch(() => ({})) : {};
+  if (!res.ok) {
+    const err = new Error(data?.error || 'Gagal memperbarui status keanggotaan kelas.');
+    err.code = data?.code || 'MANAGE_MEMBERS_ERROR';
+    err.status = res.status;
+    throw err;
+  }
+
+  return data;
+}
+
 export async function fetchMeetingExam({ classId, meetingNo = 1, examType = 'pretest' } = {}) {
   const cleanClassId = String(classId || '').trim();
   const safeExamType = examType === 'posttest' ? 'posttest' : 'pretest';

@@ -25,6 +25,121 @@ import {
   BookOpen,
 } from 'lucide-react';
 
+function buildHealthCards({ healthState, dataSource, isCheckingHealth, language }) {
+  const healthReady = Boolean(healthState.status === 'ok' && healthState.data);
+  const healthFailed = healthState.status === 'error';
+
+  const statusTone = (isOk) =>
+    isOk
+      ? 'text-emerald-600 dark:text-emerald-400'
+      : healthFailed
+        ? 'text-rose-600 dark:text-rose-400'
+        : 'text-amber-600 dark:text-amber-400';
+
+  const firestoreHealthy =
+    (healthReady && Boolean(healthState.data.firestore)) || dataSource === 'firestore';
+  const cloudinaryOk = Boolean(healthReady && healthState.data.cloudinaryConfigured);
+  const geminiOk = Boolean(healthReady && healthState.data.geminiConfigured);
+  const activeModelLabel = healthState.data?.geminiModel || 'gemini-4-hydrogen';
+
+  return [
+    {
+      id: 'firestore',
+      testId: 'health-card-firestore',
+      Icon: Database,
+      iconColor: 'text-amber-500',
+      label: 'Cloud Firestore',
+      colorClass: statusTone(firestoreHealthy),
+      text: firestoreHealthy
+        ? 'Connected'
+        : healthFailed
+          ? language === 'en'
+            ? 'Connection Error'
+            : 'Gagal Terhubung'
+          : isCheckingHealth
+            ? language === 'en'
+              ? 'Checking...'
+              : 'Memeriksa...'
+            : language === 'en'
+              ? 'Standby'
+              : 'Siaga',
+    },
+    {
+      id: 'backend',
+      testId: 'health-card-backend',
+      Icon: Server,
+      iconColor: 'text-blue-500',
+      label: 'Vercel Backend',
+      colorClass: statusTone(healthReady),
+      text: healthReady
+        ? 'Online'
+        : healthFailed
+          ? language === 'en'
+            ? 'Unreachable'
+            : 'Tidak Terjangkau'
+          : isCheckingHealth
+            ? language === 'en'
+              ? 'Checking...'
+              : 'Memeriksa...'
+            : language === 'en'
+              ? 'Auth Required'
+              : 'Butuh Login Admin',
+    },
+    {
+      id: 'cloudinary',
+      testId: 'health-card-cloudinary',
+      Icon: Cloud,
+      iconColor: 'text-indigo-500',
+      label: 'Cloudinary CDN',
+      colorClass: statusTone(cloudinaryOk),
+      text: healthReady
+        ? cloudinaryOk
+          ? language === 'en'
+            ? 'Configured'
+            : 'Terkonfigurasi'
+          : language === 'en'
+            ? 'Env Missing'
+            : 'Env Belum Terpasang'
+        : healthFailed
+          ? language === 'en'
+            ? 'Backend Unreachable'
+            : 'Backend Gagal'
+          : isCheckingHealth
+            ? language === 'en'
+              ? 'Checking...'
+              : 'Memeriksa...'
+            : language === 'en'
+              ? 'Unchecked'
+              : 'Belum Diperiksa',
+    },
+    {
+      id: 'gemini',
+      testId: 'health-card-gemini',
+      Icon: Activity,
+      iconColor: 'text-purple-500',
+      label: 'Gemini LLM AI',
+      colorClass: statusTone(geminiOk),
+      text: healthReady
+        ? geminiOk
+          ? `Ready (${activeModelLabel})`
+          : language === 'en'
+            ? `Key Missing (${activeModelLabel})`
+            : `API Key Kosong (${activeModelLabel})`
+        : healthFailed
+          ? language === 'en'
+            ? 'Backend Unreachable'
+            : 'Backend Gagal'
+          : isCheckingHealth
+            ? language === 'en'
+              ? 'Checking...'
+              : 'Memeriksa...'
+            : language === 'en'
+              ? 'Unchecked'
+              : 'Belum Diperiksa',
+    },
+  ];
+}
+
 export default function AdminDashboard({ onClassesChanged }) {
   const { userProfile, currentUser, role } = useAuth();
   const { t, language } = useLanguage();
@@ -49,6 +164,13 @@ export default function AdminDashboard({ onClassesChanged }) {
   const [classDrafts, setClassDrafts] = useState({});
   const [savingClassId, setSavingClassId] = useState(null);
   const [refreshing, setRefreshing] = useState(false);
+
+  // Live Backend Health State (GET /api/health)
+  const [healthState, setHealthState] = useState({
+    status: 'idle', // 'idle' | 'ok' | 'error'
+    data: null,
+    error: '',
+  });
 
   const loading = Boolean(
     currentUser && role === ROLES.ADMIN && loadedAdminUid !== currentUser.uid
@@ -127,17 +249,67 @@ export default function AdminDashboard({ onClassesChanged }) {
     setVerificationQueue(pendingUsers);
   }, []);
 
+  const probeBackendHealth = useCallback(async () => {
+    if (
+      !currentUser ||
+      role !== ROLES.ADMIN ||
+      typeof currentUser.getIdToken !== 'function' ||
+      typeof fetch !== 'function'
+    ) {
+      return null;
+    }
+
+    try {
+      const idToken = await currentUser.getIdToken();
+      if (!idToken) {
+        return { ok: false, data: null, error: 'Missing token' };
+      }
+      const res = await fetch('/api/health', {
+        method: 'GET',
+        headers: {
+          Authorization: `Bearer ${idToken}`,
+        },
+      });
+      const isJson = res?.headers?.get?.('content-type')?.includes('application/json');
+      const data = isJson ? await res.json().catch(() => null) : null;
+      if (!res?.ok || !data || typeof data !== 'object') {
+        return {
+          ok: false,
+          data: null,
+          error: data?.error || `HTTP ${res?.status || 500}`,
+        };
+      }
+      return { ok: true, data, error: '' };
+    } catch (err) {
+      return {
+        ok: false,
+        data: null,
+        error: err?.message || 'Unreachable',
+      };
+    }
+  }, [currentUser, role]);
+
   const loadAdminOverview = useCallback(async () => {
     if (!currentUser || role !== ROLES.ADMIN) return;
     setRefreshing(true);
     try {
-      const res = await fetchAdminOverviewData();
+      const [res, healthRes] = await Promise.all([
+        fetchAdminOverviewData(),
+        probeBackendHealth(),
+      ]);
       applyOverviewResponse(res);
+      if (healthRes) {
+        setHealthState({
+          status: healthRes.ok ? 'ok' : 'error',
+          data: healthRes.data,
+          error: healthRes.error,
+        });
+      }
     } finally {
       setLoadedAdminUid(currentUser.uid);
       setRefreshing(false);
     }
-  }, [currentUser, role, applyOverviewResponse]);
+  }, [currentUser, role, applyOverviewResponse, probeBackendHealth]);
 
   useEffect(() => {
     let mounted = true;
@@ -145,9 +317,17 @@ export default function AdminDashboard({ onClassesChanged }) {
       return undefined;
     }
 
-    fetchAdminOverviewData()
-      .then((res) => {
-        if (mounted) applyOverviewResponse(res);
+    Promise.all([fetchAdminOverviewData(), probeBackendHealth()])
+      .then(([res, healthRes]) => {
+        if (!mounted) return;
+        applyOverviewResponse(res);
+        if (healthRes) {
+          setHealthState({
+            status: healthRes.ok ? 'ok' : 'error',
+            data: healthRes.data,
+            error: healthRes.error,
+          });
+        }
       })
       .finally(() => {
         if (mounted) setLoadedAdminUid(currentUser.uid);
@@ -156,7 +336,7 @@ export default function AdminDashboard({ onClassesChanged }) {
     return () => {
       mounted = false;
     };
-  }, [currentUser, role, applyOverviewResponse]);
+  }, [currentUser, role, applyOverviewResponse, probeBackendHealth]);
 
   const executeDecision = async ({ item, decision }) => {
     try {
@@ -431,50 +611,33 @@ export default function AdminDashboard({ onClassesChanged }) {
             : 'Kesehatan Layanan Komputasi & Database'}
         </h3>
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs">
-          <div className="p-3 bg-slate-50 dark:bg-[#0f141e] rounded-xl border border-slate-200 dark:border-[#232f42] flex items-center gap-3">
-            <Database className="w-5 h-5 text-amber-500 shrink-0" />
-            <div>
-              <span className="font-semibold block text-slate-800 dark:text-slate-200">
-                Cloud Firestore
-              </span>
-              <span className="text-emerald-600 dark:text-emerald-400 font-bold text-[10px]">
-                ● {dataSource === 'firestore' ? 'Connected' : 'Ready'}
-              </span>
-            </div>
-          </div>
-          <div className="p-3 bg-slate-50 dark:bg-[#0f141e] rounded-xl border border-slate-200 dark:border-[#232f42] flex items-center gap-3">
-            <Server className="w-5 h-5 text-blue-500 shrink-0" />
-            <div>
-              <span className="font-semibold block text-slate-800 dark:text-slate-200">
-                Vercel Backend
-              </span>
-              <span className="text-blue-600 dark:text-sky-400 font-bold text-[10px]">
-                ● Serverless Ready
-              </span>
-            </div>
-          </div>
-          <div className="p-3 bg-slate-50 dark:bg-[#0f141e] rounded-xl border border-slate-200 dark:border-[#232f42] flex items-center gap-3">
-            <Cloud className="w-5 h-5 text-indigo-500 shrink-0" />
-            <div>
-              <span className="font-semibold block text-slate-800 dark:text-slate-200">
-                Cloudinary CDN
-              </span>
-              <span className="text-slate-500 dark:text-slate-400 font-medium text-[10px]">
-                ● Env Configured
-              </span>
-            </div>
-          </div>
-          <div className="p-3 bg-slate-50 dark:bg-[#0f141e] rounded-xl border border-slate-200 dark:border-[#232f42] flex items-center gap-3">
-            <Activity className="w-5 h-5 text-purple-500 shrink-0" />
-            <div>
-              <span className="font-semibold block text-slate-800 dark:text-slate-200">
-                Gemini LLM AI
-              </span>
-              <span className="text-slate-500 dark:text-slate-400 font-medium text-[10px]">
-                ● Exam-Safe Guard
-              </span>
-            </div>
-          </div>
+          {buildHealthCards({
+            healthState,
+            dataSource,
+            isCheckingHealth: Boolean(
+              currentUser && role === ROLES.ADMIN && healthState.status === 'idle'
+            ),
+            language,
+          }).map((card) => {
+            const IconComponent = card.Icon;
+            return (
+              <div
+                key={card.id}
+                data-testid={card.testId}
+                className="p-3 bg-slate-50 dark:bg-[#0f141e] rounded-xl border border-slate-200 dark:border-[#232f42] flex items-center gap-3"
+              >
+                <IconComponent className={`w-5 h-5 ${card.iconColor} shrink-0`} />
+                <div>
+                  <span className="font-semibold block text-slate-800 dark:text-slate-200">
+                    {card.label}
+                  </span>
+                  <span className={`${card.colorClass} font-bold text-[10px]`}>
+                    ● {card.text}
+                  </span>
+                </div>
+              </div>
+            );
+          })}
         </div>
       </div>
 

@@ -28,7 +28,11 @@ vi.mock('firebase-admin/firestore', () => ({
   },
 }));
 
-import handler from '../api/index.js';
+import handler, {
+  base32Decode,
+  base32Encode,
+  generateTotpAtStep,
+} from '../api/index.js';
 import {
   ACCOUNT_TYPES,
   classifyAccountByEmail,
@@ -2663,7 +2667,7 @@ describe('Backend API Dispatcher (api/index.js)', () => {
     );
   });
 
-  it('enforces persistent rate limiting, gemini-2.5-flash live execution with context/history, and upstream error reporting on POST /api/ai', async () => {
+  it('enforces persistent rate limiting, gemini-4-hydrogen live execution with context/history, and upstream error reporting on POST /api/ai', async () => {
     process.env.GEMINI_API_KEY = 'secret-gemini-key';
     const rateLimitsDb = new Map();
 
@@ -2720,7 +2724,7 @@ describe('Backend API Dispatcher (api/index.js)', () => {
     expect(tooLongRes.json().code).toBe('PROMPT_TOO_LONG');
     expect(fetchMock).not.toHaveBeenCalled();
 
-    // 2. Valid live Gemini request with context & multi-turn history uses default gemini-2.5-flash
+    // 2. Valid live Gemini request with context & multi-turn history uses default gemini-4-hydrogen
     mockVerifyIdToken.mockResolvedValueOnce({ uid: 'uid_ai_live', role: 'student' });
     const liveRes = createMockRes();
     await handler(
@@ -2745,13 +2749,13 @@ describe('Backend API Dispatcher (api/index.js)', () => {
       response_text: 'Penjelasan Firestore NoSQL akurat.',
       mode: 'gemini_live',
       is_live: true,
-      model: 'gemini-2.5-flash',
+      model: 'gemini-4-hydrogen',
       tokens_consumed: 210,
       remaining_quota: 19,
     });
     expect(fetchMock).toHaveBeenCalledTimes(1);
     const [calledUrl, calledInit] = fetchMock.mock.calls[0];
-    expect(calledUrl).toContain('/models/gemini-2.5-flash:generateContent');
+    expect(calledUrl).toContain('/models/gemini-4-hydrogen:generateContent');
     const parsedGeminiBody = JSON.parse(calledInit.body);
     expect(parsedGeminiBody.systemInstruction.parts[0].text).toContain('Basis Data Cloud');
     expect(parsedGeminiBody.contents).toHaveLength(3);
@@ -3153,5 +3157,715 @@ describe('Backend API Dispatcher (api/index.js)', () => {
       totalQuestions: 3,
       pointsPerQuestion: 33.33,
     });
+  });
+
+  it('implements RFC 6238 TOTP MFA lifecycle (setup, confirm, bootstrap mfaRequired, verify anti-replay, one-time backup codes, disable)', async () => {
+    // Verify Base32 round-trip and RFC 6238 test vector (SHA-1 secret "12345678901234567890")
+    const rfcSecret = base32Encode(Buffer.from('12345678901234567890', 'ascii'));
+    expect(base32Decode(rfcSecret).toString('ascii')).toBe('12345678901234567890');
+    // RFC 6238 Table 1 step = 1 (59s / 30s = 1) -> 287082 (6 LSB digits of 94287082)
+    expect(generateTotpAtStep(rfcSecret, 1)).toBe('287082');
+
+    // Unauthenticated call must fail with 401
+    const unauthRes = createMockRes();
+    await handler(
+      { method: 'POST', url: '/api/mfa', headers: {}, body: { action: 'status' } },
+      unauthRes
+    );
+    expect(unauthRes.statusCode).toBe(401);
+
+    const stores = {
+      user_mfa: new Map(),
+      users: new Map([
+        [
+          'uid_mfa_1',
+          {
+            uid: 'uid_mfa_1',
+            email: 'budi@kampus.ac.id',
+            role: 'student',
+            accountType: 'MAHASISWA',
+            isInstitutional: true,
+            displayName: 'Budi MFA',
+            name: 'Budi MFA',
+          },
+        ],
+      ]),
+      rate_limits: new Map(),
+    };
+
+    const makeRef = (col, id) => ({
+      _col: col,
+      id,
+      get: vi.fn(async () => {
+        const data = stores[col].get(id);
+        return { exists: Boolean(data), data: () => data };
+      }),
+      set: vi.fn(async (data, opts) => {
+        const existing = opts?.merge ? stores[col].get(id) || {} : {};
+        stores[col].set(id, { ...existing, ...data });
+      }),
+    });
+
+    mockCollection.mockImplementation((name) => ({
+      doc: vi.fn((docId) => makeRef(name, docId)),
+    }));
+    mockRunTransaction.mockImplementation(async (callback) => {
+      const tx = {
+        get: vi.fn(async (ref) => {
+          const data = stores[ref._col]?.get(ref.id);
+          return { exists: Boolean(data), data: () => data };
+        }),
+        set: vi.fn((ref, data, opts) => {
+          const existing = opts?.merge ? stores[ref._col]?.get(ref.id) || {} : {};
+          stores[ref._col].set(ref.id, { ...existing, ...data });
+        }),
+      };
+      return callback(tx);
+    });
+
+    let mockedNow = 1_700_000_010_000;
+    const nowSpy = vi.spyOn(Date, 'now').mockImplementation(() => mockedNow);
+
+    try {
+      // 1. Status starts disabled
+      mockVerifyIdToken.mockResolvedValueOnce({
+        uid: 'uid_mfa_1',
+        email: 'budi@kampus.ac.id',
+        auth_time: 1000,
+      });
+      const statusInitRes = createMockRes();
+      await handler(
+        {
+          method: 'POST',
+          url: '/api/mfa',
+          headers: { authorization: 'Bearer valid-token' },
+          body: { action: 'status' },
+        },
+        statusInitRes
+      );
+      expect(statusInitRes.statusCode).toBe(200);
+      expect(statusInitRes.json()).toMatchObject({
+        enabled: false,
+        mfaRequired: false,
+        backupCodesRemaining: 0,
+      });
+
+      // 2. Setup generates Base32 key + otpauth://totp URI into pendingSecret (still disabled)
+      mockVerifyIdToken.mockResolvedValueOnce({
+        uid: 'uid_mfa_1',
+        email: 'budi@kampus.ac.id',
+        auth_time: 1000,
+      });
+      const setupRes = createMockRes();
+      await handler(
+        {
+          method: 'POST',
+          url: '/api/mfa',
+          headers: { authorization: 'Bearer valid-token' },
+          body: { action: 'setup' },
+        },
+        setupRes
+      );
+      expect(setupRes.statusCode).toBe(200);
+      const setupBody = setupRes.json();
+      expect(setupBody.manualKey).toMatch(/^[A-Z2-7]{32}$/);
+      expect(setupBody.otpauthUri).toContain(`secret=${setupBody.manualKey}`);
+      expect(setupBody.otpauthUri).toContain('otpauth://totp/Smartsa%20LMS');
+      expect(stores.user_mfa.get('uid_mfa_1').enabled).not.toBe(true);
+      expect(stores.user_mfa.get('uid_mfa_1').pendingSecret).toBe(setupBody.manualKey);
+
+      // 3. Confirm with valid 6-digit TOTP activates MFA + creates 6 hashed backup codes + sets users.mfaEnabled
+      const step0 = Math.floor(mockedNow / 1000 / 30);
+      const otp0 = generateTotpAtStep(setupBody.manualKey, step0);
+      mockVerifyIdToken.mockResolvedValueOnce({
+        uid: 'uid_mfa_1',
+        email: 'budi@kampus.ac.id',
+        auth_time: 1000,
+      });
+      const confirmRes = createMockRes();
+      await handler(
+        {
+          method: 'POST',
+          url: '/api/mfa',
+          headers: { authorization: 'Bearer valid-token' },
+          body: { action: 'confirm', code: otp0 },
+        },
+        confirmRes
+      );
+      expect(confirmRes.statusCode).toBe(200);
+      const confirmBody = confirmRes.json();
+      expect(confirmBody.enabled).toBe(true);
+      expect(confirmBody.mfaRequired).toBe(false);
+      expect(confirmBody.backupCodes).toHaveLength(6);
+      expect(confirmBody.backupCodesRemaining).toBe(6);
+
+      const mfaDocAfterConfirm = stores.user_mfa.get('uid_mfa_1');
+      expect(mfaDocAfterConfirm.enabled).toBe(true);
+      expect(mfaDocAfterConfirm.pendingSecret).toBeNull();
+      expect(mfaDocAfterConfirm.verifiedAuthTime).toBe(1000);
+      expect(mfaDocAfterConfirm.lastUsedStep).toBe(step0);
+      expect(mfaDocAfterConfirm.backupCodeHashes).toHaveLength(6);
+      expect(JSON.stringify(mfaDocAfterConfirm.backupCodeHashes)).not.toContain(
+        confirmBody.backupCodes[0]
+      );
+      expect(stores.users.get('uid_mfa_1').mfaEnabled).toBe(true);
+
+      // 4. Bootstrap in same session (auth_time: 1000) does NOT require MFA challenge
+      mockVerifyIdToken.mockResolvedValueOnce({
+        uid: 'uid_mfa_1',
+        email: 'budi@kampus.ac.id',
+        email_verified: true,
+        auth_time: 1000,
+      });
+      const bootSameRes = createMockRes();
+      await handler(
+        {
+          method: 'POST',
+          url: '/api/bootstrap',
+          headers: { authorization: 'Bearer valid-token' },
+          body: {},
+        },
+        bootSameRes
+      );
+      expect(bootSameRes.statusCode).toBe(200);
+      expect(bootSameRes.json()).toMatchObject({ mfaEnabled: true, mfaRequired: false });
+
+      // 5. Bootstrap on NEW login session (auth_time: 2000) MUST require MFA challenge
+      mockVerifyIdToken.mockResolvedValueOnce({
+        uid: 'uid_mfa_1',
+        email: 'budi@kampus.ac.id',
+        email_verified: true,
+        auth_time: 2000,
+      });
+      const bootNewRes = createMockRes();
+      await handler(
+        {
+          method: 'POST',
+          url: '/api/bootstrap',
+          headers: { authorization: 'Bearer valid-token' },
+          body: {},
+        },
+        bootNewRes
+      );
+      expect(bootNewRes.statusCode).toBe(200);
+      expect(bootNewRes.json()).toMatchObject({ mfaEnabled: true, mfaRequired: true });
+
+      // 6. Replaying same step0 TOTP MUST be rejected (TOTP_REPLAYED)
+      mockVerifyIdToken.mockResolvedValueOnce({ uid: 'uid_mfa_1', auth_time: 2000 });
+      const replayRes = createMockRes();
+      await handler(
+        {
+          method: 'POST',
+          url: '/api/mfa',
+          headers: { authorization: 'Bearer valid-token' },
+          body: { action: 'verify', code: otp0 },
+        },
+        replayRes
+      );
+      expect(replayRes.statusCode).toBe(400);
+      expect(replayRes.json().code).toBe('TOTP_REPLAYED');
+
+      // 7. Advancing clock by +30s (step0 + 1) allows TOTP verification and clears mfaRequired
+      mockedNow += 30_000;
+      const otp1 = generateTotpAtStep(setupBody.manualKey, step0 + 1);
+      mockVerifyIdToken.mockResolvedValueOnce({ uid: 'uid_mfa_1', auth_time: 2000 });
+      const verifyOkRes = createMockRes();
+      await handler(
+        {
+          method: 'POST',
+          url: '/api/mfa',
+          headers: { authorization: 'Bearer valid-token' },
+          body: { action: 'verify', code: otp1 },
+        },
+        verifyOkRes
+      );
+      expect(verifyOkRes.statusCode).toBe(200);
+      expect(verifyOkRes.json()).toMatchObject({
+        verified: true,
+        method: 'totp',
+        mfaRequired: false,
+      });
+      expect(stores.user_mfa.get('uid_mfa_1').verifiedAuthTime).toBe(2000);
+
+      // 8. One-time backup code works on new auth_time=3000 session and cannot be reused at auth_time=4000
+      const backup0 = confirmBody.backupCodes[0];
+      mockVerifyIdToken.mockResolvedValueOnce({ uid: 'uid_mfa_1', auth_time: 3000 });
+      const backupUseRes = createMockRes();
+      await handler(
+        {
+          method: 'POST',
+          url: '/api/mfa',
+          headers: { authorization: 'Bearer valid-token' },
+          body: { action: 'verify', backupCode: backup0 },
+        },
+        backupUseRes
+      );
+      expect(backupUseRes.statusCode).toBe(200);
+      expect(backupUseRes.json()).toMatchObject({
+        verified: true,
+        method: 'backup_code',
+        backupCodesRemaining: 5,
+        mfaRequired: false,
+      });
+
+      mockVerifyIdToken.mockResolvedValueOnce({ uid: 'uid_mfa_1', auth_time: 4000 });
+      const backupReuseRes = createMockRes();
+      await handler(
+        {
+          method: 'POST',
+          url: '/api/mfa',
+          headers: { authorization: 'Bearer valid-token' },
+          body: { action: 'verify', backupCode: backup0 },
+        },
+        backupReuseRes
+      );
+      expect(backupReuseRes.statusCode).toBe(400);
+      expect(backupReuseRes.json().code).toBe('INVALID_MFA_CODE');
+
+      // 9. Disable requires active OTP or remaining backup code, then clears MFA metadata
+      mockVerifyIdToken.mockResolvedValueOnce({ uid: 'uid_mfa_1', auth_time: 4000 });
+      const disableFailRes = createMockRes();
+      await handler(
+        {
+          method: 'POST',
+          url: '/api/mfa',
+          headers: { authorization: 'Bearer valid-token' },
+          body: { action: 'disable', code: '000000' },
+        },
+        disableFailRes
+      );
+      expect(disableFailRes.statusCode).toBe(400);
+
+      mockedNow += 30_000;
+      const otp2 = generateTotpAtStep(setupBody.manualKey, step0 + 2);
+      mockVerifyIdToken.mockResolvedValueOnce({ uid: 'uid_mfa_1', auth_time: 4000 });
+      const disableOkRes = createMockRes();
+      await handler(
+        {
+          method: 'POST',
+          url: '/api/mfa',
+          headers: { authorization: 'Bearer valid-token' },
+          body: { action: 'disable', code: otp2 },
+        },
+        disableOkRes
+      );
+      expect(disableOkRes.statusCode).toBe(200);
+      expect(disableOkRes.json()).toMatchObject({
+        enabled: false,
+        mfaRequired: false,
+        backupCodesRemaining: 0,
+      });
+      expect(stores.user_mfa.get('uid_mfa_1').enabled).toBe(false);
+      expect(stores.user_mfa.get('uid_mfa_1').secret).toBeNull();
+      expect(stores.users.get('uid_mfa_1').mfaEnabled).toBe(false);
+    } finally {
+      nowSpy.mockRestore();
+    }
+  });
+
+  it('enforces 5-attempt persistent rate limit (429 RATE_LIMIT_EXCEEDED) on POST /api/mfa verification failures', async () => {
+    const rateStore = new Map();
+    const secret = base32Encode(Buffer.from('12345678901234567890', 'ascii'));
+    const mfaDoc = {
+      uid: 'uid_mfa_rl',
+      enabled: true,
+      secret,
+      backupCodeHashes: [],
+    };
+
+    mockCollection.mockImplementation((name) => ({
+      doc: vi.fn((docId) => ({ _col: name, id: docId })),
+    }));
+    mockRunTransaction.mockImplementation(async (callback) => {
+      const tx = {
+        get: vi.fn(async (ref) => {
+          if (ref._col === 'rate_limits') {
+            const d = rateStore.get(ref.id);
+            return { exists: Boolean(d), data: () => d };
+          }
+          if (ref._col === 'user_mfa') {
+            return { exists: true, data: () => mfaDoc };
+          }
+          return { exists: false };
+        }),
+        set: vi.fn((ref, data, opts) => {
+          if (ref._col === 'rate_limits') {
+            const prev = opts?.merge ? rateStore.get(ref.id) || {} : {};
+            rateStore.set(ref.id, { ...prev, ...data });
+          }
+        }),
+      };
+      return callback(tx);
+    });
+
+    // 5 failed attempts return 400
+    for (let i = 0; i < 5; i += 1) {
+      mockVerifyIdToken.mockResolvedValueOnce({ uid: 'uid_mfa_rl', auth_time: 1000 });
+      const failRes = createMockRes();
+      await handler(
+        {
+          method: 'POST',
+          url: '/api/mfa',
+          headers: { authorization: 'Bearer valid-token' },
+          body: { action: 'verify', code: '999999' },
+        },
+        failRes
+      );
+      expect(failRes.statusCode).toBe(400);
+    }
+
+    // 6th attempt (even with valid code!) MUST return 429 RATE_LIMIT_EXCEEDED
+    const validOtp = generateTotpAtStep(secret, Math.floor(Date.now() / 1000 / 30));
+    mockVerifyIdToken.mockResolvedValueOnce({ uid: 'uid_mfa_rl', auth_time: 1000 });
+    const blockedRes = createMockRes();
+    await handler(
+      {
+        method: 'POST',
+        url: '/api/mfa',
+        headers: { authorization: 'Bearer valid-token' },
+        body: { action: 'verify', code: validOtp },
+      },
+      blockedRes
+    );
+    expect(blockedRes.statusCode).toBe(429);
+    expect(blockedRes.json().code).toBe('RATE_LIMIT_EXCEEDED');
+    expect(Number(blockedRes.headers['Retry-After'])).toBeGreaterThan(0);
+  });
+
+  it('serves live server health configuration on authenticated GET /api/health and enforces GET method + Bearer auth', async () => {
+    delete process.env.GEMINI_API_KEY;
+    delete process.env.GEMINI_MODEL;
+    delete process.env.CLOUDINARY_CLOUD_NAME;
+    delete process.env.CLOUDINARY_API_KEY;
+    delete process.env.CLOUDINARY_API_SECRET;
+
+    // 1. Unauthenticated GET /api/health rejected with 401
+    const unauthRes = createMockRes();
+    await handler(
+      {
+        method: 'GET',
+        url: '/api/health',
+        headers: { origin: 'http://localhost:5173' },
+      },
+      unauthRes
+    );
+    expect(unauthRes.statusCode).toBe(401);
+    expect(unauthRes.headers['Access-Control-Allow-Methods']).toBe('GET, OPTIONS');
+
+    // 2. POST /api/health rejected with 405
+    const methodRes = createMockRes();
+    await handler(
+      {
+        method: 'POST',
+        url: '/api/health',
+        headers: { origin: 'http://localhost:5173' },
+      },
+      methodRes
+    );
+    expect(methodRes.statusCode).toBe(405);
+
+    // 3. Authenticated request with missing env vars reports false flags and default gemini-4-hydrogen
+    mockVerifyIdToken.mockResolvedValueOnce({ uid: 'adm_health', role: 'admin' });
+    const unconfiguredRes = createMockRes();
+    await handler(
+      {
+        method: 'GET',
+        url: '/api/health',
+        headers: { authorization: 'Bearer valid-token', origin: 'http://localhost:5173' },
+      },
+      unconfiguredRes
+    );
+    expect(unconfiguredRes.statusCode).toBe(200);
+    expect(unconfiguredRes.json()).toMatchObject({
+      success: true,
+      firestore: true,
+      cloudinaryConfigured: false,
+      geminiConfigured: false,
+      geminiModel: 'gemini-4-hydrogen',
+    });
+
+    // 4. Configured Cloudinary & Gemini env vars reflect true + GEMINI_MODEL override
+    process.env.CLOUDINARY_CLOUD_NAME = 'smartsa-cloud';
+    process.env.CLOUDINARY_API_KEY = 'cloud-key';
+    process.env.CLOUDINARY_API_SECRET = 'cloud-secret';
+    process.env.GEMINI_API_KEY = 'gem-live-key';
+    process.env.GEMINI_MODEL = 'gemini-4-hydrogen-custom';
+
+    mockVerifyIdToken.mockResolvedValueOnce({ uid: 'student_health', role: 'student' });
+    const configuredRes = createMockRes();
+    await handler(
+      {
+        method: 'GET',
+        url: '/api/health',
+        headers: { authorization: 'Bearer valid-token' },
+      },
+      configuredRes
+    );
+    expect(configuredRes.statusCode).toBe(200);
+    expect(configuredRes.json()).toMatchObject({
+      success: true,
+      firestore: true,
+      cloudinaryConfigured: true,
+      geminiConfigured: true,
+      geminiModel: 'gemini-4-hydrogen-custom',
+    });
+  });
+
+  it('manages pending/active class_members atomically via POST /api/manage-members (approve, reject, remove, capacity & ownership)', async () => {
+    const classStore = new Map([
+      [
+        'cls_mem',
+        {
+          id: 'cls_mem',
+          lecturerId: 'lec_owner',
+          enrolledCount: 1,
+          maxStudents: 2,
+        },
+      ],
+    ]);
+    const memberStore = new Map([
+      ['cls_mem_u_pend1', { uid: 'u_pend1', classId: 'cls_mem', status: 'pending' }],
+      ['cls_mem_u_pend2', { uid: 'u_pend2', classId: 'cls_mem', status: 'pending' }],
+      ['cls_mem_u_pend3', { uid: 'u_pend3', classId: 'cls_mem', status: 'pending' }],
+      ['cls_mem_u_act1', { uid: 'u_act1', classId: 'cls_mem', status: 'approved' }],
+      ['cls_mem_u_act2', { uid: 'u_act2', classId: 'cls_mem', status: 'active' }],
+    ]);
+    const rolesByUid = {
+      student_1: 'student',
+      lec_other: 'lecturer',
+      lec_owner: 'lecturer',
+      adm_1: 'admin',
+    };
+
+    const makeRef = (col, id) => ({
+      _col: col,
+      id,
+      get: vi.fn(async () => {
+        if (col === 'users') {
+          return rolesByUid[id]
+            ? { exists: true, data: () => ({ role: rolesByUid[id] }) }
+            : { exists: false };
+        }
+        const map = col === 'classes' ? classStore : memberStore;
+        const data = map.get(id);
+        return { exists: Boolean(data), data: () => data };
+      }),
+    });
+
+    mockCollection.mockImplementation((name) => ({
+      doc: vi.fn((docId) => makeRef(name, docId)),
+    }));
+    mockRunTransaction.mockImplementation(async (callback) => {
+      const tx = {
+        get: vi.fn(async (ref) => {
+          const map = ref._col === 'classes' ? classStore : memberStore;
+          const data = map.get(ref.id);
+          return { exists: Boolean(data), data: () => data };
+        }),
+        set: vi.fn((ref, data, opts) => {
+          const map = ref._col === 'classes' ? classStore : memberStore;
+          const prev = opts?.merge ? map.get(ref.id) || {} : {};
+          map.set(ref.id, { ...prev, ...data });
+        }),
+        update: vi.fn((ref, data) => {
+          const map = ref._col === 'classes' ? classStore : memberStore;
+          const prev = map.get(ref.id) || {};
+          map.set(ref.id, { ...prev, ...data });
+        }),
+        delete: vi.fn((ref) => {
+          const map = ref._col === 'classes' ? classStore : memberStore;
+          map.delete(ref.id);
+        }),
+      };
+      return callback(tx);
+    });
+
+    // 1. Unauthenticated -> 401
+    const unauthRes = createMockRes();
+    await handler(
+      {
+        method: 'POST',
+        url: '/api/manage-members',
+        headers: {},
+        body: { action: 'approve', classId: 'cls_mem', memberUid: 'u_pend1' },
+      },
+      unauthRes
+    );
+    expect(unauthRes.statusCode).toBe(401);
+
+    // 2. Student -> 403 FORBIDDEN_ROLE
+    mockVerifyIdToken.mockResolvedValueOnce({ uid: 'student_1', role: 'student' });
+    const stuRes = createMockRes();
+    await handler(
+      {
+        method: 'POST',
+        url: '/api/manage-members',
+        headers: { authorization: 'Bearer valid-token' },
+        body: { action: 'approve', classId: 'cls_mem', memberUid: 'u_pend1' },
+      },
+      stuRes
+    );
+    expect(stuRes.statusCode).toBe(403);
+    expect(stuRes.json().code).toBe('FORBIDDEN_ROLE');
+
+    // 3. Non-owner lecturer -> 403 FORBIDDEN_CLASS_ACCESS
+    mockVerifyIdToken.mockResolvedValueOnce({ uid: 'lec_other', email: 'other@smartsa.edu' });
+    const otherLecRes = createMockRes();
+    await handler(
+      {
+        method: 'POST',
+        url: '/api/manage-members',
+        headers: { authorization: 'Bearer valid-token' },
+        body: { action: 'approve', classId: 'cls_mem', memberUid: 'u_pend1' },
+      },
+      otherLecRes
+    );
+    expect(otherLecRes.statusCode).toBe(403);
+    expect(otherLecRes.json().code).toBe('FORBIDDEN_CLASS_ACCESS');
+
+    // 4. Owner lecturer approves pending member -> status approved & enrolledCount 1 -> 2
+    mockVerifyIdToken.mockResolvedValueOnce({ uid: 'lec_owner', email: 'dosen@smartsa.edu' });
+    const approveRes = createMockRes();
+    await handler(
+      {
+        method: 'POST',
+        url: '/api/manage-members',
+        headers: { authorization: 'Bearer valid-token' },
+        body: { action: 'approve', classId: 'cls_mem', memberUid: 'u_pend1' },
+      },
+      approveRes
+    );
+    expect(approveRes.statusCode).toBe(200);
+    expect(approveRes.json()).toMatchObject({
+      success: true,
+      idempotent: false,
+      action: 'approve',
+      status: 'approved',
+      enrolledCount: 2,
+    });
+    expect(memberStore.get('cls_mem_u_pend1').status).toBe('approved');
+    expect(classStore.get('cls_mem').enrolledCount).toBe(2);
+
+    // 5. Idempotent second approve does not double-count
+    mockVerifyIdToken.mockResolvedValueOnce({ uid: 'lec_owner', email: 'dosen@smartsa.edu' });
+    const idempRes = createMockRes();
+    await handler(
+      {
+        method: 'POST',
+        url: '/api/manage-members',
+        headers: { authorization: 'Bearer valid-token' },
+        body: { action: 'approve', classId: 'cls_mem', memberUid: 'u_pend1' },
+      },
+      idempRes
+    );
+    expect(idempRes.statusCode).toBe(200);
+    expect(idempRes.json().idempotent).toBe(true);
+    expect(classStore.get('cls_mem').enrolledCount).toBe(2);
+
+    // 6. Capacity guard blocks approve when enrolledCount >= maxStudents (2)
+    mockVerifyIdToken.mockResolvedValueOnce({ uid: 'lec_owner', email: 'dosen@smartsa.edu' });
+    const fullRes = createMockRes();
+    await handler(
+      {
+        method: 'POST',
+        url: '/api/manage-members',
+        headers: { authorization: 'Bearer valid-token' },
+        body: { action: 'approve', classId: 'cls_mem', memberUid: 'u_pend2' },
+      },
+      fullRes
+    );
+    expect(fullRes.statusCode).toBe(409);
+    expect(fullRes.json().code).toBe('CLASS_FULL');
+    expect(memberStore.get('cls_mem_u_pend2').status).toBe('pending');
+
+    // 7. Reject pending member deletes doc without decrementing enrolledCount
+    mockVerifyIdToken.mockResolvedValueOnce({ uid: 'lec_owner', email: 'dosen@smartsa.edu' });
+    const rejectRes = createMockRes();
+    await handler(
+      {
+        method: 'POST',
+        url: '/api/manage-members',
+        headers: { authorization: 'Bearer valid-token' },
+        body: { action: 'reject', classId: 'cls_mem', memberUid: 'u_pend2' },
+      },
+      rejectRes
+    );
+    expect(rejectRes.statusCode).toBe(200);
+    expect(rejectRes.json()).toMatchObject({
+      success: true,
+      action: 'reject',
+      deleted: true,
+      enrolledCount: 2,
+    });
+    expect(memberStore.has('cls_mem_u_pend2')).toBe(false);
+    expect(classStore.get('cls_mem').enrolledCount).toBe(2);
+
+    // 8. Remove active approved member deletes doc and decrements enrolledCount 2 -> 1
+    mockVerifyIdToken.mockResolvedValueOnce({ uid: 'lec_owner', email: 'dosen@smartsa.edu' });
+    const removeRes = createMockRes();
+    await handler(
+      {
+        method: 'POST',
+        url: '/api/manage-members',
+        headers: { authorization: 'Bearer valid-token' },
+        body: { action: 'remove', classId: 'cls_mem', memberUid: 'u_act1' },
+      },
+      removeRes
+    );
+    expect(removeRes.statusCode).toBe(200);
+    expect(removeRes.json()).toMatchObject({
+      success: true,
+      action: 'remove',
+      deleted: true,
+      previousStatus: 'approved',
+      enrolledCount: 1,
+    });
+    expect(memberStore.has('cls_mem_u_act1')).toBe(false);
+    expect(classStore.get('cls_mem').enrolledCount).toBe(1);
+
+    // 9. Admin can approve now that slot reopened & removing active member when enrolledCount=0 clamps to 0
+    mockVerifyIdToken.mockResolvedValueOnce({ uid: 'adm_1', role: 'admin' });
+    const admApproveRes = createMockRes();
+    await handler(
+      {
+        method: 'POST',
+        url: '/api/manage-members',
+        headers: { authorization: 'Bearer valid-token' },
+        body: { action: 'approve', classId: 'cls_mem', memberUid: 'u_pend3' },
+      },
+      admApproveRes
+    );
+    expect(admApproveRes.statusCode).toBe(200);
+    expect(admApproveRes.json().enrolledCount).toBe(2);
+
+    classStore.get('cls_mem').enrolledCount = 0;
+    mockVerifyIdToken.mockResolvedValueOnce({ uid: 'adm_1', role: 'admin' });
+    const clampRes = createMockRes();
+    await handler(
+      {
+        method: 'POST',
+        url: '/api/manage-members',
+        headers: { authorization: 'Bearer valid-token' },
+        body: { action: 'remove', classId: 'cls_mem', memberUid: 'u_act2' },
+      },
+      clampRes
+    );
+    expect(clampRes.statusCode).toBe(200);
+    expect(clampRes.json().enrolledCount).toBe(0);
+
+    // 10. Non-existent member returns 404 MEMBER_NOT_FOUND
+    mockVerifyIdToken.mockResolvedValueOnce({ uid: 'lec_owner', email: 'dosen@smartsa.edu' });
+    const missingRes = createMockRes();
+    await handler(
+      {
+        method: 'POST',
+        url: '/api/manage-members',
+        headers: { authorization: 'Bearer valid-token' },
+        body: { action: 'remove', classId: 'cls_mem', memberUid: 'u_missing' },
+      },
+      missingRes
+    );
+    expect(missingRes.statusCode).toBe(404);
+    expect(missingRes.json().code).toBe('MEMBER_NOT_FOUND');
   });
 });

@@ -24,6 +24,7 @@ import BottomNav from './components/common/BottomNav';
 import FloatingActionButton from './components/common/FloatingActionButton';
 import AuthModal from './components/common/AuthModal';
 import BrandLogo from './components/common/BrandLogo';
+import MfaChallengeScreen from './components/common/MfaChallengeScreen';
 import { AccessibleDialog } from './components/common/AccessibleDialog';
 
 // Lightweight Public & LMS Views
@@ -76,7 +77,7 @@ function parseViewFromHash() {
 }
 
 function MainApp() {
-  const { role, currentUser, loading: authLoading } = useAuth();
+  const { role, currentUser, loading: authLoading, mfaRequired } = useAuth();
   const { t, language } = useLanguage();
 
   const [explicitView, setExplicitView] = useState(() => parseViewFromHash());
@@ -147,6 +148,7 @@ function MainApp() {
   const activeViewRef = useRef(activeView);
   const isExamActiveRef = useRef(isExamActive);
   const currentUserRef = useRef(currentUser);
+  const authLoadingRef = useRef(authLoading);
   const prevUidRef = useRef(undefined);
 
   useEffect(() => {
@@ -161,9 +163,13 @@ function MainApp() {
     currentUserRef.current = currentUser;
   }, [currentUser]);
 
+  useEffect(() => {
+    authLoadingRef.current = authLoading;
+  }, [authLoading]);
+
   const refreshClassesAndMemberships = useCallback(
     async (uidOverride = currentUser?.uid) => {
-      if (!uidOverride) {
+      if (!uidOverride || mfaRequired) {
         setClasses([]);
         setJoinedClassIds(new Set());
         setMembershipsLoaded(false);
@@ -185,14 +191,14 @@ function MainApp() {
         return loaded[0] || null;
       });
     },
-    [currentUser?.uid, role]
+    [currentUser?.uid, role, mfaRequired]
   );
 
   // Load classes and memberships isolated by active user & role
   useEffect(() => {
     let mounted = true;
     const loadClasses = async () => {
-      if (!currentUser?.uid) {
+      if (!currentUser?.uid || mfaRequired) {
         setClasses([]);
         setJoinedClassIds(new Set());
         setMembershipsLoaded(false);
@@ -219,7 +225,7 @@ function MainApp() {
     return () => {
       mounted = false;
     };
-  }, [currentUser?.uid, role]);
+  }, [currentUser?.uid, role, mfaRequired]);
 
   const commitNavigation = useCallback((nextView, { replace = false } = {}) => {
     if (!ALL_VIEWS.includes(nextView)) return;
@@ -340,6 +346,7 @@ function MainApp() {
   // Browser back/forward & manual hash listener with Strict Auth Guard & active exam guard
   useEffect(() => {
     const handlePopState = () => {
+      if (authLoadingRef.current) return;
       const targetView =
         parseViewFromHash() || (currentUserRef.current ? 'dashboard' : 'landing');
 
@@ -650,6 +657,8 @@ function MainApp() {
     );
   }
 
+  const isMfaLocked = Boolean(currentUser && mfaRequired && LMS_VIEWS.includes(activeView));
+
   return (
     <div className="min-h-screen bg-slate-50 dark:bg-[#0d1117] text-slate-900 dark:text-slate-100 font-sans antialiased selection:bg-[#f59e0b] selection:text-black transition-colors">
       {!isOnline && (
@@ -714,6 +723,8 @@ function MainApp() {
             </div>
           </footer>
         </div>
+      ) : isMfaLocked ? (
+        <MfaChallengeScreen />
       ) : (
         <div className="min-h-screen flex">
           {/* Desktop Sidebar */}

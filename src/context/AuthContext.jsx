@@ -16,6 +16,7 @@ import { auth, db } from '../firebase';
 import { ROLES } from '../constants/roles';
 import { setLocalExamSession } from '../services/aiService';
 import { clearDemoAttendanceStore } from '../services/attendanceService';
+import { requestMfaApi } from '../services/mfaService';
 import { AuthContext } from './authContextDef';
 
 const LEGACY_STORAGE_KEYS = [
@@ -112,6 +113,8 @@ const buildReadOnlyFallbackProfile = (firebaseUser, firestoreData = null) => {
     nip: resolvedNip,
     photoURL: resolvedPhotoURL,
     emailVerified: Boolean(firebaseUser?.emailVerified),
+    mfaEnabled: Boolean(safeFs?.mfaEnabled),
+    mfaRequired: Boolean(safeFs?.mfaEnabled),
     isDemoMode: false,
   };
 };
@@ -141,6 +144,8 @@ async function syncProfileViaBootstrap(firebaseUser, bootstrapPayload = {}) {
           const resolvedName =
             String(safeProfile.displayName || safeProfile.name || firebaseUser.displayName || '').trim() ||
             (safeProfile.email ? safeProfile.email.split('@')[0] : 'Mahasiswa');
+          const resolvedMfaEnabled = Boolean(data.mfaEnabled ?? safeProfile.mfaEnabled);
+          const resolvedMfaRequired = Boolean(data.mfaRequired ?? safeProfile.mfaRequired);
 
           return {
             ...safeProfile,
@@ -152,6 +157,8 @@ async function syncProfileViaBootstrap(firebaseUser, bootstrapPayload = {}) {
             accountType: safeProfile.accountType || 'UMUM',
             isInstitutional: Boolean(safeProfile.isInstitutional),
             emailVerified: Boolean(safeProfile.emailVerified ?? firebaseUser.emailVerified),
+            mfaEnabled: resolvedMfaEnabled,
+            mfaRequired: resolvedMfaRequired,
             isDemoMode: false,
           };
         }
@@ -183,8 +190,17 @@ export function AuthProvider({ children }) {
   const [loading, setLoading] = useState(() => Boolean(auth));
   const [isDemoMode, setIsDemoMode] = useState(false);
   const [authError, setAuthError] = useState(null);
+  const [mfaRequired, setMfaRequired] = useState(false);
   const lastAuthUidRef = useRef(null);
   const authSyncSeqRef = useRef(0);
+
+  const applyBootstrappedSession = (fbUser, profile) => {
+    setCurrentUser(fbUser);
+    setIsDemoMode(false);
+    setUserProfile(profile);
+    setRole(profile?.role || ROLES.STUDENT);
+    setMfaRequired(Boolean(profile?.mfaRequired));
+  };
 
   useEffect(() => {
     clearLegacyAuthStorage();
@@ -207,10 +223,7 @@ export function AuthProvider({ children }) {
         const profile = await syncProfileViaBootstrap(user);
         if (!isMounted || seq !== authSyncSeqRef.current) return;
 
-        setCurrentUser(user);
-        setIsDemoMode(false);
-        setUserProfile(profile);
-        setRole(profile?.role || ROLES.STUDENT);
+        applyBootstrappedSession(user, profile);
       } else {
         lastAuthUidRef.current = null;
         setLocalExamSession({ active: false });
@@ -219,6 +232,7 @@ export function AuthProvider({ children }) {
         setIsDemoMode(false);
         setUserProfile(null);
         setRole(null);
+        setMfaRequired(false);
       }
       if (isMounted) {
         setLoading(false);
@@ -263,10 +277,7 @@ export function AuthProvider({ children }) {
       const fullProfile = await syncProfileViaBootstrap(fbUser);
       if (seq !== authSyncSeqRef.current) return fbUser;
 
-      setCurrentUser(fbUser);
-      setUserProfile(fullProfile);
-      setRole(fullProfile?.role || ROLES.STUDENT);
-      setIsDemoMode(false);
+      applyBootstrappedSession(fbUser, fullProfile);
       return fbUser;
     } catch (err) {
       setAuthError(err.message);
@@ -314,10 +325,7 @@ export function AuthProvider({ children }) {
       });
       if (seq !== authSyncSeqRef.current) return res.user;
 
-      setCurrentUser(res.user);
-      setUserProfile(serverProfile);
-      setRole(serverProfile?.role || ROLES.STUDENT);
-      setIsDemoMode(false);
+      applyBootstrappedSession(res.user, serverProfile);
       return res.user;
     } catch (err) {
       setAuthError(err.message);
@@ -338,10 +346,7 @@ export function AuthProvider({ children }) {
       const googleProfile = await syncProfileViaBootstrap(res.user, { provider: 'google.com' });
       if (seq !== authSyncSeqRef.current) return res.user;
 
-      setCurrentUser(res.user);
-      setUserProfile(googleProfile);
-      setRole(googleProfile?.role || ROLES.STUDENT);
-      setIsDemoMode(false);
+      applyBootstrappedSession(res.user, googleProfile);
 
       return res.user;
     } catch (err) {
@@ -362,10 +367,7 @@ export function AuthProvider({ children }) {
       const githubProfile = await syncProfileViaBootstrap(res.user, { provider: 'github.com' });
       if (seq !== authSyncSeqRef.current) return res.user;
 
-      setCurrentUser(res.user);
-      setUserProfile(githubProfile);
-      setRole(githubProfile?.role || ROLES.STUDENT);
-      setIsDemoMode(false);
+      applyBootstrappedSession(res.user, githubProfile);
 
       return res.user;
     } catch (err) {
@@ -391,6 +393,7 @@ export function AuthProvider({ children }) {
     setIsDemoMode(false);
     setUserProfile(null);
     setRole(null);
+    setMfaRequired(false);
   };
 
   // 6. Reset Kata Sandi via Email
@@ -501,6 +504,26 @@ export function AuthProvider({ children }) {
     }
   };
 
+  const updateMfaStatus = ({ enabled, mfaRequired: nextMfaRequired = false }) => {
+    setMfaRequired(Boolean(nextMfaRequired));
+    setUserProfile((prev) =>
+      prev
+        ? {
+            ...prev,
+            ...(typeof enabled === 'boolean' ? { mfaEnabled: enabled } : {}),
+            mfaRequired: Boolean(nextMfaRequired),
+          }
+        : prev
+    );
+  };
+
+  const verifyMfaChallenge = async ({ code = '', backupCode = '' } = {}) => {
+    const activeUser = auth?.currentUser || currentUser;
+    const res = await requestMfaApi('verify', { code, backupCode }, activeUser);
+    updateMfaStatus({ enabled: true, mfaRequired: false });
+    return res;
+  };
+
   return (
     <AuthContext.Provider
       value={{
@@ -510,6 +533,10 @@ export function AuthProvider({ children }) {
         loading,
         isDemoMode,
         authError,
+        mfaEnabled: Boolean(userProfile?.mfaEnabled),
+        mfaRequired,
+        verifyMfaChallenge,
+        updateMfaStatus,
         login,
         register,
         loginWithGoogle,

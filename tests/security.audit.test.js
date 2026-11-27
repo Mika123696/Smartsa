@@ -309,4 +309,24 @@ describe('Static Security & Firestore Rules Audit', () => {
     );
     expect(aiViewCode).not.toMatch(/Gemini Ditunda|Integrasi live Google Gemini LLM ditunda/i);
   });
+
+  it('locks user_mfa strictly server-side and blocks client writes to users.mfaEnabled in firestore.rules', () => {
+    const rulesCode = readFileSync(join(ROOT_DIR, 'firestore.rules'), 'utf8');
+    expect(rulesCode).toMatch(
+      /match\s+\/user_mfa\/\{uid\}\s*\{\s*allow\s+read,\s*write:\s*if\s+false;\s*\}/
+    );
+
+    const usersMatch = rulesCode.match(/match \/users\/\{uid\}\s*\{([\s\S]*?)\n\s{4}\}/);
+    expect(usersMatch).not.toBeNull();
+    const usersBlock = usersMatch[1];
+    expect(usersBlock).toContain("!('mfaEnabled' in request.resource.data)");
+    expect(usersBlock).toMatch(/affectedKeys\(\)\.hasAny\([^)]*'mfaEnabled'/);
+
+    const profileCode = readFileSync(
+      join(SRC_DIR, 'components', 'features', 'ProfileView.jsx'),
+      'utf8'
+    );
+    expect(profileCode).not.toMatch(/\bwindow\.prompt\b/);
+    expect(profileCode).not.toMatch(/\bdangerouslySetInnerHTML\b/);
+  });
 });
