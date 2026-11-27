@@ -466,7 +466,13 @@ function buildLocalAssistantResponse({ mode = 'learning', prompt = '', context =
 }
 
 function resolveGeminiModel() {
-  return String(process.env.GEMINI_MODEL || DEFAULT_GEMINI_MODEL).trim() || DEFAULT_GEMINI_MODEL;
+  const raw = String(process.env.GEMINI_MODEL || DEFAULT_GEMINI_MODEL)
+    .replace(/[\r\n]/g, '')
+    .trim()
+    .replace(/^['"]+|['"]+$/g, '')
+    .replace(/^models\//i, '')
+    .trim();
+  return raw || DEFAULT_GEMINI_MODEL;
 }
 
 async function handleHealth() {
