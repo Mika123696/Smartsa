@@ -1655,12 +1655,25 @@ async function handleBootstrap(body, decodedToken) {
     const rawExisting = userSnap.exists ? userSnap.data() || {} : null;
     const { password: _removedPassword, ...existingData } = rawExisting || {};
 
+    const effectiveEmail = cleanEmail || String(existingData.email || '').trim().toLowerCase();
+    const effectiveDomainClassification = cleanEmail
+      ? domainClassification
+      : classifyAccountByEmail(effectiveEmail, {
+          emailVerified: Boolean(emailVerified || existingData.emailVerified),
+          requireVerified: true,
+        });
+    const effectiveDomainRole = sanitizeValidRole(effectiveDomainClassification.role) || domainRole;
+
     const dbRole = sanitizeValidRole(existingData.role);
-    const resolvedRole = pickHighestRank([dbRole, tokenRoleClaim, domainRole], ROLE_RANK, 'student');
+    const resolvedRole = pickHighestRank(
+      [dbRole, tokenRoleClaim, effectiveDomainRole],
+      ROLE_RANK,
+      'student'
+    );
 
     const dbAccountType = sanitizeValidAccountType(existingData.accountType);
     const domainAccountType =
-      sanitizeValidAccountType(domainClassification.accountType) || ACCOUNT_TYPES.UMUM;
+      sanitizeValidAccountType(effectiveDomainClassification.accountType) || ACCOUNT_TYPES.UMUM;
     const roleFloorAccountType =
       resolvedRole === 'admin' || resolvedRole === 'lecturer'
         ? ACCOUNT_TYPES.DOSEN
@@ -1677,8 +1690,6 @@ async function handleBootstrap(body, decodedToken) {
         resolvedRole === 'admin' ||
         resolvedRole === 'lecturer'
     );
-
-    const effectiveEmail = cleanEmail || String(existingData.email || '').trim().toLowerCase();
 
     if (!userSnap.exists) {
       const resolvedInstitution =
@@ -2707,11 +2718,86 @@ async function handleJoinClass(body, decodedToken) {
       return { status: 403, payload: { error: 'Kelas sudah ditutup.', code: 'CLASS_INACTIVE' } };
     }
 
+    const currentCount = Number(freshClassData.enrolledCount || 0);
+    const maxStudents = Number(freshClassData.maxStudents || 0);
+    const joinEmail = String(decodedToken?.email || '').trim().toLowerCase();
+    const joinDisplayName = String(
+      decodedToken?.name || decodedToken?.displayName || (joinEmail ? joinEmail.split('@')[0] : '')
+    ).trim();
+
     const memberSnap = await tx.get(memberRef);
     if (memberSnap.exists) {
       const memberData = memberSnap.data() || {};
       const existingStatus = memberData.status || 'approved';
       const existingPending = existingStatus === 'pending';
+
+      // Sinkronkan keanggotaan pending/UMUM bila akun kini lolos verifikasi domain institusional
+      if (existingPending && isApproved) {
+        if (maxStudents > 0 && currentCount >= maxStudents) {
+          return {
+            status: 409,
+            payload: { error: 'Kapasitas kelas sudah penuh.', code: 'CLASS_FULL' },
+          };
+        }
+
+        tx.set(
+          memberRef,
+          {
+            status: 'approved',
+            accountType: domainInfo.accountType,
+            isInstitutional: domainInfo.accountType !== ACCOUNT_TYPES.UMUM,
+            autoApproved: true,
+            ...(joinEmail && memberData.email !== joinEmail ? { email: joinEmail } : {}),
+            ...(joinDisplayName && !memberData.displayName
+              ? { displayName: joinDisplayName, studentName: joinDisplayName }
+              : {}),
+            updatedAt: FieldValue.serverTimestamp(),
+          },
+          { merge: true }
+        );
+        tx.update(classRef, {
+          enrolledCount: FieldValue.increment(1),
+          updatedAt: FieldValue.serverTimestamp(),
+        });
+
+        return {
+          status: 200,
+          payload: {
+            joined: true,
+            alreadyMember: true,
+            upgradedFromPending: true,
+            pendingApproval: false,
+            status: 'approved',
+            accountType: domainInfo.accountType,
+            memberId,
+            classId: classDoc.id,
+            classData: {
+              id: classDoc.id,
+              ...freshClassData,
+              enrolledCount: currentCount + 1,
+            },
+          },
+        };
+      }
+
+      if (
+        !existingPending &&
+        isApproved &&
+        (memberData.accountType === ACCOUNT_TYPES.UMUM || !memberData.isInstitutional)
+      ) {
+        tx.set(
+          memberRef,
+          {
+            accountType: domainInfo.accountType,
+            isInstitutional: domainInfo.accountType !== ACCOUNT_TYPES.UMUM,
+            autoApproved: true,
+            ...(joinEmail && memberData.email !== joinEmail ? { email: joinEmail } : {}),
+            updatedAt: FieldValue.serverTimestamp(),
+          },
+          { merge: true }
+        );
+      }
+
       return {
         status: 200,
         payload: {
@@ -2719,6 +2805,7 @@ async function handleJoinClass(body, decodedToken) {
           alreadyMember: true,
           pendingApproval: existingPending,
           status: existingStatus,
+          accountType: memberData.accountType || domainInfo.accountType,
           memberId,
           classId: classDoc.id,
           classData: { id: classDoc.id, ...freshClassData },
@@ -2726,19 +2813,12 @@ async function handleJoinClass(body, decodedToken) {
       };
     }
 
-    const currentCount = Number(freshClassData.enrolledCount || 0);
-    const maxStudents = Number(freshClassData.maxStudents || 0);
     if (isApproved && maxStudents > 0 && currentCount >= maxStudents) {
       return {
         status: 409,
         payload: { error: 'Kapasitas kelas sudah penuh.', code: 'CLASS_FULL' },
       };
     }
-
-    const joinEmail = String(decodedToken?.email || '').trim().toLowerCase();
-    const joinDisplayName = String(
-      decodedToken?.name || decodedToken?.displayName || (joinEmail ? joinEmail.split('@')[0] : '')
-    ).trim();
 
     tx.set(memberRef, {
       memberId,

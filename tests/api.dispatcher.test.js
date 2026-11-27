@@ -37,11 +37,23 @@ import {
   ACCOUNT_TYPES,
   classifyAccountByEmail,
   getAccountTypeFromEmail,
+  hasAcademicDomainSuffix,
   isAutoApprovedDomain,
   matchesDomainBoundary,
   parseEmailAddress,
   resolveEmailDomain,
 } from '../lib/domains.js';
+import {
+  TARGET_CLASS_CODE,
+  SEED_BATCH,
+  parseSeedFlags,
+  isMhsUnesaEmail,
+  buildSeededStudents,
+  pickMeetingForTopic,
+  buildSeededDiscussions,
+  computeSyncedUserPatch,
+  computeSyncedMemberPatch,
+} from '../scripts/seed-kerbut26.mjs';
 
 function createMockRes() {
   const res = {
@@ -866,6 +878,31 @@ describe('Backend API Dispatcher (api/index.js)', () => {
       autoApprove: true,
     });
 
+    // Academic institutions & student subdomains (.ac.id, .sch.id, .edu, .edu.id) map to MAHASISWA
+    for (const academicEmail of [
+      '25050974001@mhs.unesa.ac.id',
+      'BUDI.SANTOSO@MHS.UNESA.AC.ID',
+      'siti@unesa.ac.id',
+      'ani@student.itb.ac.id',
+      'siswa@sman1.sch.id',
+      'researcher@mit.edu',
+      'mhs@binus.edu.id',
+    ]) {
+      expect(resolveEmailDomain(academicEmail)).toMatchObject({
+        valid: true,
+        accountType: ACCOUNT_TYPES.MAHASISWA,
+        role: 'student',
+        autoApprove: true,
+        isInstitutional: true,
+      });
+    }
+
+    expect(hasAcademicDomainSuffix('mhs.unesa.ac.id')).toBe(true);
+    expect(hasAcademicDomainSuffix('unesa.ac.id')).toBe(true);
+    expect(hasAcademicDomainSuffix('evil-ac.id')).toBe(false);
+    expect(hasAcademicDomainSuffix('ac.id')).toBe(false);
+    expect(hasAcademicDomainSuffix('edu')).toBe(false);
+
     // 2. Lecturer domain precedence (dosen.kampus.ac.id > kampus.ac.id) & Smartsa roles
     expect(resolveEmailDomain('Dosen1@DOSEN.KAMPUS.AC.ID')).toMatchObject({
       valid: true,
@@ -912,9 +949,11 @@ describe('Backend API Dispatcher (api/index.js)', () => {
 
     for (const externalEmail of [
       'pengguna@gmail.com',
-      'spoof@evilkampus.ac.id',
-      'fake@my-farlean.edu',
+      'spoof@evilkampus.com',
+      'fake@my-farlean.org',
       'phish@kampus.ac.id.evil.com',
+      'fake@evil-ac.id',
+      'user@ac.id',
     ]) {
       expect(resolveEmailDomain(externalEmail)).toMatchObject({
         valid: true,
@@ -958,6 +997,7 @@ describe('Backend API Dispatcher (api/index.js)', () => {
       'a@b@kampus.ac.id',
       'bad user@kampus.ac.id',
       'user@localhost',
+      'user@edu',
       'user@bad..kampus.ac.id',
       'user@-bad.kampus.ac.id',
       '.dot@kampus.ac.id',
@@ -1781,6 +1821,219 @@ describe('Backend API Dispatcher (api/index.js)', () => {
       isInstitutional: false,
     });
     expect(classUpdates).toHaveLength(1);
+
+    // 4. Verified @mhs.unesa.ac.id & @unesa.ac.id auto-approve as institutional MAHASISWA
+    for (const unesaUser of [
+      { uid: 'uid_unesa_mhs', email: '25050974001@mhs.unesa.ac.id' },
+      { uid: 'uid_unesa_main', email: 'dosenmuda@unesa.ac.id' },
+    ]) {
+      mockVerifyIdToken.mockResolvedValueOnce({
+        uid: unesaUser.uid,
+        email: unesaUser.email,
+        email_verified: true,
+      });
+      const unesaRes = createMockRes();
+      await handler(
+        {
+          method: 'POST',
+          url: '/api/join-class',
+          headers: { authorization: 'Bearer valid-token' },
+          body: { classCode: 'SMPBO101' },
+        },
+        unesaRes
+      );
+      expect(unesaRes.statusCode).toBe(200);
+      expect(unesaRes.json()).toMatchObject({
+        joined: true,
+        pendingApproval: false,
+        status: 'approved',
+        accountType: 'MAHASISWA',
+      });
+    }
+    expect(memberWrites[2].data).toMatchObject({
+      status: 'approved',
+      autoApproved: true,
+      accountType: 'MAHASISWA',
+      isInstitutional: true,
+    });
+    expect(memberWrites[3].data).toMatchObject({
+      status: 'approved',
+      autoApproved: true,
+      accountType: 'MAHASISWA',
+      isInstitutional: true,
+    });
+    expect(classUpdates).toHaveLength(3);
+  });
+
+  it('upgrades existing UMUM/@mhs.unesa.ac.id users on POST /api/bootstrap and stuck pending memberships on POST /api/join-class', async () => {
+    // 1. Existing user doc mistakenly marked UMUM upgrades to MAHASISWA on login bootstrap
+    mockVerifyIdToken.mockResolvedValueOnce({
+      uid: 'uid_unesa_relogin',
+      email: '25050974010@MHS.UNESA.AC.ID',
+      email_verified: true,
+    });
+    const userRef = { id: 'uid_unesa_relogin' };
+    const bootstrapTxSet = vi.fn();
+
+    mockCollection.mockImplementation((name) =>
+      name === 'users' ? { doc: vi.fn(() => userRef) } : {}
+    );
+    mockRunTransaction.mockImplementationOnce(async (callback) =>
+      callback({
+        get: vi.fn(async () => ({
+          exists: true,
+          data: () => ({
+            uid: 'uid_unesa_relogin',
+            email: '25050974010@mhs.unesa.ac.id',
+            name: 'Mahasiswa UNESA Asli',
+            displayName: 'Mahasiswa UNESA Asli',
+            role: 'student',
+            accountType: 'UMUM',
+            isInstitutional: false,
+            createdAt: '2026-02-01T00:00:00.000Z',
+          }),
+        })),
+        set: bootstrapTxSet,
+      })
+    );
+
+    const bootRes = createMockRes();
+    await handler(
+      {
+        method: 'POST',
+        url: '/api/bootstrap',
+        headers: { authorization: 'Bearer valid-token' },
+        body: {},
+      },
+      bootRes
+    );
+    expect(bootRes.statusCode).toBe(200);
+    expect(bootRes.json().profile).toMatchObject({
+      uid: 'uid_unesa_relogin',
+      accountType: 'MAHASISWA',
+      isInstitutional: true,
+      role: 'student',
+    });
+    expect(bootstrapTxSet).toHaveBeenCalledWith(
+      userRef,
+      expect.objectContaining({
+        accountType: 'MAHASISWA',
+        isInstitutional: true,
+      }),
+      { merge: true }
+    );
+
+    // 2. Existing pending @mhs.unesa.ac.id membership upgrades to approved & increments enrolledCount
+    mockVerifyIdToken.mockResolvedValueOnce({
+      uid: 'uid_unesa_stuck',
+      email: '25050974012@mhs.unesa.ac.id',
+      email_verified: true,
+    });
+    const classRef = { id: 'cls_kerbut26' };
+    const stuckMemberWrites = [];
+    const upgradedClassUpdates = [];
+    const rateLimitsDb = new Map();
+
+    mockCollection.mockImplementation((name) => {
+      if (name === 'rate_limits') {
+        return {
+          doc: vi.fn((docId) => ({ _col: 'rate_limits', id: docId })),
+        };
+      }
+      if (name === 'classes') {
+        return {
+          where: vi.fn(() => ({
+            limit: vi.fn(() => ({
+              get: vi.fn(async () => ({
+                empty: false,
+                docs: [{ id: 'cls_kerbut26', ref: classRef }],
+              })),
+            })),
+          })),
+        };
+      }
+      if (name === 'class_members') {
+        return {
+          doc: vi.fn((docId) => ({ _col: 'class_members', id: docId })),
+        };
+      }
+      return {};
+    });
+
+    mockRunTransaction.mockImplementation(async (callback) =>
+      callback({
+        get: vi.fn(async (ref) => {
+          if (ref?._col === 'rate_limits') {
+            const existing = rateLimitsDb.get(ref.id);
+            return existing ? { exists: true, data: () => existing } : { exists: false };
+          }
+          if (ref === classRef) {
+            return {
+              exists: true,
+              data: () => ({
+                code: 'KERBUT26',
+                title: 'Kecerdasan Buatan',
+                enrolledCount: 1,
+                maxStudents: 40,
+                isActive: true,
+              }),
+            };
+          }
+          if (ref?._col === 'class_members') {
+            return {
+              exists: true,
+              data: () => ({
+                memberId: 'cls_kerbut26_uid_unesa_stuck',
+                classId: 'cls_kerbut26',
+                uid: 'uid_unesa_stuck',
+                role: 'student',
+                status: 'pending',
+                accountType: 'UMUM',
+                isInstitutional: false,
+                autoApproved: false,
+              }),
+            };
+          }
+          return { exists: false };
+        }),
+        set: vi.fn((ref, data, opts) => {
+          if (ref?._col === 'rate_limits') {
+            const prev = rateLimitsDb.get(ref.id) || {};
+            rateLimitsDb.set(ref.id, { ...prev, ...data });
+            return;
+          }
+          stuckMemberWrites.push({ id: ref.id, data, opts });
+        }),
+        update: vi.fn((ref, data) => upgradedClassUpdates.push({ ref, data })),
+      })
+    );
+
+    const healRes = createMockRes();
+    await handler(
+      {
+        method: 'POST',
+        url: '/api/join-class',
+        headers: { authorization: 'Bearer valid-token' },
+        body: { classCode: 'KERBUT26' },
+      },
+      healRes
+    );
+    expect(healRes.statusCode).toBe(200);
+    expect(healRes.json()).toMatchObject({
+      joined: true,
+      alreadyMember: true,
+      upgradedFromPending: true,
+      pendingApproval: false,
+      status: 'approved',
+      accountType: 'MAHASISWA',
+    });
+    expect(stuckMemberWrites[0].data).toMatchObject({
+      status: 'approved',
+      accountType: 'MAHASISWA',
+      isInstitutional: true,
+      autoApproved: true,
+    });
+    expect(upgradedClassUpdates).toHaveLength(1);
   });
 
   it('validates exam status (draft/archived/published) and deadline/expiresAt +60s grace tolerance on POST /api/grade', async () => {
@@ -3869,5 +4122,114 @@ describe('Backend API Dispatcher (api/index.js)', () => {
     );
     expect(missingRes.statusCode).toBe(404);
     expect(missingRes.json().code).toBe('MEMBER_NOT_FOUND');
+  });
+
+  it('builds deterministic KERBUT26 seed data, CLI flags, and @mhs.unesa.ac.id sync patches without live Firestore calls', () => {
+    expect(TARGET_CLASS_CODE).toBe('KERBUT26');
+    expect(SEED_BATCH).toBe('kerbut26');
+
+    expect(parseSeedFlags([])).toMatchObject({ mode: 'dry-run', dryRun: true, execute: false, cleanup: false });
+    expect(parseSeedFlags(['--dry-run'])).toMatchObject({ mode: 'dry-run', dryRun: true });
+    expect(parseSeedFlags(['--execute'])).toMatchObject({ mode: 'execute', dryRun: false, execute: true });
+    expect(parseSeedFlags(['--cleanup'])).toMatchObject({ mode: 'cleanup', dryRun: false, cleanup: true });
+    expect(() => parseSeedFlags(['--execute', '--cleanup'])).toThrow();
+
+    expect(isMhsUnesaEmail('25050974001@MHS.UNESA.AC.ID')).toBe(true);
+    expect(isMhsUnesaEmail('warga@gmail.com')).toBe(false);
+
+    const students = buildSeededStudents('cls_kerbut26', { timestampValue: 'SERVER_TIMESTAMP' });
+    expect(students).toHaveLength(30);
+    expect(new Set(students.map((s) => s.uid)).size).toBe(30);
+    expect(new Set(students.map((s) => s.displayName)).size).toBe(30);
+    expect(new Set(students.map((s) => s.nim)).size).toBe(30);
+    expect(students[0]).toMatchObject({
+      uid: 'seed_kerbut26_mhs_01',
+      nim: '25050974001',
+      email: '25050974001@mhs.unesa.ac.id',
+      memberId: 'cls_kerbut26_seed_kerbut26_mhs_01',
+    });
+    expect(students[29]).toMatchObject({
+      uid: 'seed_kerbut26_mhs_30',
+      nim: '25050974030',
+      email: '25050974030@mhs.unesa.ac.id',
+    });
+    expect(students[0].userDoc).toMatchObject({
+      role: 'student',
+      accountType: 'MAHASISWA',
+      isInstitutional: true,
+      emailVerified: true,
+      seedBatch: 'kerbut26',
+    });
+    expect(students[0].memberDoc).toMatchObject({
+      classId: 'cls_kerbut26',
+      status: 'approved',
+      accountType: 'MAHASISWA',
+      isInstitutional: true,
+      autoApproved: true,
+      seedBatch: 'kerbut26',
+    });
+
+    const meetings = Array.from({ length: 16 }, (_, idx) => ({
+      order: idx + 1,
+      title: `Pertemuan AI ${idx + 1}`,
+    }));
+    expect(pickMeetingForTopic(meetings, 0, 6).order).toBe(1);
+    const discussions = buildSeededDiscussions({
+      classId: 'cls_kerbut26',
+      classData: { title: 'Kecerdasan Buatan', meetings },
+      students,
+    });
+    expect(discussions).toHaveLength(6);
+    for (const disc of discussions) {
+      expect(disc.doc).toMatchObject({
+        classId: 'cls_kerbut26',
+        subject: 'Kecerdasan Buatan',
+        isVerifiedAnswer: false,
+        verifiedBy: '',
+        verifiedReplyId: '',
+        seedBatch: 'kerbut26',
+      });
+      expect(typeof disc.doc.timeLabel).toBe('string');
+      expect(disc.doc.meetingNo).toBeGreaterThanOrEqual(1);
+      expect(disc.doc.meetingNo).toBeLessThanOrEqual(16);
+      expect(disc.doc.likes).toBe(disc.doc.likedBy.length);
+      expect(disc.doc.replies.length).toBeGreaterThanOrEqual(3);
+      expect(disc.doc.replies.length).toBeLessThanOrEqual(5);
+      for (const reply of disc.doc.replies) {
+        expect(reply).toMatchObject({
+          id: expect.any(String),
+          authorUid: expect.stringMatching(/^seed_kerbut26_mhs_/),
+          author: expect.any(String),
+          time: expect.any(String),
+          content: expect.any(String),
+        });
+      }
+    }
+
+    expect(
+      computeSyncedUserPatch(
+        { email: 'mhs@MHS.UNESA.AC.ID', role: 'student', accountType: 'UMUM', isInstitutional: false },
+        'SERVER_TIMESTAMP'
+      )
+    ).toMatchObject({ accountType: 'MAHASISWA', isInstitutional: true });
+    expect(
+      computeSyncedUserPatch(
+        { email: 'mhs@mhs.unesa.ac.id', role: 'student', accountType: 'UMUM', seedBatch: 'kerbut26' },
+        'SERVER_TIMESTAMP'
+      )
+    ).toBeNull();
+    expect(
+      computeSyncedMemberPatch(
+        { uid: 'u1', status: 'pending', accountType: 'UMUM', isInstitutional: false, autoApproved: false },
+        { email: '25050974099@mhs.unesa.ac.id', role: 'student' },
+        'SERVER_TIMESTAMP'
+      )
+    ).toMatchObject({
+      status: 'approved',
+      accountType: 'MAHASISWA',
+      isInstitutional: true,
+      autoApproved: true,
+      email: '25050974099@mhs.unesa.ac.id',
+    });
   });
 });
