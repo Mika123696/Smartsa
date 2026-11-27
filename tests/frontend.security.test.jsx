@@ -49,7 +49,7 @@ const {
   lastScannerOnSuccessRef: { current: null },
 }));
 
-vi.mock('../src/firebase', () => ({
+vi.mock('../web/src/firebase', () => ({
   app: null,
   auth: mockAuthObj,
   db: mockDbObj,
@@ -114,40 +114,40 @@ vi.mock('html5-qrcode', () => {
   return { Html5Qrcode: MockHtml5Qrcode };
 });
 
-import DeltaContentRenderer from '../src/components/common/DeltaContentRenderer';
-import AiMarkdownRenderer from '../src/components/common/AiMarkdownRenderer';
-import { normalizeAiMarkdownText } from '../src/utils/aiMarkdown';
-import AttendanceQrModal from '../src/components/common/AttendanceQrModal';
-import QrScannerPanel from '../src/components/common/QrScannerPanel';
-import App from '../src/App';
-import SafeImage from '../src/components/common/SafeImage';
-import BrandLogo from '../src/components/common/BrandLogo';
-import Navbar from '../src/components/common/Navbar';
-import Sidebar from '../src/components/common/Sidebar';
-import MobileHeader from '../src/components/common/MobileHeader';
-import AuthModal from '../src/components/common/AuthModal';
-import AboutPage from '../src/components/public/AboutPage';
-import { ThemeProvider } from '../src/context/ThemeContext';
-import { AuthProvider } from '../src/context/AuthContext';
-import { LanguageProvider } from '../src/context/LanguageContext';
-import { useAuth } from '../src/context/useAuth';
-import AIAssistantView from '../src/components/features/AIAssistantView';
-import ManualBookView from '../src/components/features/ManualBookView';
-import ClassDetailView from '../src/components/features/ClassDetailView';
+import DeltaContentRenderer from '../web/src/components/common/DeltaContentRenderer';
+import AiMarkdownRenderer from '../web/src/components/common/AiMarkdownRenderer';
+import { normalizeAiMarkdownText } from '../web/src/utils/aiMarkdown';
+import AttendanceQrModal from '../web/src/components/common/AttendanceQrModal';
+import QrScannerPanel from '../web/src/components/common/QrScannerPanel';
+import App from '../web/src/App';
+import SafeImage from '../web/src/components/common/SafeImage';
+import BrandLogo from '../web/src/components/common/BrandLogo';
+import Navbar from '../web/src/components/common/Navbar';
+import Sidebar from '../web/src/components/common/Sidebar';
+import MobileHeader from '../web/src/components/common/MobileHeader';
+import AuthModal from '../web/src/components/common/AuthModal';
+import AboutPage from '../web/src/components/public/AboutPage';
+import { ThemeProvider } from '../web/src/context/ThemeContext';
+import { AuthProvider } from '../web/src/context/AuthContext';
+import { LanguageProvider } from '../web/src/context/LanguageContext';
+import { useAuth } from '../web/src/context/useAuth';
+import AIAssistantView from '../web/src/components/features/AIAssistantView';
+import ManualBookView from '../web/src/components/features/ManualBookView';
+import ClassDetailView from '../web/src/components/features/ClassDetailView';
 import {
   deltaToEditableText,
   plainTextToDelta,
-} from '../src/services/deltaSerialization';
-import ClassesView from '../src/components/features/ClassesView';
-import DiscussionTab from '../src/components/features/DiscussionTab';
-import MaterialsTab from '../src/components/features/MaterialsTab';
-import ScheduleTab from '../src/components/features/ScheduleTab';
-import ProfileView from '../src/components/features/ProfileView';
-import LandingPage from '../src/components/public/LandingPage';
-import PublicCatalog from '../src/components/public/PublicCatalog';
-import AdminDashboard from '../src/components/dashboard/AdminDashboard';
-import StudentDashboard from '../src/components/dashboard/StudentDashboard';
-import TeacherDashboard from '../src/components/dashboard/TeacherDashboard';
+} from '../web/src/services/deltaSerialization';
+import ClassesView from '../web/src/components/features/ClassesView';
+import DiscussionTab from '../web/src/components/features/DiscussionTab';
+import MaterialsTab from '../web/src/components/features/MaterialsTab';
+import ScheduleTab from '../web/src/components/features/ScheduleTab';
+import ProfileView from '../web/src/components/features/ProfileView';
+import LandingPage from '../web/src/components/public/LandingPage';
+import PublicCatalog from '../web/src/components/public/PublicCatalog';
+import AdminDashboard from '../web/src/components/dashboard/AdminDashboard';
+import StudentDashboard from '../web/src/components/dashboard/StudentDashboard';
+import TeacherDashboard from '../web/src/components/dashboard/TeacherDashboard';
 import {
   addDiscussionReply,
   createClassInFirestore,
@@ -166,17 +166,17 @@ import {
   toggleLikeDiscussion,
   updateDiscussionTopicContent,
   upsertLearningProgress,
-} from '../src/services/lmsFirestoreService';
+} from '../web/src/services/lmsFirestoreService';
 import {
   buildAttendanceQrPayload,
   clearDemoAttendanceStore,
   getSemesterAttendanceSummary,
   parseAttendanceQrPayload,
   recordMeetingAttendance,
-} from '../src/services/attendanceService';
-import { parseAikenQuestions } from '../src/services/aikenParser';
-import { uploadMediaFile, uploadSubmissionFile } from '../src/services/cloudinaryService';
-import { askAIAssistant, getActiveExamStatus, setLocalExamSession } from '../src/services/aiService';
+} from '../web/src/services/attendanceService';
+import { parseAikenQuestions } from '../web/src/services/aikenParser';
+import { uploadMediaFile, uploadSubmissionFile } from '../web/src/services/cloudinaryService';
+import { askAIAssistant, getActiveExamStatus, setLocalExamSession } from '../web/src/services/aiService';
 
 describe('Frontend Security & UI Components', () => {
   beforeEach(() => {

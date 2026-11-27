@@ -10,7 +10,8 @@ import {
 } from '../scripts/cleanup-corrupt-data.mjs';
 
 const ROOT_DIR = resolve(process.cwd());
-const SRC_DIR = join(ROOT_DIR, 'src');
+const WEB_DIR = join(ROOT_DIR, 'web');
+const SRC_DIR = join(WEB_DIR, 'src');
 
 function collectSourceFiles(dir) {
   const files = [];
@@ -235,7 +236,7 @@ describe('Static Security & Firestore Rules Audit', () => {
   });
 
   it('configures Vite /api local dev proxy and preserves single api/index.js serverless dispatcher with /api/ai intact', () => {
-    const viteConfigCode = readFileSync(join(ROOT_DIR, 'vite.config.js'), 'utf8');
+    const viteConfigCode = readFileSync(join(WEB_DIR, 'vite.config.js'), 'utf8');
     expect(viteConfigCode).toContain('VITE_API_PROXY_TARGET');
     expect(viteConfigCode).toContain('http://localhost:3000');
     expect(viteConfigCode).toContain("'/api'");

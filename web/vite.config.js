@@ -1,14 +1,21 @@
+import { dirname, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { defineConfig, loadEnv } from 'vite'
 import react from '@vitejs/plugin-react'
 import tailwindcss from '@tailwindcss/vite'
 
+const webDir = dirname(fileURLToPath(import.meta.url));
+const repoRoot = resolve(webDir, '..');
+
 // https://vite.dev/config/
 export default defineConfig(({ mode }) => {
-  const env = loadEnv(mode, process.cwd(), '');
+  const env = loadEnv(mode, repoRoot, '');
   const apiProxyTarget =
     env.VITE_API_PROXY_TARGET || process.env.VITE_API_PROXY_TARGET || 'http://localhost:3000';
 
   return {
+    root: webDir,
+    envDir: '..',
     plugins: [
       react(),
       tailwindcss(),
@@ -23,11 +30,14 @@ export default defineConfig(({ mode }) => {
       },
     },
     test: {
+      dir: resolve(repoRoot, 'tests'),
       environment: 'jsdom',
       globals: true,
-      setupFiles: ['./tests/setup.js'],
+      setupFiles: [resolve(repoRoot, 'tests/setup.js')],
     },
     build: {
+      outDir: 'dist',
+      emptyOutDir: true,
       rollupOptions: {
         output: {
           manualChunks(id) {

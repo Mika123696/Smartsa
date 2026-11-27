@@ -26,3 +26,16 @@ dist-ssr
 *.sw?
 .vercel
 .env*
+
+# Mobile (Flutter & Android)
+mobile/build/
+mobile/.dart_tool/
+mobile/android/.gradle/
+mobile/.flutter-plugins
+mobile/.flutter-plugins-dependencies
+web/dist/
+local.properties
+*.apk
+*.aab
+*.keystore
+*.jks

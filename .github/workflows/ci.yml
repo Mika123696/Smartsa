@@ -30,4 +30,4 @@ jobs:
         run: npm test -- --run
 
       - name: Build production bundle (Vite)
-        run: npm run build
+        run: npm run build && test -f web/dist/index.html

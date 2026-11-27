@@ -1,0 +1,14 @@
+# Exclude mobile app & native build artifacts from Vercel deployment
+mobile/
+google-services.json
+*.apk
+*.aab
+*.ipa
+*.keystore
+*.jks
+local.properties
+
+# Exclude local build outputs & dependencies
+dist/
+web/dist/
+node_modules/

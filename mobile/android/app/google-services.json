@@ -1,0 +1,47 @@
+{
+  "project_info": {
+    "project_number": "274664390309",
+    "project_id": "pinteru-30b26",
+    "storage_bucket": "pinteru-30b26.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:274664390309:android:9d8e56feeb3ca8bf6ed74c",
+        "android_client_info": {
+          "package_name": "com.pinteru.smartsalms"
+        }
+      },
+      "oauth_client": [
+        {
+          "client_id": "274664390309-k2j36kd3e4at8e8ivstv06s9ihvtsb10.apps.googleusercontent.com",
+          "client_type": 1,
+          "android_info": {
+            "package_name": "com.pinteru.smartsalms",
+            "certificate_hash": "e6ebfb0b8aef1cbf6d37cc434178b549dcc58e2d"
+          }
+        },
+        {
+          "client_id": "274664390309-lght3523eoq98kt2l42t0ed8nf67ij37.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
+      "api_key": [
+        {
+          "current_key": "AIzaSyAWaKsHv1sUGFCF0GM_BwL_lThCm-OOEj8"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": [
+            {
+              "client_id": "274664390309-lght3523eoq98kt2l42t0ed8nf67ij37.apps.googleusercontent.com",
+              "client_type": 3
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
