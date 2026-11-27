@@ -4,6 +4,7 @@ import { useLanguage } from '../../context/useLanguage';
 import { ROLES } from '../../constants/roles';
 import { askAIAssistant, subscribeActiveExamStatus } from '../../services/aiService';
 import { fetchClassesForUser } from '../../services/lmsFirestoreService';
+import AiMarkdownRenderer from '../common/AiMarkdownRenderer';
 import {
   Sparkles,
   Send,
@@ -13,6 +14,8 @@ import {
   User,
   Cpu,
   BookOpen,
+  Copy,
+  Check,
 } from 'lucide-react';
 
 export default function AIAssistantView() {
@@ -34,6 +37,7 @@ export default function AIAssistantView() {
   const [remainingQuota, setRemainingQuota] = useState(20);
   const [userClasses, setUserClasses] = useState([]);
   const [selectedClassId, setSelectedClassId] = useState('');
+  const [copiedMsgIdx, setCopiedMsgIdx] = useState(null);
   const mountedRef = useRef(true);
 
   useEffect(() => {
@@ -90,6 +94,21 @@ export default function AIAssistantView() {
       note: null,
     },
   ]);
+
+  const handleCopyAiMessage = async (text, idx) => {
+    if (!text) return;
+    try {
+      await navigator.clipboard?.writeText(text);
+      setCopiedMsgIdx(idx);
+      setTimeout(() => {
+        if (mountedRef.current) {
+          setCopiedMsgIdx((curr) => (curr === idx ? null : curr));
+        }
+      }, 2000);
+    } catch {
+      setCopiedMsgIdx(null);
+    }
+  };
 
   const handleSend = async (customPrompt) => {
     const textToSend = (customPrompt || inputPrompt).trim();
@@ -331,7 +350,9 @@ export default function AIAssistantView() {
               </div>
 
               <div
-                className={`max-w-xl p-4 rounded-2xl text-xs sm:text-sm leading-relaxed ${
+                className={`${
+                  msg.sender === 'user' ? 'max-w-xl' : 'max-w-2xl'
+                } p-4 rounded-2xl text-xs sm:text-sm leading-relaxed ${
                   msg.sender === 'user'
                     ? 'bg-blue-600 text-white rounded-tr-xs font-medium'
                     : msg.isError
@@ -339,7 +360,33 @@ export default function AIAssistantView() {
                     : 'bg-slate-50 dark:bg-[#161d2a] border border-slate-200 dark:border-[#232f42] text-slate-800 dark:text-slate-200 rounded-tl-xs'
                 }`}
               >
-                <div className="whitespace-pre-wrap">{msg.text}</div>
+                {msg.sender === 'user' ? (
+                  <div className="whitespace-pre-wrap">{msg.text}</div>
+                ) : (
+                  <AiMarkdownRenderer content={msg.text} />
+                )}
+                {msg.sender !== 'user' && !msg.isError && msg.text && (
+                  <div className="mt-2.5 pt-2 border-t border-slate-200/70 dark:border-[#232f42] flex items-center justify-end">
+                    <button
+                      type="button"
+                      onClick={() => void handleCopyAiMessage(msg.text, idx)}
+                      aria-label={language === 'en' ? 'Copy AI response' : 'Salin balasan AI'}
+                      className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px] font-medium text-slate-500 dark:text-slate-400 hover:text-slate-800 dark:hover:text-slate-200 hover:bg-slate-200/60 dark:hover:bg-[#232f42] transition"
+                    >
+                      {copiedMsgIdx === idx ? (
+                        <>
+                          <Check className="w-3 h-3 text-emerald-500" />
+                          <span>{language === 'en' ? 'Copied' : 'Disalin'}</span>
+                        </>
+                      ) : (
+                        <>
+                          <Copy className="w-3 h-3" />
+                          <span>{language === 'en' ? 'Copy' : 'Salin'}</span>
+                        </>
+                      )}
+                    </button>
+                  </div>
+                )}
                 {msg.note && (
                   <div className="mt-2 pt-2 border-t border-slate-200 dark:border-[#232f42] text-[11px] text-amber-700 dark:text-amber-400 italic">
                     ℹ️ {msg.note}

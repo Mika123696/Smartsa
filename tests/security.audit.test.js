@@ -328,5 +328,11 @@ describe('Static Security & Firestore Rules Audit', () => {
     );
     expect(profileCode).not.toMatch(/\bwindow\.prompt\b/);
     expect(profileCode).not.toMatch(/\bdangerouslySetInnerHTML\b/);
+
+    const aiMarkdownCode = stripComments(
+      readFileSync(join(SRC_DIR, 'components', 'common', 'AiMarkdownRenderer.jsx'), 'utf8')
+    );
+    expect(aiMarkdownCode).not.toMatch(/rehype-raw|rehypeRaw/i);
+    expect(aiMarkdownCode).not.toMatch(/\bdangerouslySetInnerHTML\b/);
   });
 });

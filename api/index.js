@@ -644,9 +644,12 @@ async function handleAi(body, decodedToken) {
       ? 'Anda adalah Smartsa Teaching Assistant AI untuk dosen/pendidik. Bantu menyusun silabus, rubrik penilaian, dan draf soal Bloom taxonomy secara terstruktur dalam bahasa yang jelas.'
       : 'Anda adalah Smartsa Learning Assistant AI untuk mahasiswa. Jelaskan konsep dengan analogi jelas, ringkas, edukatif, dan dilarang memberikan kunci jawaban ujian aktif.';
 
+  const formattingGuide =
+    'Format jawaban menggunakan Markdown standar yang bersih dan mudah dibaca (heading seperlunya, daftar poin/nomor rapi, atau tabel bila relevan). Hindari penggunaan sintaks LaTeX ($...$) untuk panah maupun teks biasa — gunakan karakter Unicode langsung (seperti →, ←, ↔, ≥, ≤, ≠, ×, ≈). Hindari penumpukan simbol tebal+miring berlebihan (seperti ***opsi***) pada soal dan pilihan ganda A–E.';
+
   const systemInstructionText = cleanContext
-    ? `${systemPrompt}\n\nKonteks Kelas/Materi:\n${cleanContext}`
-    : systemPrompt;
+    ? `${systemPrompt}\n\n${formattingGuide}\n\nKonteks Kelas/Materi:\n${cleanContext}`
+    : `${systemPrompt}\n\n${formattingGuide}`;
 
   const model = resolveGeminiModel();
   const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(apiKey)}`;

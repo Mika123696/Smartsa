@@ -2758,6 +2758,8 @@ describe('Backend API Dispatcher (api/index.js)', () => {
     expect(calledUrl).toContain('/models/gemini-4-hydrogen:generateContent');
     const parsedGeminiBody = JSON.parse(calledInit.body);
     expect(parsedGeminiBody.systemInstruction.parts[0].text).toContain('Basis Data Cloud');
+    expect(parsedGeminiBody.systemInstruction.parts[0].text).toContain('Unicode');
+    expect(parsedGeminiBody.systemInstruction.parts[0].text).toContain('→');
     expect(parsedGeminiBody.contents).toHaveLength(3);
     expect(parsedGeminiBody.contents[1]).toEqual({
       role: 'model',

@@ -115,6 +115,8 @@ vi.mock('html5-qrcode', () => {
 });
 
 import DeltaContentRenderer from '../src/components/common/DeltaContentRenderer';
+import AiMarkdownRenderer from '../src/components/common/AiMarkdownRenderer';
+import { normalizeAiMarkdownText } from '../src/utils/aiMarkdown';
 import AttendanceQrModal from '../src/components/common/AttendanceQrModal';
 import QrScannerPanel from '../src/components/common/QrScannerPanel';
 import App from '../src/App';
@@ -5456,5 +5458,167 @@ describe('Frontend Security & UI Components', () => {
     expect(await screen.findByRole('button', { name: /^SILABUS$/i })).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /^ANGGOTA$/i })).toBeNull();
     unmountStudent();
+  });
+
+  it('renders Gemini-style Markdown cleanly in AiMarkdownRenderer & AIAssistantView without raw syntax, LaTeX arrows, or unsafe links', async () => {
+    // 1. Direct pre-processor preserves fenced code while translating LaTeX symbols in prose
+    const preprocessed = normalizeAiMarkdownText(
+      'Alur: Input $\\rightarrow$ Proses ($n \\ge 5$).\n```latex\nInput $\\rightarrow$ Kept\n```'
+    );
+    expect(preprocessed).toContain('Input → Proses (n ≥ 5).');
+    expect(preprocessed).toContain('```latex\nInput $\\rightarrow$ Kept\n```');
+
+    const richMarkdown = [
+      '### Ringkasan Materi',
+      '',
+      'Pelajari **konsep inti** dengan *analogi cepat* dan alur Input $\\rightarrow$ Output ($x \\leq 10$, $a \\times b \\approx c$).',
+      '',
+      '- Poin satu $\\leftarrow$ mundur',
+      '- Poin dua $\\leftrightarrow$ dua arah ($y \\neq 0$)',
+      '',
+      '| Konsep | Simbol |',
+      '| :--- | :--- |',
+      '| Panah | $\\to$ |',
+      '',
+      '---',
+      '',
+      '> Kutipan penting akademik.',
+      '',
+      'Cek [Tautan Jahat](javascript:alert(1)) dan [Docs Resmi](https://smartsa.edu/docs).',
+      '',
+      '```js',
+      'const rawFormula = "$\\\\rightarrow$ tetap utuh";',
+      '```',
+    ].join('\n');
+
+    const writeTextSpy = vi.fn(async () => {});
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText: writeTextSpy },
+    });
+
+    const { container, unmount } = render(
+      <LanguageProvider>
+        <AiMarkdownRenderer content={richMarkdown} />
+      </LanguageProvider>
+    );
+
+    const h3 = screen.getByRole('heading', { level: 3, name: /Ringkasan Materi/i });
+    expect(h3).toBeInTheDocument();
+
+    const strongEl = container.querySelector('strong');
+    expect(strongEl).toHaveTextContent('konsep inti');
+    const emEl = container.querySelector('em');
+    expect(emEl).toHaveTextContent('analogi cepat');
+
+    expect(container.querySelectorAll('ul li')).toHaveLength(2);
+    expect(container.querySelector('table')).toBeInTheDocument();
+    expect(container.querySelector('hr')).toBeInTheDocument();
+    expect(container.querySelector('blockquote')).toHaveTextContent(/Kutipan penting akademik/i);
+
+    // Raw markdown delimiters and LaTeX dollar commands must NOT appear in rendered prose
+    const firstParagraph = container.querySelector('p');
+    expect(firstParagraph?.textContent).toContain('Input → Output');
+    expect(firstParagraph?.textContent).toContain('x ≤ 10');
+    expect(firstParagraph?.textContent).toContain('a × b ≈ c');
+    expect(firstParagraph?.textContent).not.toContain('**');
+    expect(firstParagraph?.textContent).not.toContain('$\\rightarrow$');
+    expect(h3.textContent).not.toContain('###');
+
+    // Neutralized javascript: link vs safe https: link
+    const blockedLinkText = screen.getByText('Tautan Jahat');
+    expect(blockedLinkText.closest('a')).toBeNull();
+    const safeDocLink = screen.getByText('Docs Resmi').closest('a');
+    expect(safeDocLink).toHaveAttribute('href', 'https://smartsa.edu/docs');
+    expect(safeDocLink).toHaveAttribute('rel', 'noopener noreferrer');
+
+    // Fenced code block renders with Copy button & preserves raw content
+    const copyCodeBtn = screen.getByRole('button', { name: /Salin blok kode/i });
+    await act(async () => {
+      fireEvent.click(copyCodeBtn);
+    });
+    expect(writeTextSpy).toHaveBeenCalledTimes(1);
+    unmount();
+
+    // 2. AIAssistantView integrates AiMarkdownRenderer for AI bubbles + Salin balasan AI button while leaving user messages plain text
+    const aiUser = {
+      uid: 'uid_ai_md',
+      email: 'mhs.md@kampus.ac.id',
+      displayName: 'Mahasiswa Markdown',
+      emailVerified: true,
+      getIdToken: vi.fn(async () => 'token-ai-md'),
+    };
+    mockAuthObj.currentUser = aiUser;
+    mockOnAuthStateChanged.mockImplementation((_auth, cb) => {
+      void cb(aiUser);
+      return () => {};
+    });
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url) => {
+        if (String(url).includes('/api/bootstrap')) {
+          return {
+            ok: true,
+            status: 200,
+            headers: { get: () => 'application/json' },
+            json: async () => ({
+              success: true,
+              isNewUser: false,
+              mfaEnabled: false,
+              mfaRequired: false,
+              profile: {
+                uid: 'uid_ai_md',
+                email: 'mhs.md@kampus.ac.id',
+                displayName: 'Mahasiswa Markdown',
+                role: 'student',
+              },
+            }),
+          };
+        }
+        if (String(url).includes('/api/ai')) {
+          return {
+            ok: true,
+            status: 200,
+            headers: { get: () => 'application/json' },
+            json: async () => ({
+              response_text: '### Jawaban Gemini\n**Database** $\\rightarrow$ Terstruktur.',
+              mode: 'gemini_live',
+              is_live: true,
+              model: 'gemini-4-hydrogen',
+              remaining_quota: 19,
+            }),
+          };
+        }
+        return { ok: false, status: 404, headers: { get: () => 'application/json' }, json: async () => ({}) };
+      })
+    );
+
+    render(
+      <LanguageProvider>
+        <AuthProvider>
+          <AIAssistantView />
+        </AuthProvider>
+      </LanguageProvider>
+    );
+
+    const promptField = screen.getByPlaceholderText(/Ketik pertanyaan atau permintaan/i);
+    fireEvent.change(promptField, { target: { value: 'Jelaskan **pertanyaan** $\\rightarrow$ user' } });
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /Kirim pesan/i }));
+    });
+
+    expect(await screen.findByRole('heading', { level: 3, name: /Jawaban Gemini/i })).toBeInTheDocument();
+    expect(screen.getByText(/→ Terstruktur/i)).toBeInTheDocument();
+    // User prompt remains plain text literally without markdown parsing
+    expect(screen.getByText('Jelaskan **pertanyaan** $\\rightarrow$ user')).toBeInTheDocument();
+    // Copy button available on AI bubbles
+    const copyAiButtons = screen.getAllByRole('button', { name: /Salin balasan AI/i });
+    expect(copyAiButtons.length).toBeGreaterThanOrEqual(2);
+    await act(async () => {
+      fireEvent.click(copyAiButtons[copyAiButtons.length - 1]);
+    });
+    expect(writeTextSpy).toHaveBeenLastCalledWith(
+      '### Jawaban Gemini\n**Database** $\\rightarrow$ Terstruktur.'
+    );
   });
 });
